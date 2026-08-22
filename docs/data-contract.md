@@ -45,9 +45,23 @@ cloth 包含坐标系、版本声明、组件、碰撞体、统计和结构检�
 
 角色在册与移动人格。**输入来自使用者自备的 master 表**（用 `--master <目录>` 指定）：本仓不内置、不分发任何 master 数据；没给这个输入时不产此文件，`extraction-report.json` 的 `derived` 里会留一条 `status: "skipped"` 说明，而不是静默省略。
 
-顶层为 `version`（当前为 1）、`semantics`、`units`、`characters`、`summary`。
+顶层为 `version`（当前为 1）、`semantics`、`units`、`player`、`characters`、`summary`。
 
 **成员集合由调用方决定**——从清单里的角色包名推出，本模块不猜谁属于这个包。
+
+`player` 是对象或 `null`。它来自使用者的 `clientConfigs.json`，每行格式为 `{id, type, value}`。`type` 为 `Int`、`Float`、`String` 或 `Bool`，`value` 按声明类型解析。本契约使用的玩家行是：
+
+| id | 语义 |
+|---:|---|
+| `77` | 普通场地移动倍率。 |
+| `78` | 采集场地移动倍率。 |
+| `95` | 冲刺速度倍率。 |
+
+三行齐全时，`player` 包含 `normalMoveScale`、`harvestMoveScale`、`dashSpeedRate`、`configRows` 和 `derived`。`configRows` 按字符串键（`"77"`、`"78"`、`"95"`）保留这三行的解析值。`derived.walkSpeedMetersPerSecond` 等于 `normalMoveScale`；`derived.dashSpeedMetersPerSecond` 等于 `normalMoveScale * dashSpeedRate`。
+
+玩家在普通场地使用普通倍率，在采集场地使用采集倍率。冲刺是明确的移动状态，会把当前倍率乘以 `dashSpeedRate`。摇杆未满推时保留输入幅值；会减速的相机状态再额外乘以 `0.5`。这些是玩家移动语义，不是角色移动人格数值。
+
+`clientConfigs.json` 缺失，或 `77`、`78`、`95` 任一行缺失时，`player` 为 `null`，不填默认值。缺口登记在 `summary.missing.playerConfig`：整表缺失时记录 `clientConfigs` 以及三个必需 id；只缺行时记录缺失 id。只要各自来源行存在，identity、locomotion、soloAction 仍照常输出。
 
 `characters[<unitId>]` 包含：
 

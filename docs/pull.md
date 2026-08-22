@@ -20,7 +20,9 @@ master 表是**使用者自备**的输入:角色在册、移动人格、对话�
 - `--master <目录>` —— 读本地目录下的 `<表名>.json`;
 - `--master-url [基址]` —— 按 `<基址>/<表名>.json` 逐表取;**不带值时用公开镜像的默认基址**(`raw.githubusercontent.com` 上的 `Team-Haruki/haruki-sekai-sc-master`)。配合 `--master-cache <目录>` 把取到的表落盘,第二次运行就读本地不再联网。
 
-两者都不给时**不联网、不读表**:`characters.json` 不产出,`extraction-report.json` 的 `derived` 里留一条 `status: "skipped"` 说明原因;对话脚本包会被记成 `unsupported`(因为无法判定哪些对话属于单个角色),而不是静默少产物。
+master 表是角色 registry、移动人格、对话归属和玩家移动配置的使用者输入。使用 `--master <目录>` 读取本地 `<表名>.json`，或使用 `--master-url [基址]` 获取 `<基址>/<表名>.json`；省略 URL 值时使用公开默认基址。`--master-cache <目录>` 把取到的表落盘，供后续本地读取。
+
+有 master 时，`characters.json` 从 `clientConfigs.json` 生成 `player`：`77`、`78`、`95` 分别为普通移动倍率、采集场地移动倍率和冲刺速度倍率。派生普通走路速度等于普通倍率，派生冲刺速度等于普通倍率乘冲刺倍率。整表或必需行缺失时，registry 仍成功写出，`player` 为 `null` 并登记 `summary.missing.playerConfig`；identity、locomotion、soloAction 与其它提取产物不受阻断。完全没有 master 来源时，registry artifact 跳过；对话包因无法判定归属而记为 `unsupported`。
 
 **清单里的每个条目自带 `downloadPath` 一段**(不同条目可能不同),因此 `--asset-base-url` 必须给到该段**之前**的前缀;把某个条目的 `downloadPath` 一起写进 base 会导致 404。
 

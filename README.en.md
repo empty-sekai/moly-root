@@ -42,6 +42,10 @@ You need Python ≥ 3.11 and a modern browser. Game data (the `AssetBundleInfoNe
    # open http://localhost:8000/examples/viewer/index.html?base=../../local-data
    ```
 
+Master tables are caller-supplied inputs. Use `--master <directory>` to read local `<table>.json` files, or `--master-url [base]` to fetch each table as `<base>/<table>.json`; omitting the URL value selects the public default base. `--master-cache <directory>` caches remote tables. Without master input, `characters.json` is skipped and reported, while model, motion, facial, performance, and overhead-item extraction can still run. Direct-talk extraction needs master to determine single-character membership.
+
+`characters.json` also reads `clientConfigs.json` when master is available. Rows `77`, `78`, and `95` describe normal movement scale, harvest-area movement scale, and dash speed rate. The registry exposes these parsed rows and derived walk/dash speeds. If `clientConfigs.json` or one required row is absent, only `player` is `null` and the gap is recorded in `summary.missing.playerConfig`; other registry sections are still emitted when their own tables are present.
+
 ## Commands
 
 Inspect the available command options with:

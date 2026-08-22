@@ -27,6 +27,8 @@ IDENTITY_FIELDS = ("gameCharacterId", "unit", "colorCode", "skinColorCode",
 LOCOMOTION_FIELDS = ("idleMotion", "walkMotion", "runMotion", "walkSpeed", "runSpeed",
                      "runOccurRate", "pauseMilliSeconds", "changeMotionMilliSeconds")
 MOTION_FIELDS = ("idleMotion", "walkMotion", "runMotion")
+PLAYER_CONFIG_IDS = (77, 78, 95)
+_CONFIG_UNSET = object()
 
 SEMANTICS = {
     "membership": ("the caller supplies the character set; this module never guesses "
@@ -55,16 +57,22 @@ def _derive(row):
     return out
 
 
-def build_registry(master, unit_ids, motion_library_index=None):
-    """Merge identity, locomotion and alone-action data for *unit_ids*.
+def build_registry(master, unit_ids, motion_library_index=None, client_configs=_CONFIG_UNSET):
+    """Merge character rows and optional player movement configuration.
 
-    *master* is a :class:`core.master.Master`.  *motion_library_index* is the
-    shared library's index document; when given, every idle / walk / run name is
-    checked against its clips and misses are reported.
+    *master* supplies identity, locomotion, and alone-action rows.  If
+    *client_configs* is omitted, it is read from the master; callers that need
+    local fault isolation may pass ``None`` when that table is unavailable.
     """
     identity = master.character_units()
     locomotion = master.locomotion()
     solo = master.solo_actions()
+    if client_configs is _CONFIG_UNSET:
+        from core.master import MissingTable
+        try:
+            client_configs = master.client_configs()
+        except MissingTable:
+            client_configs = None
     library = set((motion_library_index or {}).get("clips") or ())
 
     characters, missing, not_in_library = {}, {}, {}
@@ -92,12 +100,41 @@ def build_registry(master, unit_ids, motion_library_index=None):
                     not_in_library[str(unit)] = absent
         characters[str(unit)] = entry
 
+    player = None
+    player_gap = None
+    if client_configs is None:
+        player_gap = ["clientConfigs", *PLAYER_CONFIG_IDS]
+    else:
+        absent = [config_id for config_id in PLAYER_CONFIG_IDS
+                  if config_id not in client_configs]
+        if absent:
+            player_gap = absent
+        else:
+            normal = client_configs[77]
+            harvest = client_configs[78]
+            dash_rate = client_configs[95]
+            player = {
+                "normalMoveScale": normal,
+                "harvestMoveScale": harvest,
+                "dashSpeedRate": dash_rate,
+                "configRows": {str(config_id): client_configs[config_id]
+                               for config_id in PLAYER_CONFIG_IDS},
+                "derived": {
+                    "walkSpeedMetersPerSecond": normal,
+                    "dashSpeedMetersPerSecond": normal * dash_rate,
+                },
+            }
+    if player_gap is not None:
+        missing["playerConfig"] = player_gap
+
     return {
         "version": 1,
         "semantics": SEMANTICS,
         "units": {"seconds": ["pauseSeconds", "changeMotionSeconds"],
                   "metresPerSecond": ["walkSpeedMetersPerSecond",
-                                      "runSpeedMetersPerSecond"]},
+                                      "runSpeedMetersPerSecond",
+                                      "dashSpeedMetersPerSecond"]},
+        "player": player,
         "characters": characters,
         "summary": {
             "requested": len(set(unit_ids)),

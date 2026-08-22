@@ -157,7 +157,7 @@ def main(argv=None):
         from .assets.manifest import parse_manifest
         from .assets.router import route
         from .extract import _unit_id
-        from .master import Master
+        from .master import Master, MissingTable
         from chara.registry import build_registry
         names = parse_manifest(args.manifest)
         units = sorted({u for n in names if route(n) and route(n).domain == "character"
@@ -167,7 +167,12 @@ def main(argv=None):
             with open(args.motion_index, encoding="utf-8") as handle:
                 index = json.load(handle)
         source, cache = _master_source(args)
-        document = build_registry(Master(source, cache_dir=cache), units, index)
+        master = Master(source, cache_dir=cache)
+        try:
+            client_configs = master.client_configs()
+        except MissingTable:
+            client_configs = None
+        document = build_registry(master, units, index, client_configs=client_configs)
         with open(args.out, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(document, handle, ensure_ascii=False, indent=1)
             handle.write("\n")

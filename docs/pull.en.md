@@ -20,7 +20,9 @@ Master tables are the caller's **own** input: the character registry, locomotion
 - `--master <directory>` — read `<table>.json` from a local directory;
 - `--master-url [base]` — fetch each table as `<base>/<table>.json`; **with no value it uses the public mirror's default base** (`Team-Haruki/haruki-sekai-sc-master` on `raw.githubusercontent.com`). Add `--master-cache <directory>` to keep fetched tables on disk so a second run reads locally instead of over the network.
 
-With neither given, **nothing is fetched and nothing is read**: `characters.json` is not produced and `extraction-report.json` carries a `derived` entry with `status: "skipped"` explaining why; the talk scenario bundle is recorded as `unsupported` (its corpus cannot be scoped without master), rather than quietly producing one artifact fewer.
+Master tables are caller-supplied inputs for the character registry, locomotion personality, talk membership, and player movement configuration. Use `--master <directory>` for local `<table>.json` files, or `--master-url [base]` to fetch `<base>/<table>.json`; an omitted URL value uses the public default base. `--master-cache <directory>` stores fetched tables for later local reads.
+
+When master is available, `characters.json` includes `player` from `clientConfigs.json`: rows `77`, `78`, and `95` are normal movement scale, harvest-area movement scale, and dash speed rate. Its derived walk speed is the normal scale, and its derived dash speed is normal scale multiplied by dash rate. If the table or a required row is absent, the registry still succeeds with `player: null` and records `summary.missing.playerConfig`; identity, locomotion, alone-action, and other extraction artifacts are not blocked. Without any master source, the registry artifact is skipped and the talk bundle is unsupported because its membership cannot be scoped.
 
 **Each manifest entry carries its own `downloadPath` segment** (entries may differ), so `--asset-base-url` must be the prefix *before* that segment; folding one entry's `downloadPath` into the base yields 404s.
 

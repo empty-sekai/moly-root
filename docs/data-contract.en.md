@@ -45,9 +45,23 @@ The cloth object contains coordinate-system and version declarations, components
 
 The character registry and locomotion personality. **Its input is the caller's own master tables** (given with `--master <directory>`): this repository neither bundles nor distributes any master data. Without that input the file is not produced, and `extraction-report.json` carries a `derived` entry with `status: "skipped"` saying so rather than omitting it silently.
 
-The top level is `version` (currently 1), `semantics`, `units`, `characters`, and `summary`.
+The top level is `version` (currently 1), `semantics`, `units`, `player`, `characters`, and `summary`.
 
 **The caller decides the membership** — it is derived from the character bundle names in the manifest; this module never guesses who belongs in a pack.
+
+`player` is either an object or `null`. It comes from the caller's `clientConfigs.json`, whose rows have `{id, type, value}`. `type` is `Int`, `Float`, `String`, or `Bool`; `value` is parsed according to that type. The player rows used by this contract are:
+
+| id | Meaning |
+|---:|---|
+| `77` | Normal ground movement scale. |
+| `78` | Harvest-area movement scale. |
+| `95` | Dash speed rate. |
+
+When all three rows exist, `player` contains `normalMoveScale`, `harvestMoveScale`, `dashSpeedRate`, `configRows`, and `derived`. `configRows` preserves the parsed values for these rows under string keys (`"77"`, `"78"`, and `"95"`). `derived.walkSpeedMetersPerSecond` equals `normalMoveScale`; `derived.dashSpeedMetersPerSecond` equals `normalMoveScale * dashSpeedRate`.
+
+The player uses the normal scale on ordinary ground and the harvest scale in a harvest area. Dash is an explicit movement state and multiplies the active scale by `dashSpeedRate`. Joystick magnitude is preserved below full input, and a camera state that slows movement applies an additional `0.5` multiplier. These are movement semantics, not character locomotion values.
+
+If `clientConfigs.json` is absent, or any of rows `77`, `78`, and `95` is absent, `player` is `null` and no default is inserted. The gap is recorded as `summary.missing.playerConfig`: a missing table is reported as `clientConfigs` followed by all three required ids; otherwise the missing ids are listed. Identity, locomotion, and alone-action entries are still emitted when their own source rows exist.
 
 `characters[<unitId>]` holds:
 

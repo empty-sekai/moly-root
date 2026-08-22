@@ -43,11 +43,16 @@ def _registry_artifact(names, out, master, master_cache=None):
                     if route(n) and route(n).domain == "character"
                     for u in [_unit_id(n)] if u is not None})
     try:
-        from .master import Master
+        from .master import Master, MissingTable
         from chara.registry import build_registry
         index_path = out / "motion-library.index.json"
         index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else None
-        document = build_registry(Master(master, cache_dir=master_cache), units, index)
+        source = Master(master, cache_dir=master_cache)
+        try:
+            client_configs = source.client_configs()
+        except MissingTable:
+            client_configs = None
+        document = build_registry(source, units, index, client_configs=client_configs)
         path = out / "characters.json"
         path.write_text(json.dumps(document, ensure_ascii=False, indent=1) + "\n",
                         encoding="utf-8", newline="\n")

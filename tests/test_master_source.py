@@ -18,6 +18,14 @@ from core import master as master_mod
 from core.master import DEFAULT_MASTER_URL, Master, MissingTable
 
 ROWS = [{"id": 1, "gameCharacterId": 1, "unit": "light_sound"}]
+CLIENT_CONFIG_ROWS = [
+    {"id": 77, "type": "Float", "value": "2.5"},
+    {"id": 78, "type": "Float", "value": "2.5"},
+    {"id": 95, "type": "Float", "value": "1.75"},
+    {"id": 101, "type": "Int", "value": "12"},
+    {"id": 102, "type": "String", "value": "hello"},
+    {"id": 103, "type": "Bool", "value": "true"},
+]
 
 
 def _fake_urlopen(recorder, payload=None, fail=False):
@@ -41,6 +49,14 @@ def _fake_urlopen(recorder, payload=None, fail=False):
         return _Response(json.dumps(payload if payload is not None else ROWS).encode("utf-8"))
 
     return urlopen
+
+
+def test_client_configs_parse_declared_value_types(tmp_path):
+    with io.open(tmp_path / "clientConfigs.json", "w", encoding="utf-8", newline="\n") as h:
+        json.dump(CLIENT_CONFIG_ROWS, h)
+    assert Master(str(tmp_path)).client_configs() == {
+        77: 2.5, 78: 2.5, 95: 1.75, 101: 12, 102: "hello", 103: True,
+    }
 
 
 def test_a_local_directory_is_read_as_files(tmp_path):

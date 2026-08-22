@@ -96,10 +96,24 @@ class Master:
         return {row["gameCharacterUnitId"]: row
                 for row in self.table("mysekaiCharacterTalkMotions")}
 
-    def solo_actions(self):
-        """{unitId: alone-action script name}."""
-        return {row["gameCharacterUnitId"]: row["lua"]
-                for row in self.table("mysekaiCharacterTalkSoloActions")}
+    def client_configs(self):
+        """{id: value} with each clientConfigs value parsed by its declared type."""
+        parsed = {}
+        for row in self.table("clientConfigs"):
+            value = row.get("value")
+            kind = row.get("type")
+            if kind == "Int":
+                value = int(value)
+            elif kind == "Float":
+                value = float(value)
+            elif kind == "Bool":
+                value = str(value).strip().lower() in {"1", "true", "yes"}
+            elif kind == "String":
+                value = str(value)
+            else:
+                raise ValueError(f"unsupported client config type: {kind}")
+            parsed[row["id"]] = value
+        return parsed
 
     # -- talk membership ---------------------------------------------------
 

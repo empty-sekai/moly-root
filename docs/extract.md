@@ -12,7 +12,9 @@ moly --unity-version 2022.3.62f3 extract --bundles path/to/decrypted
 
 省略 `--out` 时输出写入 `local-data/`——这是工具的默认输出目录，仓库的 `.gitignore` 已忽略它，提取产物不会进入版本控制。
 
-`--manifest` 可选：省略时选择 `--bundles` 目录中所有可识别的角色资产包成员（角色模型、共享动作库、表情表、表演编排、头顶件与 shader 查找源），报告的 `discovery` 项记录扫描、入选与忽略的计数。提供清单时按清单提取。清单可以是 UTF-8 文本，每行一个逻辑 bundle 名称；也可以是 JSON 数组或包含 `bundles` 数组的对象。斜杠分隔的名称会规范化为双下划线形式。重复项会被删除，同时保留首次出现的顺序。
+`--master <目录>` 从调用方提供的 `<表名>.json` 读取 master 表。`--master-url [基址]` 从 `<基址>/<表名>.json` 获取同样的表；省略值时使用公开默认基址。`--master-cache <目录>` 缓存获取的表。这些参数在 `pull` 与 `registry` 中也可用。
+
+提供 master 表时，派生的 `characters.json` 会合并 identity、locomotion、soloAction 与玩家移动配置。player 读取 `clientConfigs.json` 的 `77`、`78`、`95` 行，给出解析后的行和普通走路、冲刺速度。如果整表或其中一行缺失，`characters.json` 仍会写出，`player` 为 `null`，并登记 `summary.missing.playerConfig`；identity、locomotion、soloAction 与其它无关提取产物互不影响。其它 master 表缺失仍会使 registry artifact 失败，并在报告中说明。
 
 路由器当前识别角色模型 bundle、共享角色动作 bundle、角色设置 bundle、表演编排 bundle、头顶件（emoticon）bundle，以及对话 bundle（需要用户提供 master 表）。每个请求项都会生成包含 `status`、`artifacts`、`counts` 以及错误信息的报告项。缺失 bundle 会标记为 `failed` 并使命令以非零状态退出。未注册提取器的域会保留为 `unsupported`，为未来的资源域扩展保留报告入口。
 

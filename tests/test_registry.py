@@ -15,10 +15,11 @@ from chara.registry import DERIVED, build_registry
 
 
 class _Master:
-    """Stand-in for core.master.Master with only the three tables in play."""
+    """Stand-in for core.master.Master with the tables in play."""
 
-    def __init__(self, identity, locomotion, solo):
-        self._identity, self._locomotion, self._solo = identity, locomotion, solo
+    def __init__(self, identity, locomotion, solo, client_configs=None):
+        self._identity, self._locomotion = identity, locomotion
+        self._solo, self._client_configs = solo, client_configs
 
     def character_units(self):
         return self._identity
@@ -28,6 +29,12 @@ class _Master:
 
     def solo_actions(self):
         return self._solo
+
+    def client_configs(self):
+        if self._client_configs is None:
+            from core.master import MissingTable
+            raise MissingTable("master table not found: clientConfigs")
+        return self._client_configs
 
 
 LOCO_ROW = {"idleMotion": "mov_idle", "walkMotion": "mov_walk", "runMotion": "mov_run",
@@ -41,7 +48,37 @@ def _master(**over):
                      "skinShadowColorCode2": "#e982a5"}}
     return _Master(over.get("identity", identity),
                    over.get("locomotion", {12: dict(LOCO_ROW)}),
-                   over.get("solo", {12: "character_alone_action_12"}))
+                   over.get("solo", {12: "character_alone_action_12"}),
+                   over.get("client_configs", {77: 2.5, 78: 2.5, 95: 1.75}))
+
+
+def test_player_exports_declared_configs_and_rows():
+    doc = build_registry(_master(), [12])
+    assert doc["player"]["normalMoveScale"] == 2.5
+    assert doc["player"]["harvestMoveScale"] == 2.5
+    assert doc["player"]["dashSpeedRate"] == 1.75
+    assert doc["player"]["configRows"] == {"77": 2.5, "78": 2.5, "95": 1.75}
+
+
+def test_player_derived_dash_speed_multiplies_normal_speed():
+    doc = build_registry(_master(client_configs={77: 3.0, 78: 2.0, 95: 1.75}), [12])
+    assert doc["player"]["derived"] == {
+        "walkSpeedMetersPerSecond": 3.0,
+        "dashSpeedMetersPerSecond": 5.25,
+    }
+
+
+def test_missing_client_configs_keeps_registry_and_reports_player_gap():
+    doc = build_registry(_master(client_configs=None), [12])
+    assert doc["player"] is None
+    assert doc["characters"]["12"]["identity"] is not None
+    assert doc["summary"]["missing"]["playerConfig"] == ["clientConfigs", 77, 78, 95]
+
+
+def test_missing_player_config_id_keeps_player_null_and_reports_id():
+    doc = build_registry(_master(client_configs={77: 2.5, 78: 2.5}), [12])
+    assert doc["player"] is None
+    assert doc["summary"]["missing"]["playerConfig"] == [95]
 
 
 def test_stored_values_keep_their_runtime_counterparts():
@@ -52,7 +89,8 @@ def test_stored_values_keep_their_runtime_counterparts():
     assert loco["pauseMilliSeconds"] == 15000 and loco["pauseSeconds"] == 15.0
     assert loco["changeMotionMilliSeconds"] == 500 and loco["changeMotionSeconds"] == 0.5
     assert doc["units"]["metresPerSecond"] == ["walkSpeedMetersPerSecond",
-                                              "runSpeedMetersPerSecond"]
+                                              "runSpeedMetersPerSecond",
+                                              "dashSpeedMetersPerSecond"]
 
 
 def test_every_stored_field_has_a_declared_runtime_field():

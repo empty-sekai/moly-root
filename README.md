@@ -42,9 +42,13 @@ python -m pip install .
    # 浏览器打开 http://localhost:8000/examples/viewer/index.html?base=../../local-data
    ```
 
+master 表由调用方提供。使用 `--master <目录>` 读取本地 `<表名>.json`，或使用 `--master-url [基址]` 按 `<基址>/<表名>.json` 获取；省略 URL 值时使用公开默认基址。`--master-cache <目录>` 缓存远程表。没有 master 输入时会跳过并报告 `characters.json`，但角色模型、动作、表情、表演和头顶件提取仍可运行。直接对话提取需要 master 才能判定单角色归属。
+
+`characters.json` 在有 master 时还读取 `clientConfigs.json`。`77`、`78`、`95` 分别表示普通移动倍率、采集场地移动倍率和冲刺速度倍率。registry 会输出这些解析行及派生的普通走路、冲刺速度。若 `clientConfigs.json` 或任一必需行缺失，只有 `player` 为 `null` 并在 `summary.missing.playerConfig` 登记缺口；只要各自表存在，registry 的其它部分仍会输出。
+
 ## 命令
 
-所有资源路径和清单文件都由使用者提供。命令的参数帮助可用以下方式查看：
+查看可用命令参数：
 
 ```sh
 moly --help
