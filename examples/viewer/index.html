@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Character viewer</title>
+<link rel="stylesheet" href="./ui.css?v=4">
+<!-- 结构说明:左栏=角色网格 + 表演场景列表(主入口) + 播放控制 + 折叠的动作库;
+     中间=画面 + 状态条(状态条走文档流,画面上零浮层);右栏=旋钮(短、固定)。 -->
+<div id="shell">
+
+  <aside class="rail" id="railL">
+    <div id="brand">
+      <h1>Character viewer</h1>
+      <div class="tag">toon 着色 · 布料物理 · 段衔接 · 头顶件</div>
+      <details class="note">
+        <summary>规格</summary>
+        <div class="body">toon 着色 · 眉眼透发(stencil)· 眨眼口型 · 布料实时物理 · S→L→E 段衔接 ·
+          头顶气泡(emoticon)<br>规格:公开数据契约与运行时示例</div>
+      </details>
+    </div>
+
+    <section class="group" id="gUnits">
+      <h2>角色<span class="count" id="unitCount"></span></h2>
+      <!-- 编号网格:31 个角色一屏全见,单击切换,当前项高亮 -->
+      <div class="list ugrid" id="list" aria-label="角色列表"><div class="empty">载入中…</div></div>
+    </section>
+
+    <section class="group" id="gPerf">
+      <h2>表演场景<span class="count" id="scnCount"></span></h2>
+      <div class="controls">
+        <button id="bAutoPerf" class="btn toggle on" type="button"
+          title="空闲时按策略自动演出;手动点播的场景播放完毕后接续">自动演出</button>
+        <select id="selPerfMode" class="field"
+          title="自动演出的选取策略:按原始策略=源数据的时间门与概率(多数时间待机);轮播=依次播放每个场景">
+          <option value="faithful">自动:按原始策略</option>
+          <option value="cycle">自动:轮播</option>
+        </select>
+      </div>
+      <div class="hintline dim" id="perfHint">&nbsp;</div>
+      <div class="filter mt">
+        <input id="scnFilter" class="field" type="search" placeholder="筛场景" aria-label="筛选表演场景">
+      </div>
+      <!-- 一行一个表演场景:点击=完整播放一遍(动作×表情×气泡),播完即停 -->
+      <div class="list" id="scenarios" aria-label="表演场景列表"><div class="empty">载入中…</div></div>
+    </section>
+
+    <section class="group" id="gCtl">
+      <h2>播放控制</h2>
+      <div class="controls">
+        <button id="bPlay" class="btn toggle on" type="button">暂停</button>
+        <button id="bStop" class="btn" type="button" title="L 段 crossFade 0.5s 进 E 段">停止→E</button>
+        <button id="bCloth" class="btn toggle on" type="button">物理</button>
+        <button id="bClothReset" class="btn" type="button">重置物理</button>
+      </div>
+      <div class="controls">
+        <label class="slider"><span class="k">速度</span>
+          <input id="rSpeed" type="range" min="0" max="200" value="100" aria-label="播放速度">
+          <output id="oSpeed">1.00×</output>
+        </label>
+      </div>
+    </section>
+
+  </aside>
+
+  <main id="stage">
+    <div id="view"></div>
+    <div id="hud">
+      <div id="status">载入中…</div>
+      <div class="hint">拖拽旋转 · 滚轮缩放</div>
+      <span id="phase" hidden>—</span>
+    </div>
+  </main>
+
+  <aside class="rail" id="railR">
+    <section class="group">
+      <h2>外观与光照</h2>
+      <div class="controls">
+        <button id="bNight" class="btn toggle" type="button">夜间</button>
+        <button id="bWire" class="btn toggle" type="button">线框</button>
+      </div>
+      <div class="controls">
+        <select id="selDebug" class="field" title="着色诊断(定位色差属于哪一层)">
+          <option value="0">着色:正常</option>
+          <option value="1">诊断:无阴影</option>
+          <option value="2">诊断:无球面影</option>
+          <option value="3">诊断:分支可视化</option>
+        </select>
+      </div>
+      <div class="stack mt">
+        <label class="slider"><span class="k">方位</span>
+          <input id="rLightXZ" type="range" min="0" max="360" value="48" title="方位角(默认 48°)" aria-label="光照方位角">
+          <output id="oLightXZ">48°</output>
+        </label>
+        <label class="slider"><span class="k">仰角</span>
+          <input id="rLightY" type="range" min="-10" max="89" value="30" title="仰角(默认 30°)" aria-label="光照仰角">
+          <output id="oLightY">30°</output>
+        </label>
+        <div class="controls">
+          <button id="bLightReset" class="btn" type="button" title="恢复默认 48°/30°">光复位</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="group">
+      <h2>表情与头顶件</h2>
+      <div class="controls">
+        <button id="bBlink" class="btn toggle on" type="button">眨眼</button>
+        <button id="bSpeak" class="btn toggle" type="button">说话</button>
+      </div>
+      <!-- 眼口标签(表情表的行):选择即应用,眨眼/说话机取所选行的开合格;检查工具,选择时停用自动演出 -->
+      <div class="controls">
+        <select id="selEye" class="field" title="眼型标签(表情表行);选择即应用并停用自动演出,眨眼取所选行的开/闭格"></select>
+        <select id="selMouth" class="field" title="口型标签(表情表行);选择即应用并停用自动演出,说话取所选行的开/闭格"></select>
+      </div>
+      <div class="stack mt">
+        <!-- 53 个头顶件:输入即定位(不删 option,因为外部探针按 selEmoticon.value 直接指名) -->
+        <input id="emoFilter" class="field" type="search" placeholder="定位头顶件(↵ 下一个)" aria-label="定位头顶件">
+        <div id="emoMatch" class="hintline dim">&nbsp;</div>
+        <select id="selEmoticon" class="field"
+          title="fx_emote_* 条目(sprite=图集动画 view,particle=粒子 view)"></select>
+        <div class="controls">
+          <button id="bEmoticonPlay" class="btn" type="button"
+            title="手动挂选中条目(不自动收,点「收件」走 end 段收场)">播件</button>
+          <button id="bEmoticonHide" class="btn" type="button"
+            title="收场:loopEnd→end 段,再等 disposeDelaySeconds 回收">收件</button>
+          <button id="bEmoticonAuto" class="btn toggle on" type="button"
+            title="编排里的 emoticon/hideEmoticon 步驱动头顶件(showSeconds 到点自动收);关掉只留手动">自动</button>
+        </div>
+      </div>
+    </section>
+
+    <details class="group" id="gMotion">
+      <summary>动作库<span class="count" id="famCount"></span><span class="sub">仅动作,无表情/气泡配对</span></summary>
+      <div class="hintline dim">点播供检查,期间自动演出停用;点行名=播全族(S→L),点小方块=只播那一段</div>
+      <div class="filter mt">
+        <input id="famFilter" class="field" type="search" placeholder="筛动作族" aria-label="筛选动作族">
+      </div>
+      <div class="list" id="clips" aria-label="动作族列表"><div class="empty">载入中…</div></div>
+    </details>
+
+    <section class="group">
+      <details id="selfcheckPanel">
+        <summary>诊断自检<span id="selfcheckSummary" class="dim">…</span></summary>
+        <div id="selfcheck"></div>
+        <div class="controls foot">
+          <button id="bCheckMotion" class="btn" type="button"
+            title="播一遍带 S/L 的探针动作族,让「动画推进」「段衔接」两项拿到可测的动作;默认不自动播,所以这两项要点了才有结论">复测动效</button>
+        </div>
+      </details>
+    </section>
+  </aside>
+
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "./three.module.min.js" } }
+</script>
+<script type="module" src="./viewer.js"></script>

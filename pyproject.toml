@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moly-root"
+version = "0.1.0"
+description = "Character extraction and recompilation toolkit: Unity humanoid assets to glTF 2.0, without the Unity engine"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "UnityPy>=1.20",
+]
+
+[project.scripts]
+moly = "core.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
