@@ -109,3 +109,33 @@ def test_no_request_is_made_for_a_local_source(tmp_path, monkeypatch):
     with io.open(tmp_path / "t.json", "w", encoding="utf-8", newline="\n") as h:
         json.dump(ROWS, h)
     assert Master(str(tmp_path)).table("t") == ROWS
+
+
+def test_registry_reads_real_master_accessors(tmp_path):
+    """build_registry must run against the real Master class, not only stubs.
+
+    Regression: an edit once deleted Master.solo_actions while adding
+    client_configs; stub-based registry tests stayed green and characters.json
+    broke for every caller that supplied real master tables.
+    """
+    tables = {
+        "gameCharacterUnits.json": [{"id": 1, "gameCharacterId": 1, "unit": "light_sound",
+                                     "colorCode": "#fff", "skinColorCode": "#fee",
+                                     "skinShadowColorCode1": "#edd", "skinShadowColorCode2": "#dcc"}],
+        "mysekaiCharacterTalkMotions.json": [{"gameCharacterUnitId": 1, "idleMotion": "i",
+                                              "walkMotion": "w", "runMotion": "r",
+                                              "walkSpeed": 400, "runSpeed": 1000,
+                                              "runOccurRate": 50, "pauseMilliSeconds": 15000,
+                                              "changeMotionMilliSeconds": 500}],
+        "mysekaiCharacterTalkSoloActions.json": [{"gameCharacterUnitId": 1, "lua": "solo_01"}],
+        "clientConfigs.json": CLIENT_CONFIG_ROWS,
+    }
+    for name, rows in tables.items():
+        with io.open(tmp_path / name, "w", encoding="utf-8", newline="\n") as h:
+            json.dump(rows, h)
+    from chara.registry import build_registry
+    doc = build_registry(Master(str(tmp_path)), [1])
+    entry = doc["characters"]["1"]
+    assert entry["soloAction"] == "solo_01"
+    assert entry["locomotion"]["walkSpeedMetersPerSecond"] == 0.4
+    assert doc["player"]["derived"]["dashSpeedMetersPerSecond"] == 4.375

@@ -96,6 +96,11 @@ class Master:
         return {row["gameCharacterUnitId"]: row
                 for row in self.table("mysekaiCharacterTalkMotions")}
 
+    def solo_actions(self):
+        """{unitId: alone-action script name}."""
+        return {row["gameCharacterUnitId"]: row["lua"]
+                for row in self.table("mysekaiCharacterTalkSoloActions")}
+
     def client_configs(self):
         """{id: value} with each clientConfigs value parsed by its declared type."""
         parsed = {}
