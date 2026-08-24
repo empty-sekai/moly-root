@@ -5,6 +5,22 @@
 // optional modules are reported and fall back to the documented neutral behavior.
 
 import * as THREE from './three.module.min.js';
+import { GLTFLoader } from './GLTFLoader.js';
+import { makeHooks, registeredModules } from './fx/hooks.js';
+import { makeDrawable, drawableModes, drawableRejection } from './fx/drawable.js';
+// 绘制件的实现文件在这里注册。没被注册的绘制模式一律整条不画并计数。
+import * as drawMesh from './fx/draw-mesh.js';
+import * as trails from './fx/trails.js';
+import * as noise from './fx/noise.js';
+import { registerDrawable } from './fx/drawable.js';
+import { registerFxModule } from './fx/hooks.js';
+registerDrawable(drawMesh);
+// Noise is pre-simulation slot 6, before InheritVelocity, Force, and ClampVelocity.
+registerFxModule(noise, 200);
+// Trail runs after Lights and before Size in the post-simulation block (canon
+// particle-module-order). The numeric order just needs to be inside that block;
+// the per-particle hooks that read position run after integration regardless.
+registerFxModule(trails, 420);
 
 export const EMO_BUILD = 'example';       // Public example build identifier
 console.info('[emoticon] build', 'example');
@@ -48,6 +64,11 @@ const BLEND_FACTOR = {
   8: THREE.OneMinusDstAlphaFactor, 9: THREE.SrcAlphaSaturateFactor,
   10: THREE.OneMinusSrcAlphaFactor,
 };
+// BlendOp values: 0=Add, 1=Subtract, 2=ReverseSubtract, 3=Min, 4=Max.
+const BLEND_EQUATION = {
+  0: THREE.AddEquation, 1: THREE.SubtractEquation,
+  2: THREE.ReverseSubtractEquation, 3: THREE.MinEquation, 4: THREE.MaxEquation,
+};
 // Cull-mode values: 0=Off, 1=Front, 2=Back.
 const CULL_SIDE = { 0: THREE.DoubleSide, 1: THREE.BackSide, 2: THREE.FrontSide };
 const Z_OFFSET_EPSILON = 0.004;          // 两族着色器用的是同一个阈值常量
@@ -58,26 +79,60 @@ const Z_OFFSET_EPSILON = 0.004;          // 两族着色器用的是同一个阈
 const SHADER_LAWS = {
   'Mysekai/Effect/UberUnlit': {
     blend: (f) => [num(f._BlendSrc, 5), num(f._BlendDst, 10)],
+    blendOp: () => 0,
     cull: (f) => num(f._Cull, 2),
     zWrite: (f) => num(f._ZWrite, 0),
+    zTest: (f) => num(f._ZTest, 4),
     zOffsetActive: (z) => Math.abs(z) > Z_OFFSET_EPSILON,
   },
   'Mysekai/Emoticon/Sprite': {
     blend: () => [1, 10],                // pass 里写死(预乘 alpha 语义)
+    blendOp: () => 0,
     cull: () => 0,                       // pass 里写死 Off
     zWrite: (f) => num(f._ZWrite, 1),
+    zTest: (f) => num(f._ZTest, 4),
     zOffsetActive: (z) => z > Z_OFFSET_EPSILON,
     // 游戏片元自己做 `SV_Target0.xyz = a * rgb` 的预乘;贴图是直通 alpha,少了这一乘,
     // 透明区的垃圾 RGB 会按 One 因子全部加出来 —— three.js 的 premultipliedAlpha
     // 在片元里做的正是同一行。
     premultiply: true,
   },
+  // 内置 RP 的粒子着色器(默认粒子材质用它)。绑定与 UberUnlit **完全相反**,
+  // 跨族外推必错:
+  //   * 混合读 `_SrcBlend`/`_DstBlend`/`_BlendOp` —— 这一族的 30 项属性表里
+  //     **没有** `_BlendSrc`/`_BlendDst`,照 UberUnlit 那套查一个都查不到;
+  //   * 深度测试**写死** LEqual,不由 `_ZTest` 驱动(`_ZWrite` 仍是材质的);
+  //   * 没有 `_ZOffset` 这一路,深度不做偏移;
+  //   * 颜色掩码写死 14(只写 RGB),队列 3000;
+  //   * 可达变体的片元只有 `tex2D(_MainTex, uv) * _Color * vertexColor`:
+  //     没有预乘、没有软粒子、没有相机淡出、没有 alpha 裁剪。
+  'Particles/Standard Unlit': {
+    blend: (f) => [num(f._SrcBlend, 5), num(f._DstBlend, 10)],
+    blendOp: (f) => num(f._BlendOp, 0),
+    cull: (f) => num(f._Cull, 2),
+    zWrite: (f) => num(f._ZWrite, 0),
+    zTest: () => 4,                      // pass 里写死 LEqual
+    zOffsetActive: () => false,          // 这一族没有深度偏移
+    premultiply: false,
+  },
 };
 // 不认识的着色器:不猜。给一份中性状态并且**不加任何深度偏移**。
 const NEUTRAL_LAW = {
-  blend: () => [5, 10], cull: () => 2, zWrite: () => 0, zOffsetActive: () => false,
+  blend: () => [5, 10], blendOp: () => 0, cull: () => 2, zWrite: () => 0,
+  zTest: (f) => num(f._ZTest, 4), zOffsetActive: () => false,
   premultiply: false,
 };
+
+// 基础贴图的属性名也由着色器族决定,不由属性名的常见程度决定。实测每族只有一个基础贴图
+// 属性、且两族不重名,所以这张表是**查得到的**,不是猜的:
+//   Mysekai/Effect/UberUnlit → `_BaseMap`(数组形 `_BaseMap2DArray` 本 demo 解不了)
+//   Particles/Standard Unlit → `_MainTex`
+// 不在表里的着色器仍按 `_BaseMap` 试探(与本文件此前的行为一致)。
+const BASE_MAP_KEY = {
+  'Mysekai/Effect/UberUnlit': '_BaseMap',
+  'Particles/Standard Unlit': '_MainTex',
+};
+const DEFAULT_BASE_MAP_KEY = '_BaseMap';
 
 /** 从材质读出渲染状态。材质缺失、跨包、或着色器不认识时退化成中性状态。 */
 function renderState(material) {
@@ -93,13 +148,15 @@ function renderState(material) {
     }
   }
   const [su, du] = law.blend(f);
-  // CompareFunction: 0=Disabled 8=Always 都等于不做深度测试。两族都由 `_ZTest` 驱动。
-  const zTest = num(f._ZTest, 4);
+  // CompareFunction: 0=Disabled 8=Always 都等于不做深度测试。哪个字段驱动它由**族**决定:
+  // UberUnlit / sprite 读 `_ZTest`,Particles/Standard Unlit 在 pass 里写死 LEqual。
+  const zTest = law.zTest(f);
   const zOffset = num(f._ZOffset, 0);
   return {
     blending: THREE.CustomBlending,
     blendSrc: BLEND_FACTOR[su] ?? THREE.SrcAlphaFactor,
     blendDst: BLEND_FACTOR[du] ?? THREE.OneMinusSrcAlphaFactor,
+    blendEquation: BLEND_EQUATION[law.blendOp(f)] ?? THREE.AddEquation,
     depthWrite: law.zWrite(f) > 0.5,
     depthTest: zTest !== 0 && zTest !== 8,
     side: CULL_SIDE[law.cull(f)] ?? THREE.FrontSide,
@@ -239,6 +296,44 @@ export function sampleColor(spec, t = 0, r = 0.5) {
 
 const DEG = Math.PI / 180;
 
+/**
+ * 已实现的发射形状,与下面 `emitFrom` 的 switch 一一对应(改一处就要改另一处)。
+ * 导出它是为了让消费方在**装载时**数出未建模形状的发射器数,而不是等运行时的控制台警告。
+ */
+export const EMIT_SHAPES = new Set(['Sphere', 'Circle', 'Cone', 'SingleSidedEdge', 'BoxEdge',
+  'Hemisphere', 'ConeVolume', 'Donut']);
+
+/**
+ * 形状模块的三态。**「没有形状模块」与「形状没建模」是两件不同的事**:
+ *
+ *   'none'          —— 数据里没有 `shape`(子发射器与小件多是这样)。运行时的语义就是从发射
+ *                      节点原点发射一个点,所以点发射在这里是**正确行为**,不是退化,也不喊。
+ *   'ok'            —— 形状在 EMIT_SHAPES 里,按 `emitFrom` 的公式采样。
+ *   'unimplemented' —— 数据声明了形状,但本引擎没有它的发射公式。这时**整个发射器不发射**:
+ *                      退化成点发射会把本该铺开几十米的粒子全堆在节点原点上 —— 实测一份雨天
+ *                      现象的天空效果里,Hemisphere 半径 25 的发射器 28 个粒子的水平散布是
+ *                      1e-16 米(全在世界原点,也就是角色脚下),画面上看就是「粒子堆在角色身上」。
+ *                      宁可不画,也不要画在错的地方;计数由 `Emitter.suppressed` 逐个报出来。
+ */
+export function shapeSupport(shape) {
+  const type = shape && shape.type;
+  if (!type) return 'none';
+  return EMIT_SHAPES.has(type) ? 'ok' : 'unimplemented';
+}
+
+/**
+ * 故障注入开关(`?sabotage=` 专用,默认全假)。每一项都**原样还原一种已知错法**,
+ * 用来让位置判据在错法下必须转红 —— 判据自己也要能被证伪。
+ *   pointEmit          —— 未建模形状退化成点发射(散布判据必须红)
+ *   dropNodeTransform  —— 出生点不过发射节点的世界变换(高度判据必须红)
+ */
+export const EMIT_FAULT = { pointEmit: false, dropNodeTransform: false };
+
+// 资产里可能出现的可选模块名(用来把「声明了」与「跑了」分开数)。
+export const OPTIONAL_MODULES = ['emission', 'shape', 'sizeOverLifetime', 'colorOverLifetime',
+  'velocityOverLifetime', 'rotationOverLifetime', 'limitVelocity', 'forceOverLifetime',
+  'noise', 'collision', 'trails', 'subEmitters', 'textureSheet', 'customData'];
+
 /** Annulus sampling for radius-based shapes: thickness 1 fills the whole
  *  region, 0 emits from the outer rim only; power 2 = disc, 3 = sphere. */
 function sampleShapeRadius(radius, thickness, power) {
@@ -253,8 +348,15 @@ function sampleShapeRadius(radius, thickness, power) {
  * Scale applies before rotation; Euler composition order is Z-X-Y
  * ('YXZ' in three.js terms). See docs/presentation.md for the per-shape
  * conventions.
+ *
+ * 返回 null = 这个形状没有发射公式(见 `shapeSupport`),调用方**不要**代它编一个点。
  */
 export function emitFrom(shape) {
+  if (shapeSupport(shape) === 'unimplemented' && !EMIT_FAULT.pointEmit) {
+    warnOnce(`shape:${shape.type}`,
+      `发射形状 ${shape.type} 没有发射公式,该发射器停发(不退化成点发射:那会把粒子堆在节点原点)`);
+    return null;
+  }
   const pos = new THREE.Vector3(), dir = new THREE.Vector3(0, 0, 1);
   const radius = num(shape?.radius), arc = num(shape?.arc, 360) * DEG;
   switch (shape?.type) {
@@ -284,6 +386,58 @@ export function emitFrom(shape) {
       dir.set(Math.cos(a) * Math.sin(spread), Math.sin(a) * Math.sin(spread), Math.cos(spread));
       break;
     }
+    case 'Hemisphere': {
+      // Sphere with z restricted to the upper half: z = u, not 2u - 1. Everything
+      // else — the polar ring, the cube-root radial, the direction being the
+      // position radial — is the Sphere code unchanged.
+      const z = Math.random();
+      const a = Math.random() * (arc || Math.PI * 2);
+      const ring = Math.sqrt(Math.max(0, 1 - z * z));
+      dir.set(Math.cos(a) * ring, Math.sin(a) * ring, z);
+      pos.copy(dir).multiplyScalar(sampleShapeRadius(radius, shape.radiusThickness, 3));
+      break;
+    }
+    case 'ConeVolume': {
+      // A filled base disc pushed along a **per-particle tilted** axis. Two things
+      // separate it from Cone:
+      //   * the radial fraction is area-uniform (sqrt), with **no** cube root, and
+      //     it is the same `rho` that scales the direction's lateral part — an
+      //     axis-born particle therefore flies straight up whatever the angle is.
+      //     Reusing the Cone direction here makes every particle fly at the full
+      //     cone angle.
+      //   * `length` is travelled **along that tilted axis**, so it is a distance,
+      //     not a height: pos.z < length whenever angle > 0.
+      const A = num(shape.angle) * DEG;
+      const k = Math.min(1, Math.max(0, 1 - num(shape.radiusThickness)));
+      const rho = Math.sqrt(k + (1 - k) * Math.random());
+      const a = Math.random() * (arc || Math.PI * 2);
+      const h = Math.random() * num(shape.length);
+      // The direction is stored un-normalized and normalized once for the push;
+      // both consumers see the same vector, so normalize it here and keep going.
+      dir.set(Math.sin(A) * rho * Math.cos(a), Math.sin(A) * rho * Math.sin(a), Math.cos(A));
+      const n = dir.lengthSq() > 1e-30
+        ? dir.clone().normalize() : new THREE.Vector3(0, 0, 1);
+      pos.set(radius * rho * Math.cos(a) + n.x * h,
+              radius * rho * Math.sin(a) + n.y * h,
+              n.z * h);
+      break;
+    }
+    case 'Donut': {
+      // Torus: `radius` is the major radius, `donutRadius` the tube radius. The
+      // tube radial fraction is a **plain linear** lerp — not sqrt, not cube root.
+      // The direction is the outward tube-surface normal, which is neither +Z nor
+      // normalize(pos), and its z spans [-1, 1] so some particles fly downward.
+      const th = Math.min(1, Math.max(0, num(shape.radiusThickness)));
+      const f = (1 - th) + th * Math.random();
+      const r = num(shape.donutRadius) * f;
+      const a = Math.random() * (arc || Math.PI * 2);
+      const phi = Math.random() * Math.PI * 2;
+      const cphi = Math.cos(phi), sphi = Math.sin(phi);
+      const w = radius + r * cphi;
+      pos.set(Math.cos(a) * w, Math.sin(a) * w, r * sphi);
+      dir.set(cphi * Math.cos(a), cphi * Math.sin(a), sphi);
+      break;
+    }
     case 'SingleSidedEdge':
       // Position along the local X axis in [-radius, +radius] (radius is the
       // half-length); direction is always local +Y.
@@ -301,7 +455,9 @@ export function emitFrom(shape) {
       break;
     }
     default:
-      warnOnce(`shape:${shape?.type}`, `发射形状 ${shape?.type ?? '(无)'} 未实现,退化成点发射`);
+      // 到这里只有两种情形:没有形状模块(点发射就是它的语义),或者故障注入把未建模形状
+      // 按点发射放了进来。两者都不喊 —— 前者不是错,后者是判据自己要红的那一路。
+      break;
   }
   if (shape?.scale) {
     const s = vec3(shape.scale);
@@ -313,15 +469,20 @@ export function emitFrom(shape) {
     pos.applyEuler(e); dir.applyEuler(e);
   }
   if (shape?.position) pos.add(vec3(shape.position));
-  // A zero scale axis can collapse the direction to a zero vector; keep it
-  // zero (no initial velocity) instead of inventing a direction.
-  if (dir.lengthSq() > 1e-30) dir.normalize(); else dir.set(0, 0, 0);
+  // A zero scale axis can collapse the direction to a zero vector. The engine's
+  // normalize has one fallback for that case and it is local +Z, not "no
+  // velocity" — reached by real data (shapes whose scale.z is 0).
+  if (dir.lengthSq() > 1e-30) dir.normalize(); else dir.set(0, 0, 1);
   return { pos, dir };
 }
 
 // ---- 粒子发射器 ----------------------------------------------------------
 
 const GRAVITY = -9.81;
+const MIN_PARTICLE_SCALE = 0.0001;     // 零缩放的 sprite 会被剔掉,给一个下限
+const TMP_V3 = new THREE.Vector3();    // 屏幕占比截断算深度用的临时向量(每帧每粒子,别新建)
+const _birthP = new THREE.Vector3();   // 出生点统计复用
+const _centerP = new THREE.Vector3();
 
 class Emitter {
   /**
@@ -329,12 +490,86 @@ class Emitter {
    * @param localParent 跟随锚点的父节点(Local 空间)
    * @param worldParent 不跟随锚点的父节点(World 空间 / keepPosition)
    */
-  constructor(spec, localParent, worldParent, textureFor) {
+  /**
+   * 贴图数组的选层。返回该粒子要用的那一层贴图(没有数组时返回 null)。
+   *
+   * 采层律(现象域已钉死):
+   *   layer = min(layers-1, max(0, floor(fract(clamp(source + progress, 0, 0.999000013)) * sliceCount)))
+   * `source` 由 `progressCoord` 的打包选择器指出:`component*10 + vector`,
+   * 例如 11 = custom1.x。选择器为常量(或指不到)时,全体粒子同层。
+   * **层在出生时定死、终生不翻页** —— 所以这里只在出生时调一次。
+   */
+  _arrayLayer(rand) {
+    if (!this.arraySlices) return null;
+    const s = this.arraySampling || {};
+    const layers = this.arraySlices.length;
+    const slices = num(s.sliceCount, layers) || layers;
+    const progress = num(s.progress, 0);
+    const clampTo = num(s.progressClamp, 0.999000013);
+    let source = 0;
+    const src = s.progressSource || {};
+    if (!src.constant && src.vector != null && src.component != null) {
+      // 选择器指向 custom1/custom2 的某个分量。那两组量本身是**出生时定死的随机量**
+      // (见现象域的自定义数据律),消费侧拿这颗粒子的随机因子当那个分量即可 ——
+      // 一颗粒子一个层,且终生不变,与原版同义。
+      source = num(rand, 0);
+    }
+    let v = source + progress;
+    v = Math.min(Math.max(v, 0), clampTo);
+    v = v - Math.floor(v);                       // fract
+    const layer = Math.min(layers - 1, Math.max(0, Math.floor(v * slices)));
+    return this.arraySlices[layer] || this.arraySlices[0] || null;
+  }
+
+  /**
+   * 屏幕占比截断的比例因子。返回 1 表示不改尺寸。
+   *
+   * 真源语义:`maxParticleSize` / `minParticleSize` 是**视口占比**,
+   * 换算基准是**视口在该深度处的世界宽度**(横向):
+   *
+   *   W(d) = 2 · d · aspect · tan(fovV / 2)
+   *
+   * 比较的是粒子的**全尺寸**(两轴取大者)对 `W(d)`,两轴再同乘同一个比例 ——
+   * 各轴独立裁会把作者写的长宽比毁掉。
+   *
+   * 深度用**眼空间前向距离**。相机在背后或深度非有限时不截断(返回 1):
+   * 那些粒子本来就不该出现在画面上,拿一个负数去算宽度只会得出镜像或 NaN。
+   */
+  _screenClampRatio(p, size) {
+    const cam = this.camera;
+    const r = this.renderer || {};
+    const maxFrac = num(r.maxParticleSize, 0);
+    const minFrac = num(r.minParticleSize, 0);
+    if (!cam || !cam.isPerspectiveCamera || (maxFrac <= 0 && minFrac <= 0)) return 1;
+    if (!(size > 1e-6)) return 1;
+    p.sprite.getWorldPosition(TMP_V3);
+    // 眼空间 z 在相机前方是负的,取负得前向距离。
+    const depth = -TMP_V3.applyMatrix4(cam.matrixWorldInverse).z;
+    if (!Number.isFinite(depth) || depth <= 1e-4) return 1;
+    const width = 2 * depth * cam.aspect * Math.tan((cam.fov * Math.PI / 180) / 2);
+    if (!Number.isFinite(width) || width <= 1e-6) return 1;
+    let target = size;
+    if (minFrac > 0) target = Math.max(target, minFrac * width);
+    if (maxFrac > 0) target = Math.min(target, maxFrac * width);
+    const ratio = target / size;
+    return Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
+  }
+
+  constructor(spec, localParent, worldParent, textureFor, camera = null, resolveEmitter = null,
+              meshFor = null) {
+    this.nodePath = spec.node ?? null;             // 发射节点的相对路径(判据与面板按它认发射器)
     this.system = spec.system || {};
     this.renderer = spec.renderer || {};
     // World 空间的粒子生成后不跟随发射器,所以挂在世界父节点下 —— 但发射位置与方向
     // 仍以**发射节点当时的世界变换**为基准。少了这步变换,粒子就会从世界原点(地面)
     // 冒出来,而不是从头顶的发射节点冒出来。
+    this.camera = camera;                          // 屏幕占比截断要读它的 fov/aspect
+    this.textureFor = textureFor;                  // 出生时绘制件还要用它取贴图
+    // 网格取用器,同步。glb 是异步加载的而绘制件是同步建的,所以这里只查已经预载好的
+    // 缓存;查不到返回 null,绘制件据此整条不画并计数,**绝不用 billboard 冒充**。
+    this.meshFor = meshFor || (() => null);
+    // 被屏幕占比截断改过尺寸的粒子数(累计),给面板与判据看。
+    this.clampedCount = 0;
     this.worldSpace = this.system.simulationSpace === 'World';
     this.node = localParent;                       // 发射节点(局部空间基准)
     this.parent = (this.worldSpace ? worldParent : localParent) || localParent;
@@ -344,70 +579,266 @@ class Emitter {
     this.burstCursor = [];
     this.peak = 0;
     this.theoretical = emissionPlan(this.system);
+    this.shapeType = (this.system.shape && this.system.shape.type) || null;
+    this.shapeSupport = shapeSupport(this.system.shape);
+    // 形状没建模 = 这一条**整个不发射**(理由见 shapeSupport)。不是静默的:
+    // `placement()` 与消费方的面板/自检逐个把它数出来。
+    this.suppressed = this.shapeSupport === 'unimplemented' && !EMIT_FAULT.pointEmit;
+    if (this.suppressed) {
+      // 停发的发射器不会再走到 spawn,所以警告在这里喊(每种形状一次);计数在 placement()。
+      warnOnce(`shape:${this.shapeType}`,
+        `发射形状 ${this.shapeType} 没有发射公式,用它的发射器停发(不退化成点发射:那会把粒子堆在节点原点)`);
+    }
+    // 形状自身的原点在**节点局部空间**里的位置(= shape.position,再按 spawn 的同一条
+    // x 换手镜一次)。判据的参照点是它,不是节点原点:`shape.position` 是数据明写的偏移
+    // (实测有一个发射器把边发射器整体下移 2 米),拿节点原点当参照会把这个合法偏移判成错。
+    this.shapeCenter = new THREE.Vector3();
+    if (this.system.shape && this.system.shape.position) {
+      const t = vec3(this.system.shape.position);
+      this.shapeCenter.set(-t.x, t.y, t.z);
+    }
+    this.birth = this._emptyBirth();
 
     const material = this.renderer.material;
     let file = null;
+    let key = DEFAULT_BASE_MAP_KEY;
+    // 贴图数组:层在**粒子出生时定死**、终生不翻页(见现象域的采层律),而每个粒子本来
+    // 就各有一份材质 —— 所以直接把那一层的 PNG 当这颗粒子的贴图用,等价于采数组的那一层,
+    // 不需要真的建一张数组纹理。数组住在 `material.textureArrays`,**不是** `textures`
+    // （早先按 `textures[key + '2DArray']` 查,永远查不到 ⇒ 无贴图 ⇒ 白方块）。
+    this.arraySlices = null;
+    this.arraySampling = null;
     if (material && !material.external) {
-      file = material.textures?._BaseMap ?? null;
-      if (!file && material.textures?._BaseMap2DArray !== undefined) {
-        warnOnce('tex2darray', '有粒子材质用的是贴图数组,本 demo 解不了,退化成无贴图');
+      key = BASE_MAP_KEY[material.shader] || DEFAULT_BASE_MAP_KEY;
+      file = material.textures?.[key] ?? null;
+      const arr = material.textureArrays?.[`${key}2DArray`]
+        || material.textureArrays?.[key] || null;
+      if (arr && Array.isArray(arr.files) && arr.files.length) {
+        this.arraySlices = arr.files.map((f) => textureFor(f));
+        this.arraySampling = arr.sampling || null;
       }
     } else if (material?.external) {
       warnOnce('matext', '有粒子材质在别的包里(变体件复用主件材质),本 demo 未加载,退化成无贴图');
     }
     this.map = file ? textureFor(file) : null;
+    // 既没有单张贴图、也没有数组 ⇒ 这个发射器画不出东西。**不画**并让上层数出来,
+    // 而不是拿一个 `map: null` 的精灵去画 —— 那画出来就是白方块(默认贴图 RGB 全白、
+    // 形状全在 alpha),看起来「有东西」而其实是缺失。
+    this.hasTexture = !!(this.map || this.arraySlices);
     this.state = renderState(material);
+    // 基础贴图的 `<名>_ST`:顶点侧算的是 `uv * ST.xy + ST.zw`。取值来自贴图槽自己的
+    // 缩放/偏移对,不是 floats —— 缺了它,非 1 的平铺会整片取错贴图区域。
+    const st = (material && !material.external && material.textureScaleOffset?.[key]) || null;
+    this.uvScaleOffset = st
+      ? [num(st[0], 1), num(st[1], 1), num(st[2], 0), num(st[3], 0)] : [1, 1, 0, 0];
     const sheet = this.system.textureSheet;
     this.tiles = sheet && (num(sheet.tilesX, 1) > 1 || num(sheet.tilesY, 1) > 1)
       ? { x: num(sheet.tilesX, 1), y: num(sheet.tilesY, 1), spec: sheet } : null;
+
+    // 可选模块按注册表接进来。声明了而没有实现的模块**不会**被默默当成「没这一项」——
+    // `moduleFaults` 与 `declaredModules` 把「资产里有」和「我们跑了」分开数,
+    // 两个数不等就是缺口,面板上看得见。
+    this.moduleFaults = [];
+    // `resolveEmitter(path)` 按节点路径找同一包里的另一个发射器。必须是**惰性**的:
+    // 发射器是逐个构造的,构造第一个时后面的还不存在,所以查表要推迟到调用时。
+    // 有模块(子发射)要按序列化里的目标路径去触发**别的**发射器,没有它就只能
+    // 在自己身上发,那是错的 —— 宁可解析不到并计数,不要发在错的发射器上。
+    this.resolveEmitter = resolveEmitter || (() => null);
+    this.hooks = makeHooks(this.system, this.renderer, {
+      THREE, sampleValue, sampleColor, num, vec3,
+      emitter: this, camera: this.camera, textureFor,
+      resolveEmitter: (path) => this.resolveEmitter(path),
+      onModuleFault: (name, why) => {
+        this.moduleFaults.push(`${name}: ${why}`);
+        warnOnce(`mod:${name}`, `可选模块 ${name} 构造失败,这条发射器按没有它跑:${why}`);
+      },
+    });
+    this.hookNames = this.hooks.map((h) => h.__name);
+  }
+
+  /**
+   * 贴图坐标的合成。片表动画先把四边形的 uv 映进某一格,`_ST` 再作用在映过的 uv 上:
+   *   最终 = (uv / 格数 + 格偏移) * ST.xy + ST.zw
+   * three.js 的 `repeat`/`offset` 算的是 `uv * repeat + offset`,所以
+   *   repeat = ST.xy / 格数     offset = 格偏移 * ST.xy + ST.zw
+   * 两者写成一处,免得片表推进时把 `_ST` 覆盖掉。
+   */
+  _applyUv(map, tileOffsetX = 0, tileOffsetY = 0) {
+    if (!map) return;
+    const [sx, sy, ox, oy] = this.uvScaleOffset;
+    const tx = this.tiles ? this.tiles.x : 1, ty = this.tiles ? this.tiles.y : 1;
+    map.repeat.set(sx / tx, sy / ty);
+    map.offset.set(tileOffsetX * sx + ox, tileOffsetY * sy + oy);
+  }
+
+  _emptyBirth() {
+    return { n: 0, radialMax: 0, horizMax: 0, radialSum: 0, yMin: Infinity, yMax: -Infinity, ySum: 0 };
+  }
+
+  /**
+   * 出生点的世界坐标统计(位置判据读它)。World 空间的 `pos` 已是世界坐标,Local 的还要
+   * 过一次节点世界变换才能与形状原点的世界位置比。只统计**出生点**:出生后的运动(重力、
+   * velocityOverLifetime)会把粒子带走几十米,拿在场粒子的散布去判形状会把两件事混起来。
+   * 参照点是**形状原点**(节点世界变换作用在 shape.position 上),不是节点原点。
+   */
+  _recordBirth(pos) {
+    const node = this.node;
+    if (!node) return;
+    _birthP.copy(pos);
+    if (!this.worldSpace) _birthP.applyMatrix4(node.matrixWorld);
+    _centerP.copy(this.shapeCenter).applyMatrix4(node.matrixWorld);
+    const dx = _birthP.x - _centerP.x, dy = _birthP.y - _centerP.y, dz = _birthP.z - _centerP.z;
+    const b = this.birth;
+    b.n += 1;
+    const radial = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    b.radialMax = Math.max(b.radialMax, radial);
+    b.radialSum += radial;
+    b.horizMax = Math.max(b.horizMax, Math.hypot(dx, dz));
+    b.yMin = Math.min(b.yMin, _birthP.y);
+    b.yMax = Math.max(b.yMax, _birthP.y);
+    b.ySum += _birthP.y;
+  }
+
+  /**
+   * 一个发射器的位置判据读数。`births` 是累计出生点数,`radialMax` 是出生点到发射节点的
+   * 最大距离(米,世界尺度) —— 散布判据比它与声明半径;`birthY` 与 `nodeY` 供高度判据。
+   */
+  placement() {
+    const sh = this.system.shape || null;
+    const b = this.birth;
+    const em = this.system.emission;
+    // 「会不会发射」按取值的**上界**判(r=1):判据要区分「零活粒子因为停发」与
+    // 「零活粒子因为该发的没发」,不能把 rateOverDistance-only 这类本来就不发的算进去。
+    const rateTop = em ? sampleValue(em.rateOverTime, 0, 1) : 0;
+    const burstTop = em ? (em.bursts || []).reduce((n, x) => n + sampleValue(x.count, 0, 1), 0) : 0;
+    let nodeY = null, centerY = null;
+    if (this.node) {
+      this.node.updateWorldMatrix(true, false);
+      nodeY = +this.node.matrixWorld.elements[13].toFixed(4);
+      centerY = +_centerP.copy(this.shapeCenter).applyMatrix4(this.node.matrixWorld).y.toFixed(4);
+    }
+    return {
+      node: this.nodePath,
+      space: this.worldSpace ? 'World' : 'Local',
+      shape: this.shapeType,
+      support: this.shapeSupport,
+      suppressed: this.suppressed,
+      emits: rateTop > 0 || burstTop > 0,
+      radius: sh ? num(sh.radius) : null,
+      // Donut 的外缘是 radius + donutRadius,ConeVolume 的粒子沿轴再走最多 length ——
+      // 散布判据要拿得到这两项才能算出正确的期望范围,只给 radius 会把对的实现判成错。
+      donutRadius: sh ? num(sh.donutRadius) : null,
+      length: sh ? num(sh.length) : null,
+      angle: sh ? num(sh.angle) : null,
+      radiusThickness: sh ? num(sh.radiusThickness) : null,
+      shapeScale: sh && sh.scale ? [num(sh.scale[0], 1), num(sh.scale[1], 1), num(sh.scale[2], 1)] : [1, 1, 1],
+      live: this.particles.length,
+      peak: this.peak,
+      births: b.n,
+      radialMax: +b.radialMax.toFixed(4),
+      radialMean: b.n ? +(b.radialSum / b.n).toFixed(4) : 0,
+      horizMax: +b.horizMax.toFixed(4),
+      birthY: b.n ? {
+        min: +b.yMin.toFixed(4), max: +b.yMax.toFixed(4), mean: +(b.ySum / b.n).toFixed(4),
+      } : null,
+      nodeY,
+      centerY,          // 形状原点的世界高度(= 节点世界变换作用在 shape.position 上)
+    };
   }
 
   spawn() {
     const s = this.system, start = s.start || {};
     const r = Math.random();
-    const { pos, dir } = emitFrom(s.shape);
+    const sampled = emitFrom(s.shape);
+    if (!sampled) return;                // 形状没建模:这一发不发(计数见 this.suppressed)
+    const { pos, dir } = sampled;
     pos.x = -pos.x; dir.x = -dir.x;      // 同一节点内容的 M 换手(节点链共轭之外的另一半)
-    if (this.worldSpace && this.node) {
-      // 局部点/方向 → 世界。父链的旋转也一起吃掉(挂点在绑定姿态下带 90° 旋转,
-      // 不转换的话件的 y 偏移会跑成世界 x 偏移)。
+    if (this.node) {
       this.node.updateWorldMatrix(true, false);
-      pos.applyMatrix4(this.node.matrixWorld);
-      dir.transformDirection(this.node.matrixWorld).normalize();
+      if (this.worldSpace && !EMIT_FAULT.dropNodeTransform) {
+        // 局部点/方向 → 世界。父链的旋转也一起吃掉(挂点在绑定姿态下带 90° 旋转,
+        // 不转换的话件的 y 偏移会跑成世界 x 偏移)。
+        pos.applyMatrix4(this.node.matrixWorld);
+        dir.transformDirection(this.node.matrixWorld).normalize();
+      }
+      this._recordBirth(pos);
     }
     const life = Math.max(0.01, sampleValue(start.lifetime, 0, r));
-    const size = sampleValue(start.size, 0, r);
+    // 出生尺寸是**逐轴量**:`size3D` 为真时 `start.size` 只是 X 轴,Y 轴另有 `sizeY`
+    // (雨滴就是这样:X 0.01~0.02 米、Y 0.1~0.8 米的一道细长条;当成各向同性的标量
+    // 就会画成 1~2 厘米的小方块,远看等于没有雨)。
+    // `sizeZ` 只对 Mesh 绘制模式有意义(billboard 是二维片,没有第三轴可缩),但它
+    // **必须带进粒子记录**:26 个 Mesh 发射器导出了它,绘制件读不到就只能拿两轴去缩
+    // 一个三维网格 —— 那是错的,而且错得看不出来。
+    const sizeX = sampleValue(start.size, 0, r);
+    const sizeY = start.size3D ? sampleValue(start.sizeY, 0, r) : sizeX;
+    const sizeZ = start.size3D && start.sizeZ ? sampleValue(start.sizeZ, 0, r) : sizeX;
     const first = sampleColor(start.color, 0, r);
     // 每粒子独立材质:颜色、透明度、旋转、贴图帧都是逐粒子量。
-    const map = this.tiles && this.map ? this.map.clone() : this.map;
-    if (map && this.tiles) {
+    // 贴图对象要在两种情形下各自复制一份:片表动画逐粒子推进帧;`_ST` 非恒等时
+    // 平铺/偏移是**这个材质**的,共享贴图对象会把它按到同一张图的所有使用者头上。
+    const identityUv = this.uvScaleOffset[0] === 1 && this.uvScaleOffset[1] === 1
+      && this.uvScaleOffset[2] === 0 && this.uvScaleOffset[3] === 0;
+    // 数组贴图:出生时选层。层由 custom data 定,而粒子对象要到下面才建 —— 所以
+    // 这里把随机因子直接传进去,**不要引用还不存在的粒子对象**。
+    const base = this.arraySlices ? this._arrayLayer(r) : this.map;
+    const map = base && (this.tiles || !identityUv) ? base.clone() : base;
+    // **这张贴图是不是这颗粒子自己的**,下面建粒子时记进 `ownsMap`。原先靠
+    // `p.map !== this.map` 反推,而数组发射器的 `this.map` 是 null ⇒ 共享的那一层
+    // 会被当成克隆体 dispose 掉,下一颗粒子再用它就炸在渲染循环里(UI 能动、画面卡死)。
+    const ownsMap = !!(map && map !== base);
+    if (map && map !== base) {
       map.needsUpdate = true;
-      map.repeat.set(1 / this.tiles.x, 1 / this.tiles.y);
+      this._applyUv(map);
     }
     const st = this.state;
-    const sprite = new THREE.Sprite(applyZOffset(new THREE.SpriteMaterial({
-      map: map || null, color: first.color, opacity: first.alpha, transparent: true,
-      blending: st.blending, blendSrc: st.blendSrc, blendDst: st.blendDst,
-      premultipliedAlpha: st.premultipliedAlpha,
-      depthWrite: st.depthWrite, depthTest: st.depthTest,
-    }), st.zOffset));
+    const spin0 = sampleValue(start.rotation, 0, r);
+    // 绘制件按渲染器的绘制模式分派(朝相机的 billboard 是内建的那一支)。
+    // 没有对应实现的绘制模式在挂载时就被挡掉了,所以这里拿到 null 只可能是
+    // 材质/贴图这一侧出了问题 —— 那就不发这一颗,并数出来。
+    const draw = makeDrawable(this.renderer, {
+      THREE, num, textureFor: this.textureFor, camera: this.camera, emitter: this,
+      material: this.renderer.material, state: st, applyZOffset,
+      map: map || null, color: first.color, alpha: first.alpha, rotation: spin0,
+      sortingOrder: num(this.renderer.sortingOrder),
+      // 这颗粒子出生时抽的随机因子。Mesh 模式最多挂 4 个网格、**逐粒子随机选一个**,
+      // 选择必须用这个因子 —— 每帧重抽会让同一颗粒子每帧换一个网格。
+      r,
+      // 网格取用器。**同步**返回已经预载好的 glTF 节点(取不到就是 null)——
+      // 绘制件是在 spawn 里同步建的,而 glb 加载是异步的,所以加载必须在挂载之前
+      // 就做完。谁负责预载见 environment.js 的 loadPhenomenon。
+      meshFor: this.meshFor,
+    });
+    if (!draw) { this.drawFaults = (this.drawFaults || 0) + 1; return; }
+    const sprite = draw.object;
     sprite.position.copy(pos);
-    sprite.material.rotation = sampleValue(start.rotation, 0, r);
-    sprite.renderOrder = num(this.renderer.sortingOrder);
     this.parent.add(sprite);
-    this.particles.push({
-      sprite, map, r, life, age: 0, size,
+    const p = {
+      sprite, draw, map, ownsMap, r, life, age: 0, sizeX, sizeY, sizeZ,
       pos: pos.clone(),
       vel: dir.multiplyScalar(sampleValue(start.speed, 0, r)),
-      spin: sampleValue(start.rotation, 0, r),
+      spin: spin0,
       gravity: sampleValue(start.gravityModifier, 0, r),
-    });
+    };
+    this.particles.push(p);
+    for (const h of this.hooks) h.onSpawn?.(p);
   }
+
+  /**
+   * 某个模块还归内建那段代码管吗?
+   *
+   * 有几个模块内建了**部分**实现(只做了完整律的一小块)。等专门的模块文件接上来,
+   * 内建那段就必须整段让位 —— 两边同时跑会叠两次(尺寸表算两遍 UV、速度钳两次),
+   * 症状是画面「差一点」而不报错,最难查。反过来,模块还没接上时内建那段要继续跑,
+   * 否则等于把能跑的换成不能跑的。所以以「有没有模块认领这个名字」为准。
+   */
+  _inlineOwns(name) { return !this.hookNames.includes(name); }
 
   update(dt) {
     // 单帧 dt 钳制:切件/加载卡顿会给出数百毫秒的帧间隔,新生粒子会被一帧推出老远,
     // 肉眼看就是「出生位置错了」。0.1 s 对应 10 fps 下限,正常帧率不受影响。
     dt = Math.min(dt, 0.1);
-    const s = this.system, em = s.emission;
+    const s = this.system, em = this.suppressed ? null : s.emission;
     this.age += dt * num(s.simulationSpeed, 1);
     const cap = num(s.maxParticles, 1000);
     if (em) {
@@ -431,13 +862,24 @@ class Emitter {
         this.burstCursor[bi] = c;
       }
     }
+    for (const h of this.hooks) h.onFrame?.(dt);
     const alive = [];
     for (const p of this.particles) {
       p.age += dt * num(s.simulationSpeed, 1);
-      if (p.age >= p.life) { this._drop(p); continue; }
+      if (p.age >= p.life) {
+        // 死亡事件必须在回收**之前**送出:回收之后粒子的位置与速度已经不可读,
+        // 而按死亡触发的子发射要在死亡那一点的位置上发射。
+        for (const h of this.hooks) h.onDeath?.(p);
+        this._drop(p);
+        continue;
+      }
       const u = p.age / p.life;
       if (p.gravity) p.vel.y += GRAVITY * p.gravity * dt;
-      const limit = s.limitVelocity;
+      // 内建的这一段只是**兜底**:模块在位时由模块负责,两边同时跑会钳两次。
+      // 而且求值序上它站错了位置——引擎把速度钳制放在 velocityOverLifetime
+      // **之后**(钳的是「状态速度 + 叠加值」的合成量),这里却在之前。
+      // 模块要按真源把它放对,所以模块在位就整段让位。
+      const limit = this._inlineOwns('limitVelocity') ? s.limitVelocity : null;
       if (limit) {
         const max = sampleValue(limit.magnitude, u, p.r);
         const speed = p.vel.length();
@@ -458,29 +900,55 @@ class Emitter {
         const mod = sampleValue(vol.speedModifier, u, p.r);
         if (mod) _effVel.multiplyScalar(mod);
       }
+      // 积分**之前**的模块槽位 —— 引擎的 pre-simulation 块(噪声、力、速度钳制、
+      // customData 都在这里)。它们改的是「这一帧用来位移的有效速度」,所以
+      // _effVel 作为可变参数交出去,模块就地改它;要改的是有状态速度就改 p.vel。
+      for (const h of this.hooks) h.onPreIntegrate?.(p, u, dt, _effVel);
       p.pos.addScaledVector(_effVel, dt);
+      // 积分**之后**的模块槽位 —— 引擎的 post-simulation 块(碰撞、尾迹、子发射)。
+      // 逐个模块该插在哪一步由引擎自己的求值序决定(见 fx/hooks.js 的说明)。
+      for (const h of this.hooks) h.onUpdate?.(p, u, dt);
       p.sprite.position.copy(p.pos);
 
-      const scale = p.size * (s.sizeOverLifetime ? sampleValue(s.sizeOverLifetime.curve, u, p.r) : 1);
-      const clamped = Math.min(Math.max(Math.abs(scale), 0.0001), num(this.renderer.maxParticleSize, 1e3) || 1e3);
-      p.sprite.scale.setScalar(clamped);
+      // 尺寸也是逐轴量:sizeOverLifetime 的 `curve` 是 X 轴,`separateAxes` 为真时
+      // Y 轴另有一条 `y` 曲线(否则两轴共用 X 的那条)。
+      const sol = s.sizeOverLifetime;
+      const kx = sol ? sampleValue(sol.curve, u, p.r) : 1;
+      const ky = sol && sol.separateAxes && sol.y ? sampleValue(sol.y, u, p.r) : kx;
+      // 屏幕占比截断。`maxParticleSize` / `minParticleSize` 是**视口占比**不是米
+      // (1 = 整个视口宽,0.5 = 一半;0.5 正是运行时默认值)。两条容易写错的地方:
+      //   * 比的是**全尺寸**对**视口全宽**(横向宽度,不是高、不是对角);
+      //   * 两轴同乘一个比例(保持作者写的长宽比),不是各轴独立裁。
+      // 求值序:此处已经过 startSize 与 sizeOverLifetime,截断落在半展与 pivot **之前**。
+      // 豁免两条:Mesh 绘制模式完全不截断(它根本不走这条路,见挂载处);
+      // 拉伸型 billboard 的拉伸在截断**之后**施加,所以拉伸轴可以超限。
+      let sx = Math.max(Math.abs(p.sizeX * kx), MIN_PARTICLE_SCALE);
+      let sy = Math.max(Math.abs(p.sizeY * ky), MIN_PARTICLE_SCALE);
+      // Mesh 绘制模式豁免屏幕占比截断(它不走 billboard 那条路)。
+      const ratio = p.draw.clampExempt ? 1 : this._screenClampRatio(p, Math.max(sx, sy));
+      if (ratio !== 1) { sx *= ratio; sy *= ratio; this.clampedCount += 1; }
+      // 第三轴只有 Mesh 绘制件用得上(billboard 是二维片)。`sizeOverLifetime` 在本域
+      // 没有独立的 z 曲线,所以 Z 跟 X 那条走 —— 这是**当前数据下**的取法,
+      // 出现独立 z 曲线时要按真源改,别默认它永远跟 X。
+      p.draw.setScale(sx, sy, Math.max(Math.abs(p.sizeZ * kx), MIN_PARTICLE_SCALE));
+      p.draw.orient(this.camera, _effVel);
 
       if (s.colorOverLifetime) {
         const c = sampleColor(s.colorOverLifetime, u, p.r);
-        p.sprite.material.color.copy(c.color);
-        p.sprite.material.opacity = c.alpha;
+        p.draw.material.color.copy(c.color);
+        p.draw.material.opacity = c.alpha;
       }
       if (s.rotationOverLifetime) {                    // 弧度每秒
         p.spin += sampleValue(s.rotationOverLifetime.curve, u, p.r) * dt;
-        p.sprite.material.rotation = p.spin;
+        p.draw.setRotation(p.spin);
       }
-      if (this.tiles && p.map) {
+      if (this.tiles && p.map && this._inlineOwns('textureSheet')) {
         const sheet = this.tiles.spec;
         const total = this.tiles.x * this.tiles.y;
         const frame = Math.min(total - 1, Math.max(0,
           Math.floor(sampleValue(sheet.frameOverTime, u, p.r) * total)));
-        p.map.offset.set((frame % this.tiles.x) / this.tiles.x,
-                         1 - 1 / this.tiles.y - Math.floor(frame / this.tiles.x) / this.tiles.y);
+        this._applyUv(p.map, (frame % this.tiles.x) / this.tiles.x,
+                      1 - 1 / this.tiles.y - Math.floor(frame / this.tiles.x) / this.tiles.y);
       }
       alive.push(p);
     }
@@ -489,9 +957,15 @@ class Emitter {
   }
 
   _drop(p) {
+    // 模块先释放自己的东西,再拆粒子本体。模块可能挂了自建几何(尾迹的条带就是),
+    // 那些不在 draw 里,父级不知道怎么收 —— 只能模块自己收。
+    // 注意这里是**回收**钩子,和 onDeath 不是一回事:onDeath 只在寿命到点时发,
+    // 是个可以触发子发射的事件;_drop 走的是所有回收路径(含 reset() 整批清场),
+    // 所以释放资源必须挂在这里,挂在 onDeath 上会在 reset 时漏掉。
+    for (const h of this.hooks) h.onDrop?.(p);
     p.sprite.removeFromParent();
-    p.sprite.material.dispose();
-    if (p.map && p.map !== this.map) p.map.dispose();
+    p.draw.dispose();                          // 材质由绘制件自己销毁(Mesh 件还有几何)
+    if (p.map && p.ownsMap) p.map.dispose();   // 只销毁自己克隆的那份,共享贴图不动
   }
 
   reset() {
@@ -500,6 +974,7 @@ class Emitter {
     this.age = 0;
     this.pending = 0;
     this.burstCursor = [];
+    this.birth = this._emptyBirth();     // 判据读的是这一轮的出生点,不是上一轮的
   }
 
   dispose() { this.reset(); }
@@ -541,6 +1016,7 @@ function planeFor(node, sprites, textureFor) {
   const mesh = new THREE.Mesh(geometry, applyZOffset(new THREE.MeshBasicMaterial({
     map, transparent: true,
     blending: st.blending, blendSrc: st.blendSrc, blendDst: st.blendDst,
+    blendEquation: st.blendEquation,
     premultipliedAlpha: st.premultipliedAlpha,
     depthWrite: st.depthWrite, depthTest: st.depthTest,
     side: node.material ? st.side : THREE.DoubleSide,
@@ -598,15 +1074,65 @@ export class EmoticonView {
         else console.warn(`[emoticon] ${name}: 节点 ${node.path} 要画的 sprite ${node.sprite} 不在本包里`);
       }
     }
-    this.emitters = (item.particles || [])
-      .filter((p) => p.system)
-      .map((p) => {
-        const local = this.byPath.get(p.node) || this.root;
-        // 世界/局部父节点由 Emitter 按 simulationSpace 选择。keepPosition 只门控
-        // billboard 旋转律,与挂父无关 —— World 空间的出生点已是世界坐标,
-        // 挂回锚定树会被再变换一次,出生位置整体飞离角色。
-        return new Emitter(p, local, opts.worldParent || this.root, textureFor);
-      });
+    // **不画的发射器在这里就摘掉,不是靠 `visible` 兜。** 门只有两道,两道都是数据明写的:
+    // 渲染器自己的 `enabled`,与发射节点(含祖先)的 `active`。ParticleSystem 组件
+    // 没有 enabled 字段,所以再没有第三道。
+    // 靠 `visible` 兜不住:World 空间的粒子挂在**世界父节点**下,发射节点关着也照样可见,
+    // 于是原版从不显示的东西会被画出来(默认粒子贴图整张 RGB 全白、形状全在 alpha 里,
+    // 画出来就是一片白方块)。
+    this.skipped = {
+      disabledRenderer: 0,
+      inactiveNode: 0,
+      unsupportedRenderer: 0,
+      unsupportedRenderModes: {},
+      // 第三类「不画」:材质压根没给出可用的基础贴图(既没有单张也没有数组)。
+      // 这不是数据里的门,是**我们这侧解析不出来** —— 所以它必须单独计数,
+      // 不能混进上面两道数据门,否则「原版本来不显示」和「我们没读出来」就分不清了。
+      missingTexture: 0,
+    };
+    const chainActive = (obj) => {
+      for (let p = obj; p && p !== this.root; p = p.parent) if (!p.visible) return false;
+      return true;
+    };
+    this.emitters = [];
+    // 节点路径 -> 发射器。子发射把目标写成同一包里的节点路径(与 particles[i].node
+    // 同一套写法),要按它找到那个发射器实例才能在正确的发射器上发射。
+    this.emitterByNode = new Map();
+    for (const p of item.particles || []) {
+      if (!p.system) continue;
+      if (p.renderer && p.renderer.enabled === false) { this.skipped.disabledRenderer++; continue; }
+      // 绘制模式有实现才挂。**没有实现的绘制模式整条不画**:拿朝相机的 billboard
+      // 去画一个本该贴地的片或一个网格,会得到一块立着的方形布 —— 看着「有东西」
+      // 而其实是错的,比缺失更难发现。哪些模式有实现由 fx/drawable.js 的注册表决定。
+      // 而「认领了这个模式」不等于「这一条画得了」:实现可能只读出了一种朝向基,
+      // 或者这一条缺它要的引用。所以在挂载时**逐条**问一次,拿到理由就整条摘掉并按
+      // 理由计数 —— 否则每颗粒子都失败一次,原因被埋进 drawFaults 里看不出来。
+      const renderMode = (p.renderer && p.renderer.renderMode) || 'Billboard';
+      const why = drawableRejection(p.renderer, num);
+      if (!drawableModes().has(renderMode) || why) {
+        this.skipped.unsupportedRenderer++;
+        const tag = drawableModes().has(renderMode) ? `${renderMode}.${why}` : renderMode;
+        this.skipped.unsupportedRenderModes[tag] =
+          (this.skipped.unsupportedRenderModes[tag] || 0) + 1;
+        continue;
+      }
+      const local = this.byPath.get(p.node) || this.root;
+      if (!chainActive(local)) { this.skipped.inactiveNode++; continue; }
+      // 世界/局部父节点由 Emitter 按 simulationSpace 选择。keepPosition 只门控
+      // billboard 旋转律,与挂父无关 —— World 空间的出生点已是世界坐标,
+      // 挂回锚定树会被再变换一次,出生位置整体飞离角色。
+      const emitter = new Emitter(p, local, opts.worldParent || this.root,
+                                  textureFor, opts.camera || null,
+                                  // 惰性:构造时后面的发射器还没建好,查表推迟到调用时。
+                                  (path) => this.emitterByNode.get(path) || null,
+                                  opts.meshFor || null);
+      // 没有可用贴图就不画。拿 `map: null` 的精灵去画会得到纯白方块
+      // (默认粒子贴图 RGB 全白、形状全在 alpha),看着像「有东西」而其实是缺失 ——
+      // 宁可不画并数出来,也不要伪装。
+      if (!emitter.hasTexture) { this.skipped.missingTexture++; continue; }
+      this.emitters.push(emitter);
+      if (emitter.nodePath) this.emitterByNode.set(emitter.nodePath, emitter);
+    }
     if (opts.anchor) opts.anchor.add(this.root);
     this.reset();
   }
@@ -703,13 +1229,64 @@ export class EmoticonView {
       name: this.name, kind: this.item.viewKind, phase: this.phase,
       nodes: this.byPath.size, sprites: this.spriteCount,
       emitters: this.emitters.length,
+      // 摘掉的发射器逐类数出来:渲染器 enabled=false 与发射节点 active=false 是两件不同的
+      // 事,合成一个数就看不出是哪一道门关的。
+      skippedRenderers: this.skipped.disabledRenderer,
+      skippedInactive: this.skipped.inactiveNode,
+      skippedUnsupportedRenderers: this.skipped.unsupportedRenderer,
+      skippedMissingTexture: this.skipped.missingTexture,
+      unsupportedRenderModes: { ...this.skipped.unsupportedRenderModes },
+      // 屏幕占比截断改过尺寸的粒子累计数,以及有多少发射器压根没相机可用(那时不截断)。
+      screenClamped: this.emitters.reduce((n, e) => n + (e.clampedCount || 0), 0),
+      clampBlind: this.emitters.filter((e) => !e.camera).length,
       live: this.emitters.reduce((n, e) => n + e.particles.length, 0),
       peak: this.emitters.reduce((n, e) => Math.max(n, e.peak), 0),
+      // 停发的发射器逐个数出来:形状没建模的那些**不画**,但绝不静默(见 shapeSupport)。
+      suppressed: this.emitters.filter((e) => e.suppressed).length,
+      suppressedShapes: this.emitters.reduce((m, e) => {
+        if (e.suppressed) m[e.shapeType] = (m[e.shapeType] || 0) + 1;
+        return m;
+      }, {}),
       theoreticalBurst: this.emitters.reduce((n, e) => n + e.theoretical.burst, 0),
       theoreticalRate: this.emitters.reduce((n, e) => n + e.theoretical.rate, 0),
       theoreticalTotal: this.emitters.reduce((n, e) => n + e.theoretical.total, 0),
+      // 「资产里声明了哪些可选模块」对「我们真的跑了哪些」。两个数不等就是缺口,
+      // 不许合成一个数 —— 合起来就看不出是没实现还是没声明。
+      declaredModules: this.emitters.reduce((m, e) => {
+        for (const k of OPTIONAL_MODULES) if (e.system[k]) m[k] = (m[k] || 0) + 1;
+        return m;
+      }, {}),
+      consumedModules: this.emitters.reduce((m, e) => {
+        for (const n of e.hookNames || []) m[n] = (m[n] || 0) + 1;
+        return m;
+      }, {}),
+      moduleFaults: this.emitters.flatMap((e) => e.moduleFaults || []),
+      drawFaults: this.emitters.reduce((n, e) => n + (e.drawFaults || 0), 0),
+      // 模块自己报的数,按模块名归并到一处。判据要读的就是这里 —— 没有它,
+      // 模块跑没跑、跑出什么数,外面一个字也看不到,「绿」就无从谈起。
+      // 数值字段跨发射器相加(一条天气里同一个模块有几十个发射器,单个的数没意义);
+      // 非数值原样留最后一个,只为看一眼形状。
+      moduleReports: this.emitters.reduce((acc, e) => {
+        for (const h of e.hooks || []) {
+          if (!h.report) continue;
+          let r = null;
+          try { r = h.report(); } catch (err) { continue; }   // 报数出错不许拖垮面板
+          if (!r || typeof r !== 'object') continue;
+          const into = acc[h.__name] || (acc[h.__name] = {});
+          for (const [k, v] of Object.entries(r)) {
+            if (typeof v === 'number') into[k] = (into[k] || 0) + v;
+            else into[k] = v;
+          }
+        }
+        return acc;
+      }, {}),
+      registeredModules: registeredModules(),
+      drawModes: [...drawableModes()],
     };
   }
+
+  /** 逐发射器的位置判据读数(散布/高度判据与面板都读它)。 */
+  placement() { return this.emitters.map((e) => e.placement()); }
 
   dispose() {
     for (const e of this.emitters) e.dispose();
@@ -735,6 +1312,82 @@ function makeTextureLoader(base) {
       cache.set(file, tex);
     }
     return cache.get(file);
+  };
+}
+
+/**
+ * 复用入口:任何**与头顶件同一套编码**的粒子 prefab 都走这里,不要另抄一份发射器。
+ * 现象环境的 `fx/effects.json` 就是同一套编码(`nodes[]` + `particles[]`,取值都带模式标签),
+ * 只是没有 `clips` / `sprites` —— 没有片段时 view 起播即进入 `live`,由发射器自己推进。
+ *
+ * @param effect `{name, nodes, particles}`
+ * @param opts   同 EmoticonView(`{anchor, worldParent, textureFor, textureBase}`)
+ */
+export function createParticleEffect(effect, opts = {}) {
+  if (!effect || !effect.nodes) return null;
+  return new EmoticonView({
+    name: effect.name || '(effect)',
+    viewKind: 'particle',              // 走与粒子件相同的换手与挂父规则
+    nodes: effect.nodes,
+    particles: effect.particles || [],
+  }, opts);
+}
+
+export function makeSharedTextureLoader(base) { return makeTextureLoader(base); }
+
+/**
+ * Shared mesh loader for the Mesh draw mode: an async preload half and a
+ * synchronous lookup half.
+ *
+ * The split is forced by the runtime, not chosen for convenience. A drawable is
+ * built synchronously inside `spawn()`, while reading a glTF file is inherently
+ * asynchronous. Without a preload there are only two other options: make
+ * emission async, which rewrites the whole emitter chain, or draw a placeholder
+ * and swap it later, which means deliberately drawing the wrong thing first.
+ * Loading everything a phenomenon references before it mounts is the only choice
+ * that never shows something untrue.
+ *
+ * `get` returns the named glTF node, or null when the file was never preloaded or
+ * failed to load. A caller that gets null must skip and count; a mesh emitter has
+ * no honest fallback, and a camera-facing quad standing in for a mesh reads as
+ * "something is there" while being wrong.
+ */
+export function makeSharedMeshLoader(base) {
+  const loader = new GLTFLoader();
+  const cache = new Map();          // file -> glTF scene root, or null when it failed
+  const failed = new Map();         // file -> reason, surfaced to the panel
+
+  return {
+    /** Load every file named, skipping ones already cached. Deduplicates. */
+    async preload(files) {
+      const want = [...new Set((files || []).filter(Boolean))].filter((f) => !cache.has(f));
+      await Promise.all(want.map(async (file) => {
+        try {
+          const gltf = await loader.loadAsync(`${base}${file}`);
+          cache.set(file, gltf.scene || null);
+          if (!gltf.scene) failed.set(file, 'glTF carried no scene');
+        } catch (e) {
+          // A file that will not load is cached as a failure so it is attempted
+          // once, not once per particle.
+          cache.set(file, null);
+          failed.set(file, String(e).slice(0, 120));
+        }
+      }));
+      return this.stats();
+    },
+
+    /** Synchronous. null means "not available", never a substitute. */
+    get(file, node) {
+      const scene = file ? cache.get(file) : null;
+      if (!scene) return null;
+      return node ? (scene.getObjectByName(node) || null) : scene;
+    },
+
+    stats() {
+      let ok = 0;
+      for (const v of cache.values()) if (v) ok += 1;
+      return { requested: cache.size, loaded: ok, failed: Object.fromEntries(failed) };
+    },
   };
 }
 

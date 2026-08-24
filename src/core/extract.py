@@ -54,7 +54,7 @@ def _registry_artifact(names, out, master, master_cache=None):
             client_configs = None
         document = build_registry(source, units, index, client_configs=client_configs)
         path = out / "characters.json"
-        path.write_text(json.dumps(document, ensure_ascii=False, indent=1) + "\n",
+        path.write_text(json.dumps(document, ensure_ascii=False, indent=1, allow_nan=False) + "\n",
                         encoding="utf-8", newline="\n")
         entry.update(status="succeeded", error="",
                      counts={k: v for k, v in document["summary"].items()
@@ -69,8 +69,16 @@ def _entry(name):
     return {"bundle": name, "status": "failed", "artifacts": [], "counts": {}, "error": ""}
 
 
+# A sound package is read by the phenomena job, which asks only for the cues and
+# packages master rows name.  So one can be present and still be asked for by
+# nobody, which is a different answer from "unreadable" and must not look like one.
+NO_SOUND_ROW = ("no master row names this sound package, so no cue was asked for "
+                "from it; music and ambience rows are only in caller-supplied "
+                "master tables and are read by the phenomena job")
+
+
 def discover_bundles(bundles):
-    """Select every bundle under *bundles* that belongs to a character asset pack.
+    """Select every bundle under *bundles* that belongs to a supported asset pack.
 
     Relative paths are normalized to logical double-underscore names; a file is
     kept when the router recognizes its domain, plus the shader lookup source.
@@ -90,6 +98,48 @@ def discover_bundles(bundles):
         names.append(logical)
     names.sort(key=lambda n: (0 if (route(n) and route(n).domain == "character") else 1, n))
     return names, ignored
+
+
+def _run_timeline_job(paths, out_dir, bundle_root=None):
+    """One timeline family as one job: track trees, clips and clip targets.
+
+    Both timeline families (the story cut-scene player and the furniture
+    fixture-timeline views) need the same three reads, and each read must see
+    the whole family together, because a package's pointers reach other packages
+    in the same family and a per-package run would resolve neither.  The track
+    read is the one that reports per package by name; the other two return their
+    records in the same sorted-package order, which the caller's sorted name list
+    recovers, so all three fold into one per-bundle map.
+    """
+    from perf.tracks import read_track_trees
+    from perf.clips import read_timeline_clips
+    from perf.clip_targets import read_clip_targets
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    # Each reader writes one JSON per package named after the package, so the
+    # three reads get three subdirectories rather than overwriting each other's
+    # ``<package>.json``.
+    track = read_track_trees(paths, str(out / "tracks"), bundle_root=bundle_root)
+    clips = read_timeline_clips(paths, str(out / "clips"), bundle_root=bundle_root)
+    targets = read_clip_targets(paths, str(out / "clip-targets"), bundle_root=bundle_root)
+    names = sorted(os.path.basename(str(p)) for p in paths)
+    per_bundle = {}
+    for record in track["packages"]:
+        per_bundle[record.get("package")] = dict(record)
+    for report in (clips, targets):
+        for i, record in enumerate(report["packages"]):
+            if not isinstance(record, dict):
+                continue
+            name = record.get("package")
+            if name is None and i < len(names):
+                name = names[i]
+            base = per_bundle.get(name)
+            if base is None:
+                per_bundle[name] = dict(record)
+            else:
+                base.update(record)
+    return {"perBundle": per_bundle, "tracks": track,
+            "clips": clips, "targets": targets}
 
 
 def write_pack_manifest(out):
@@ -114,25 +164,27 @@ def write_pack_manifest(out):
         return None
     units.sort(key=lambda u: int(u["unit"]))
     path = out / "manifest.json"
-    path.write_text(json.dumps({"version": 1, "units": units}, ensure_ascii=False, indent=1) + "\n",
+    path.write_text(json.dumps({"version": 1, "units": units}, ensure_ascii=False, indent=1, allow_nan=False) + "\n",
                     encoding="utf-8", newline="\n")
     return path
 
 
 def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
-                     master_cache=None):
+                     master_cache=None, vgmstream=None, ffmpeg=None):
     """Extract every logical bundle in *manifest* and write a JSON report.
 
     With ``manifest=None`` the bundle set is discovered from the *bundles*
-    directory instead: everything the router recognizes as part of a character
+    directory instead: everything the router recognizes as part of a supported
     asset pack is selected, and the report carries a ``discovery`` entry saying
     how many files were scanned, selected, and ignored.
 
     Character jobs use the shared settings bundle when its name is present in
     the same manifest; animations live solely in the shared motion library
-    artifact. Unknown bundle domains remain visible as
-    ``unsupported`` entries so future routers can be added without changing
-    the report shape.
+    artifact. A domain whose extraction writes one shared index is extracted in a
+    single job over all of that domain's packages, rather than one job per
+    package; which domains those are follows from the routing table. Unknown
+    bundle domains remain visible as ``unsupported`` entries so future routers can
+    be added without changing the report shape.
 
     *master* is a directory of caller-supplied master tables.  Identity and
     locomotion come only from there, so without it the registry artifact is
@@ -185,6 +237,119 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 lookup_bundles=[str(path) for path in lookup_paths])
         except Exception as exc:
             emoticon_error = f"{type(exc).__name__}: {exc}"
+    # A phenomenon spans several packages (a global one, a shared one, and one per
+    # site), so its packages are extracted together in one job rather than one at a
+    # time, and the shared index is written once from what that job produced.
+    phenomena_paths = {}
+    phenomena_errors = {}
+    for name in names:
+        target = route(name)
+        if target is None or target.domain != "phenomena":
+            continue
+        try:
+            phenomena_paths[name] = _bundle_path(bundles, name)
+        except Exception as exc:
+            phenomena_errors[name] = f"{type(exc).__name__}: {exc}"
+    phenomena_result = None
+    phenomena_error = None
+    if phenomena_paths:
+        try:
+            from phenomena.environments import extract_phenomena
+            phenomena_result = extract_phenomena(
+                [str(path) for path in phenomena_paths.values()],
+                str(out / "phenomena"), bundle_root=bundles, master=master,
+                master_cache=master_cache, vgmstream=vgmstream, ffmpeg=ffmpeg)
+        except Exception as exc:
+            phenomena_error = f"{type(exc).__name__}: {exc}"
+    # The site domain is one job over all of its packages too: a room module's
+    # meshes are in the kit package, a material's shader is in a shared package, and
+    # the placement table spans every site, so extracting one package at a time
+    # would resolve neither.
+    site_paths = {}
+    site_errors = {}
+    for name in names:
+        target = route(name)
+        if target is None or target.domain != "site":
+            continue
+        try:
+            site_paths[name] = _bundle_path(bundles, name)
+        except Exception as exc:
+            site_errors[name] = f"{type(exc).__name__}: {exc}"
+    site_result = None
+    site_error = None
+    if site_paths:
+        try:
+            from sites.pack import extract_sites
+            site_result = extract_sites(
+                [str(path) for path in site_paths.values()], str(out / "site"),
+                bundle_root=bundles, master=master, master_cache=master_cache)
+        except Exception as exc:
+            site_error = f"{type(exc).__name__}: {exc}"
+    # The fixture-interface family is one job over all its packages: the
+    # attach-points index and the per-fixture grid are each written once from
+    # what that job produced, not once per package.
+    fixture_paths = {}
+    fixture_errors = {}
+    for name in names:
+        target = route(name)
+        if target is None or target.domain != "fixture-interface":
+            continue
+        try:
+            fixture_paths[name] = _bundle_path(bundles, name)
+        except Exception as exc:
+            fixture_errors[name] = f"{type(exc).__name__}: {exc}"
+    fixture_result = None
+    fixture_error = None
+    if fixture_paths:
+        try:
+            from core.assets.packages import PackageStore
+            from fixtures.interface import extract as extract_fixtures
+            store = PackageStore([str(path) for path in fixture_paths.values()],
+                                 root=bundles)
+            fixture_result = extract_fixtures(
+                store, master, str(out / "fixture-interface"))
+        except Exception as exc:
+            fixture_error = f"{type(exc).__name__}: {exc}"
+    # The two timeline families each run their three timeline reads as one job
+    # over the whole family, for the same cross-package reason.
+    cutscene_paths = {}
+    cutscene_errors = {}
+    for name in names:
+        target = route(name)
+        if target is None or target.domain != "cutscene-timeline":
+            continue
+        try:
+            cutscene_paths[name] = _bundle_path(bundles, name)
+        except Exception as exc:
+            cutscene_errors[name] = f"{type(exc).__name__}: {exc}"
+    cutscene_result = None
+    cutscene_error = None
+    if cutscene_paths:
+        try:
+            cutscene_result = _run_timeline_job(
+                [str(path) for path in cutscene_paths.values()],
+                str(out / "cutscene-timeline"), bundle_root=bundles)
+        except Exception as exc:
+            cutscene_error = f"{type(exc).__name__}: {exc}"
+    fixture_timeline_paths = {}
+    fixture_timeline_errors = {}
+    for name in names:
+        target = route(name)
+        if target is None or target.domain != "fixture-timeline":
+            continue
+        try:
+            fixture_timeline_paths[name] = _bundle_path(bundles, name)
+        except Exception as exc:
+            fixture_timeline_errors[name] = f"{type(exc).__name__}: {exc}"
+    fixture_timeline_result = None
+    fixture_timeline_error = None
+    if fixture_timeline_paths:
+        try:
+            fixture_timeline_result = _run_timeline_job(
+                [str(path) for path in fixture_timeline_paths.values()],
+                str(out / "fixture-timeline"), bundle_root=bundles)
+        except Exception as exc:
+            fixture_timeline_error = f"{type(exc).__name__}: {exc}"
     for name in names:
         entry = _entry(name)
         target = route(name)
@@ -226,6 +391,57 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 if emoticon_error:
                     raise RuntimeError(emoticon_error)
                 result = emoticon_result or {}
+            elif target.domain == "phenomena":
+                if name in phenomena_errors:
+                    raise FileNotFoundError(phenomena_errors[name])
+                if phenomena_error:
+                    raise RuntimeError(phenomena_error)
+                result = dict((phenomena_result or {}).get("perBundle", {}).get(name, {}))
+                result["index"] = (phenomena_result or {}).get("path", "")
+            elif target.domain == "sound":
+                # Sound packages have no job of their own: the phenomena job reads
+                # them, because only the master rows it already reads say which
+                # cues are wanted from which package.
+                if phenomena_error:
+                    raise RuntimeError(phenomena_error)
+                asked = (phenomena_result or {}).get("soundPackages", {}).get(name)
+                if asked is None:
+                    entry["status"] = "unsupported"
+                    entry["error"] = NO_SOUND_ROW
+                    report["summary"]["unsupported"] += 1
+                    report["bundles"].append(entry)
+                    continue
+                if asked["status"] != "succeeded":
+                    raise RuntimeError(asked["error"])
+                result = {"streams": asked["streams"], "cues": asked["cues"],
+                          "archiveBytes": asked["archiveBytes"],
+                          "index": (phenomena_result or {}).get("path", "")}
+            elif target.domain == "site":
+                if name in site_errors:
+                    raise FileNotFoundError(site_errors[name])
+                if site_error:
+                    raise RuntimeError(site_error)
+                result = dict((site_result or {}).get("perBundle", {}).get(name, {}))
+                result["index"] = (site_result or {}).get("path", "")
+            elif target.domain == "fixture-interface":
+                if name in fixture_errors:
+                    raise FileNotFoundError(fixture_errors[name])
+                if fixture_error:
+                    raise RuntimeError(fixture_error)
+                result = dict((fixture_result or {}).get("perBundle", {}).get(name, {}))
+                result["index"] = (fixture_result or {}).get("path", "")
+            elif target.domain == "cutscene-timeline":
+                if name in cutscene_errors:
+                    raise FileNotFoundError(cutscene_errors[name])
+                if cutscene_error:
+                    raise RuntimeError(cutscene_error)
+                result = dict((cutscene_result or {}).get("perBundle", {}).get(name, {}))
+            elif target.domain == "fixture-timeline":
+                if name in fixture_timeline_errors:
+                    raise FileNotFoundError(fixture_timeline_errors[name])
+                if fixture_timeline_error:
+                    raise RuntimeError(fixture_timeline_error)
+                result = dict((fixture_timeline_result or {}).get("perBundle", {}).get(name, {}))
             elif target.domain == "talk":
                 # Which talks belong to one character is decided by master tables,
                 # so without them the corpus cannot be scoped and is not written.
@@ -245,7 +461,7 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             else:
                 from chara.characters import facial_tables
                 target_path = out / "facial-tables.json"
-                target_path.write_text(json.dumps(facial_tables(str(bundle)), ensure_ascii=False, indent=1) + "\n", encoding="utf-8", newline="\n")
+                target_path.write_text(json.dumps(facial_tables(str(bundle)), ensure_ascii=False, indent=1, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
                 result = {"json": str(target_path)}
             entry["status"] = "succeeded"
             entry["artifacts"] = [str(v) for v in result.values() if isinstance(v, str) and Path(v).exists()]
@@ -256,6 +472,28 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             report["summary"]["failed"] += 1
         report["bundles"].append(entry)
     report["derived"] = [_registry_artifact(names, out, master, master_cache)]
+    if phenomena_paths:
+        counted = {k: v for k, v in (phenomena_result or {}).items()
+                   if isinstance(v, int)}
+        report["derived"].append({
+            "artifact": "phenomena/index.json",
+            "status": "failed" if phenomena_error else "succeeded",
+            "counts": counted,
+            "error": phenomena_error or ""})
+    if site_paths:
+        report["derived"].append({
+            "artifact": "site/index.json",
+            "status": "failed" if site_error else "succeeded",
+            "counts": {k: v for k, v in (site_result or {}).items()
+                       if isinstance(v, int)},
+            "error": site_error or ""})
+    if fixture_paths:
+        report["derived"].append({
+            "artifact": "fixture-interface/attach-points.json",
+            "status": "failed" if fixture_error else "succeeded",
+            "counts": {k: v for k, v in (fixture_result or {}).items()
+                       if isinstance(v, int)},
+            "error": fixture_error or ""})
     pack_manifest = write_pack_manifest(out)
     report["derived"].append({
         "artifact": "manifest.json",
@@ -264,5 +502,5 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
         "error": "" if pack_manifest else "no character artifacts on disk"})
     report_path = out / "extraction-report.json"
     report["report"] = str(report_path)
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8", newline="\n")
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=1, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
     return report

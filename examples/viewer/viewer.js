@@ -12,6 +12,7 @@ import * as Seg from './segments.js';
 import { CheckPanel, runChecks, applySabotage, parseSabotage } from './selfcheck.js';
 import { PerformancePlayer, loadPerformance } from './performance.js';
 import { loadEmoticons } from './emoticon.js';
+import { Environment, CROSS_FADE_SECONDS } from './environment.js';
 
 // ---- shader 错误捕获(须在 renderer 前安装) ----
 const shaderErrors = [];
@@ -38,14 +39,24 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.LinearSRGBColorSpace; // gamma 直通
 renderer.toneMapping = THREE.NoToneMapping;
+// draw call / 三角形数按**整帧**统计。three.js 默认每次 render() 开头清零计数器,
+// 于是多趟渲染的帧只剩最后一趟的数 —— 后处理链把场景渲进离屏靶再合成一个全屏四边形时,
+// 读出来永远是「1 calls / 2 tris」,看着像场景没画,其实只是量错了。关掉自动清零,
+// 由帧循环开头清一次,读数就是这一帧真正提交的总量。
+renderer.info.autoReset = false;
+// 后处理链一帧里要 render 多次,而 three.js 每次 render 开头都会清计数器 ——
+// 关掉自动清零、帧首手动清一次,统计才是「整帧」而不是「最后一次绘制」。
+let lastFrameInfo = { calls: 0, triangles: 0 };
 view.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x14151c);
-const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
+const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 1000);   // 天空穹顶半径 60,远平面要够
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-scene.add(new THREE.GridHelper(4, 16, 0x2c2f3d, 0x21232e));
+const grid = new THREE.GridHelper(4, 16, 0x2c2f3d, 0x21232e);
+scene.add(grid);
+scene.add(camera);   // 相机族环境粒子挂在相机下,相机必须在场景图里
 
 const loader = new GLTFLoader();
 const clock = new THREE.Clock();
@@ -60,8 +71,11 @@ const app = {
   userTouchedSpeak: false,
   _sabotageNaN: false,
   _sabotagePatch: false,
+  _sabotageResize: false,
+  _resize: null,
   emoticon: null,
   emoticonItems: [],
+  environment: null,
 };
 
 let tables = null;
@@ -176,6 +190,143 @@ const emoticonReady = loadEmoticons(`${BASE}/emoticons/emoticons.json`).then((re
   queueMicrotask(fillEmoticonSelect);
   return null;
 });
+// ---- 环境(现象:天气)----
+// 数据:phenomena/index.json + 逐现象 config/ramp/postprocess/fx。两条通道见 environment.js:
+// 一条是现象驱动的全局着色量(逐帧写一组共享 uniform),一条是光照九项(角色组直接喂 toon 着色)。
+// 切换现象 = 0.25 秒交叉淡化;站点覆盖按两级查找(室内开关选的是那个真的带覆盖的站点)。
+// 环境层默认**关**:没有 phenomena/ 数据时页面照旧可用,开关与列表如实显示缺失原因。
+let environment = null;
+let envOn = false;
+let envErr = null;
+let envWant = params.get('env');            // ?env=<NNN_name> 直达;?env=0 关环境层
+const envReady = (async () => {
+  const env = new Environment({ scene, camera, renderer, base: BASE });
+  const ok = await env.load();
+  if (!ok) { envErr = env.errors[0] || 'phenomena/ 读不到'; return null; }
+  environment = env;
+  app.environment = env;
+  return env;
+})().catch((e) => { envErr = `phenomena: ${String(e).slice(0, 100)}`; return null; });
+
+function envLabel(name) {
+  const entry = environment && environment.index.phenomena[name];
+  const m = entry && entry.master;
+  // 名字优先用 master 的英文名(master 由使用者自备,没有它就只有资产名)。
+  const short = m && m.englishName ? m.englishName : name.replace(/^\d+_/, '');
+  return { short, bright: m ? m.brightnessType : null, time: m ? m.timePeriodType : null, icon: entry && entry.icon };
+}
+
+function buildEnvList() {
+  const box = $('envList');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!environment) {
+    box.innerHTML = `<div class="empty">${envErr ? `缺 phenomena 数据(${envErr})` : '无现象数据'}</div>`;
+    for (const id of ['bEnv', 'bEnvIndoor', 'bEnvParticles', 'bEnvPost', 'bEnvSky', 'bEnvGround', 'selEnvSite']) {
+      const el = $(id); if (el) el.disabled = true;
+    }
+    return;
+  }
+  for (const name of environment.names) {
+    const L = envLabel(name);
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'echip';
+    b.dataset.env = name;
+    const img = L.icon
+      ? `<img src="${environment.root}/${L.icon}" alt="" loading="lazy">`
+      : '<span class="ph"></span>';         // 无图标(投递站现象):同尺寸占位
+    b.innerHTML = `${img}<span class="en">${L.short}</span>`;
+    b.title = `${name}${L.time ? ` · ${L.time}` : ''}${L.bright ? ` · ${L.bright}` : ''}`;
+    b.onclick = () => setEnvPhenomenon(name);
+    box.appendChild(b);
+  }
+  const badge = $('envCount');
+  if (badge) badge.textContent = environment.names.length || '';
+  const sel = $('selEnvSite');
+  if (sel) {
+    // 站点名单从数据里数出来(粒子的 site 字段),不写死。
+    const sites = new Set();
+    for (const p of Object.values(environment.index.phenomena || {})) {
+      for (const v of p.variants || []) {
+        const m = /^unique__(.+)$/.exec(v);
+        if (m) sites.add(m[1]);
+      }
+    }
+    const list = [...sites].sort();
+    sel.innerHTML = list.map((s) => `<option value="${s}">站点:${s}</option>`).join('');
+    if (list.includes(environment.site)) sel.value = environment.site;
+    else if (list.length) { environment.site = list[0]; sel.value = list[0]; }
+  }
+}
+
+function syncEnvUI() {
+  const b = $('bEnv');
+  if (b) b.classList.toggle('on', envOn);
+  document.querySelectorAll('#envList .echip').forEach((r) => r.classList.toggle('on',
+    envOn && environment && environment.to && r.dataset.env === environment.to.name));
+  const hint = $('envHint');
+  if (hint) {
+    if (!environment) hint.innerHTML = `<span class="warn">${envErr || '无现象数据'}</span>`;
+    else if (!envOn) hint.textContent = `${environment.names.length} 个现象 · 点一个开启环境层`;
+    else {
+      const st = environment.status();
+      const L = envLabel(st.phenomenon || '');
+      hint.innerHTML = `<span class="ok">${st.phenomenon || '—'}</span> <span class="dim">`
+        + `${L.time || '时段未知'} · ${L.bright ? `亮度 ${L.bright}` : '亮度未知'}`
+        + `${st.usedOverride ? ' · 覆盖' : ''}${st.homeAngleUsed ? ' · 家园角' : ''}</span>`;
+    }
+  }
+  const lh = $('lightHint');
+  if (lh) {
+    lh.innerHTML = envOn
+      ? '<span class="warn">环境层接管光照:滑块此刻不生效</span>'
+      : '&nbsp;';
+  }
+  const ib = $('bEnvIndoor');
+  if (ib) ib.disabled = !environment || !envOn;
+  for (const id of ['bEnvParticles', 'bEnvPost', 'bEnvSky', 'bEnvGround', 'selEnvSite']) {
+    const el = $(id); if (el) el.disabled = !environment || !envOn;
+  }
+}
+
+/** 点一个现象:第一次点顺手把环境层打开;之后每次切换走 0.25 秒交叉淡化。 */
+async function setEnvPhenomenon(name, seconds = CROSS_FADE_SECONDS) {
+  if (!environment) return false;
+  const first = !environment.to;
+  const ok = await environment.setPhenomenon(name, first ? 0 : seconds);
+  if (!ok) { syncEnvUI(); return false; }
+  if (!envOn) enableEnv(true);
+  syncEnvUI();
+  return true;
+}
+
+function enableEnv(on) {
+  if (!environment) return;
+  envOn = !!on;
+  if (envOn) {
+    environment.attach();
+    environment.setCharacterMaterials(current ? current.mats : []);
+    grid.visible = false;                  // 有地面了,诊断用的地格网让位
+    scene.background = null;               // 天空穹顶接管背景
+  } else {
+    environment.detach();
+    grid.visible = true;
+    scene.background = new THREE.Color(0x14151c);
+    // 交还光照:把面板上的角度与日/夜色重新推给角色材质。
+    if (current) {
+      Shading.setNight(current.mats, night);
+      Shading.setLightDir(current.mats, Shading.lightDirFromAngles(+$('rLightXZ').value, +$('rLightY').value));
+      Shading.setShadeColors(current.mats, Shading.SHADE_NEUTRAL, Shading.SHADE_NEUTRAL);
+    }
+  }
+  syncEnvUI();
+}
+
+// The self-check uses the same public switch path as the environment buttons.
+app.setEnvPhenomenon = setEnvPhenomenon;
+app.setEnvEnabled = enableEnv;
+
 const perfReady = loadPerformance(`${BASE}/alone-actions.json`).then((d) => { perfDoc = d; return d; });
 let checksRan = false;
 const panel = new CheckPanel(checkEl);
@@ -427,6 +578,8 @@ async function loadUnit(unit) {
   Shading.setLightDir(mats, Shading.lightDirFromAngles(
     +$('rLightXZ').value, +$('rLightY').value)); // 换角色保留当前光向
   Shading.setDebugMode(mats, +$('selDebug').value);
+  // 环境层开着:光照九项里的角色三项由现象决定,换角色要立刻重新接线(不然新角色吃默认光)。
+  if (envOn && environment) environment.setCharacterMaterials(mats);
 
   // ---- 布料 ----
   let cloth = null;
@@ -868,7 +1021,7 @@ $('bSpeak').onclick = (e) => {
 $('bNight').onclick = (e) => {
   night = !night;
   e.target.classList.toggle('on', night);
-  if (current) Shading.setNight(current.mats, night);
+  if (current && !envOn) Shading.setNight(current.mats, night);   // 环境层接管光色时不插手
 };
 // Light direction controls default to angleXZ=48° / angleY=30°.
 // 滑块旁的读数用等宽字体、固定宽度:拖动时数字不该把旁边的控件挤来挤去。
@@ -877,13 +1030,55 @@ const applyLight = () => {
   $('oLightXZ').value = `${xz}°`;
   $('oLightY').value = `${y}°`;
   const v = Shading.lightDirFromAngles(xz, y);
-  if (current) Shading.setLightDir(current.mats, v);
+  // 环境层开着时光照由现象决定:滑块此刻不生效(提示行照实说,不静默失效)。
+  if (current && !envOn) Shading.setLightDir(current.mats, v);
 };
 $('rLightXZ').oninput = applyLight;
 $('rLightY').oninput = applyLight;
 $('bLightReset').onclick = () => { $('rLightXZ').value = 48; $('rLightY').value = 30; applyLight(); };
 $('selDebug').onchange = (e) => { if (current) Shading.setDebugMode(current.mats, +e.target.value); };
 $('bAutoPerf').onclick = () => { perfAuto = !perfAuto; syncPerfUI(); };
+// ---- 环境面板 ----
+$('bEnv').onclick = async () => {
+  if (!environment) return;
+  if (!envOn && !environment.to) {            // 还没选过现象:开就落到第一个
+    await setEnvPhenomenon(environment.names[0], 0);
+    return;
+  }
+  enableEnv(!envOn);
+};
+$('bEnvIndoor').onclick = (e) => {
+  if (!environment) return;
+  const on = !e.target.classList.contains('on');
+  e.target.classList.toggle('on', on);
+  environment.setIndoor(on);               // 两级查找的第一级(带覆盖的那个站点)
+  syncEnvUI();
+};
+$('bEnvParticles').onclick = (e) => {
+  if (!environment) return;
+  const on = !e.target.classList.contains('on');
+  e.target.classList.toggle('on', on);
+  environment.setParticles(on);
+};
+$('bEnvPost').onclick = (e) => {
+  if (!environment) return;
+  const on = !e.target.classList.contains('on');
+  e.target.classList.toggle('on', on);
+  environment.setPost(on);
+};
+$('bEnvSky').onclick = (e) => {
+  if (!environment) return;
+  const on = !e.target.classList.contains('on');
+  e.target.classList.toggle('on', on);
+  environment.setSkyVisible(on);
+};
+$('bEnvGround').onclick = (e) => {
+  if (!environment) return;
+  const on = !e.target.classList.contains('on');
+  e.target.classList.toggle('on', on);
+  environment.setGroundVisible(on);
+};
+$('selEnvSite').onchange = (e) => { if (environment) environment.setSite(e.target.value); };
 $('scnFilter').oninput = (e) => applyFilter('scenarios', 'scnCount', e.target.value);
 $('selPerfMode').onchange = (e) => {
   perfMode = e.target.value;
@@ -927,7 +1122,7 @@ function refreshHud(dt) {
   if (hudT < 0.25) return;
   fps = fpsN / Math.max(fpsAcc, 1e-6); fpsAcc = 0; fpsN = 0; hudT = 0;
   if (!current) return;
-  const info = renderer.info.render;
+  const info = lastFrameInfo;   // 上一帧的整帧统计(见 lastFrameInfo 的注释)
   const cs = current.cloth ? current.cloth.stats() : null;
   const f = current.facial;
   const em = current.emote && current.emoticon ? current.emoticon.stats() : null;
@@ -942,6 +1137,8 @@ function refreshHud(dt) {
     + cell('头顶件', (em
       ? `<span class="ok">${current.emote.name.replace(/^fx_emote_/, '')}</span> <span class="dim">${em.kind} ${em.phase || '—'}`
         + `${em.kind === 'particle' ? ` ${em.live} 粒(峰 ${em.peak})` : ` ${em.sprites} 片`}${current.emote.seconds ? ` ${current.emote.seconds}s` : ''}</span>`
+        + `${em.suppressed ? ` <span class="warn">停发 ${em.suppressed} 发(${Object.entries(em.suppressedShapes)
+          .map(([k, v]) => `${k}x${v}`).join(' ')} 无发射公式)</span>` : ''}`
       : (emoticonErr ? `<span class="bad">${emoticonErr}</span>` : '<span class="dim">无</span>'))
       + `${emoticonAuto ? '' : ' <span class="dim">auto 关</span>'}`)
     + cell('表演', current && current.perf
@@ -950,6 +1147,23 @@ function refreshHud(dt) {
         : `<span class="ok">${current.perf.manual ? '点播' : perfMode}</span>`
           + `<span class="dim"> ${(current.perf.current && current.perf.current.id) ?? ''}</span>`)
       : '<span class="dim">无编排数据</span>')
+    + cell('环境', (() => {
+      if (!environment) return `<span class="${envErr ? 'bad' : 'dim'}">${envErr || '无现象数据'}</span>`;
+      if (!envOn) return '<span class="dim">关</span>';
+      const st = environment.status();
+      const sup = st.particles.suppressed
+        ? ` <span class="warn">停发 ${st.particles.suppressed} 发(${Object.entries(st.particles.suppressedShapes)
+          .map(([k, v]) => `${k}x${v}`).join(' ')} 无发射公式)</span>` : '';
+      // 摘掉的渲染器与停发是两件事:摘掉 = 原版本来就不画(渲染器关着/节点关着),
+      // 停发 = 我们没有它的发射公式。混成一个数会把「照原版不画」读成缺失。
+      const sk = st.particles.skipped;
+      const skipped = sk && sk.total
+        ? ` · <span class="dim">不画 ${sk.total}(渲染器关 ${sk.disabled} 节点关 ${sk.inactive})</span>` : '';
+      return `<span class="ok">${st.phenomenon}</span> <span class="dim">`
+        + `${st.usedOverride ? '覆盖' : st.site}${st.fadingFrom ? ` 淡化 ${(st.fade * 100).toFixed(0)}%` : ''}`
+        + ` · 雾 ${st.fog.enabled ? 'on' : 'off'} · 粒子 ${st.particles.live}/${st.particles.emitters} 发`
+        + `${st.post.enabled ? ` · 后处理 ${st.post.passes.length} 趟` : ' · 后处理关'}</span>${skipped}${sup}`;
+    })())
   );
 }
 
@@ -959,6 +1173,7 @@ let nanInjected = false;
 let dbgFrame = 0;
 renderer.setAnimationLoop(() => {
   const dt = clock.getDelta();
+  renderer.info.reset();   // 整帧统计:autoReset 关着,这里清一次(见 renderer 初始化处)
   if (FREEZE !== null && current && current.mixer && !current._froze) {
     current.mixer.update(FREEZE);   // 推进到固定时刻
     playing = false;                // 之后冻结
@@ -977,6 +1192,7 @@ renderer.setAnimationLoop(() => {
       _hp.copy(current.headOffset);
       current.headAnchor.localToWorld(_hp);
       Shading.setHeadPos(current.mats, _hp);
+      if (envOn && environment) environment.setSubject(_hp);   // 落影投射体跟着头部参考点
     }
     if (playing) updateEmoticon(dt);   // 朝相机 + 段推进 + 回收(位置由 HeadRoot 挂点带,不用同步)
     if (clothOn && current.cloth) {
@@ -1000,15 +1216,23 @@ renderer.setAnimationLoop(() => {
     }
     current.facial.update();
   }
+  if (envOn && environment) environment.update(dt);   // 淡化推进 + 天空跟随 + 环境粒子
   refreshHud(dt);
   controls.update();
-  renderer.render(scene, camera);
+  // 环境层的后处理链接管最终绘制;它没接管(关掉/无档案)时照常直画到画布。
+  if (!(envOn && environment && environment.render())) renderer.render(scene, camera);
+  // Negative self-check path: emulate a post-process buffer writing the wrong height
+  // back into the renderer. Normal rendering never takes this path.
+  if (app._sabotageResize) renderer.setSize(view.clientWidth, view.clientHeight + 24, false);
+  // 绘制之后拍一份整帧统计给 HUD 用。HUD 在绘制**之前**刷新(它要用同一帧的 dt),
+  // 而 autoReset 关着、计数器在帧首清零 —— 直接读就永远是 0。读上一帧的快照才是整帧真值。
+  lastFrameInfo = { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles };
 });
 
 function resize() {
   const w = view.clientWidth, h = view.clientHeight;
   if (!w || !h) return;
-  renderer.setSize(w, h, false);
+  renderer.setSize(w, app._sabotageResize ? h + 24 : h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }
@@ -1017,6 +1241,7 @@ addEventListener('resize', resize);
 // 所以直接盯这一格的尺寸,别只听 window.resize。
 if (typeof ResizeObserver === 'function') new ResizeObserver(resize).observe(view);
 resize();
+app._resize = resize;
 
 // 自检里「动画推进 / 段衔接」两项需要有动作在跑才测得到。播一遍带 S+L 的探针族,
 // 那两项自己会复测(逻辑在 selfcheck 侧盯着,这里只负责起播);走预览语义,编排挂起。
@@ -1051,4 +1276,17 @@ $('bCheckMotion').onclick = () => {
   buildUnitList();
   const want = +params.get('unit') || unitList[0].unit;
   await loadUnit(unitList.some((u) => u.unit === want) ? want : unitList[0].unit);
+
+  // 环境层:列表总是建(缺数据就显示缺失原因)。`?env=0` 明确关掉,`?env=<资产名>` 直达一个现象。
+  await envReady;
+  app.dataInfo.phenomena = environment ? environment.names.length : 0;
+  buildEnvList();
+  if (environment && envWant && envWant !== '0') {
+    const hit = environment.names.includes(envWant)
+      ? envWant
+      : environment.names.find((n) => n.includes(envWant));
+    if (hit) await setEnvPhenomenon(hit, 0);
+    else envErr = `?env=${envWant} 不在现象名单里`;
+  }
+  syncEnvUI();
 })();

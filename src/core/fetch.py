@@ -71,14 +71,42 @@ class Manifest:
             return cls(payload.get("bundles", payload.get("manifest", payload)), payload.get("version"))
         return cls(payload)
 
-    def roots(self) -> list[str]:
-        return sorted(name for name in self.entries
-                      if name.startswith("mysekai/character/mdl_sd_")
-                      or name.startswith("mysekai/effect/emoticon/")
-                      or name in {"mysekai/character_motion", "mysekai/character_settings",
-                                  "mysekai/character_alone_action",
-                                  "mysekai/shader",
-                                  "mysekai/talk/scenario/talk"})
+    def roots(self, audio: Iterable[str] = ()) -> list[str]:
+        """Entry bundles to download: everything the extractor has a domain for.
+
+        The router is the single source of truth here, so a newly supported asset
+        domain is pulled without editing a second list; the shader package is
+        added because it is a material-lookup source rather than a domain of its
+        own.  Dependencies are resolved from these, so a package reached only as a
+        dependency does not need to be named.
+
+        Sound is the one domain the router cannot decide alone: which packages
+        hold a world's music and ambience is stated by master rows, and no
+        package declares one as a dependency.  Those names are passed in as
+        *audio* (see :func:`sound_roots`); with none, no sound package is a root.
+        """
+        from .assets.router import route
+        selected = set()
+        for name in self.entries:
+            target = route(flatten(name))
+            if (target is not None and target.domain != "sound") \
+                    or name == "mysekai/shader":
+                selected.add(name)
+        selected.update(self.sound_entries(audio)[0])
+        return sorted(selected)
+
+    def sound_entries(self, names: Iterable[str]) -> tuple[list[str], list[str]]:
+        """Split named sound packages into the ones this manifest carries and the rest.
+
+        A row may name a package this manifest has no entry for.  Asked for as a
+        root it would abort the download as a missing dependency, and dropped
+        without a word it would look as if the row never existed, so both halves
+        are returned.
+        """
+        known = {flatten(name): name for name in self.entries}
+        wanted = sorted(set(names))
+        return ([known[name] for name in wanted if name in known],
+                [name for name in wanted if name not in known])
 
     def required_bundles(self, roots: Iterable[str]) -> list[BundleEntry]:
         state: dict[str, int] = {}
@@ -105,6 +133,35 @@ class Manifest:
 
 def flatten(name: str) -> str:
     return name.replace("/", "__")
+
+
+NO_AUDIO_MASTER = ("no master directory or base URL was supplied, and only master "
+                   "rows name the sound packages: no package declares one as a "
+                   "dependency, so nothing names the audio to download")
+NO_AUDIO_ROWS = "the supplied master tables name no sound package"
+
+
+def sound_roots(master: str | None, master_cache: str | None = None) -> tuple[list[str], dict]:
+    """Sound packages the caller's master tables name, and a report on the answer.
+
+    Returns ``(names, report)``.  *names* are logical package names; *report*
+    carries the tables that named them, the ones that were absent, and — when
+    nothing was named — why.  It names packages and tables only: it is printed
+    and pasted around, so a path from the running machine has no place in it.
+    """
+    report = {"status": "skipped", "roots": [], "error": NO_AUDIO_MASTER,
+              "tables": {}, "absentTables": [], "notInManifest": []}
+    if not master:
+        return [], report
+    from .master import Master
+    names, counted = Master(master, cache_dir=master_cache).sound_packages()
+    report["tables"] = counted["tables"]
+    report["absentTables"] = counted["absentTables"]
+    if names:
+        report["status"], report["error"] = "succeeded", ""
+    else:
+        report["error"] = NO_AUDIO_ROWS
+    return names, report
 
 
 def sha256(path: Path) -> str:
@@ -168,12 +225,18 @@ def download_one(entry: BundleEntry, asset_base_url: str, raw_dir: Path, retries
 def pull(manifest_path: str, out: str | os.PathLike[str] | None, asset_base_url: str,
          workers: int = 8, retries: int = 4, master: str | None = None,
          master_cache: str | None = None,
-         extract_out: str | os.PathLike[str] | None = None) -> dict:
+         extract_out: str | os.PathLike[str] | None = None,
+         vgmstream: str | None = None, ffmpeg: str | None = None) -> dict:
     asset_base_url = asset_base(asset_base_url)
     manifest = Manifest.load(manifest_path)
     output = Path(out) if out else Path.cwd() / "moly-pull-output"
     output.mkdir(parents=True, exist_ok=True)
-    entries = manifest.required_bundles(manifest.roots())
+    # The sound packages are named by master rows rather than by any package's
+    # dependency list, so they are looked up before the root set is built; with
+    # no master, none of them is a root and the report says why.
+    audio_names, audio = sound_roots(master, master_cache)
+    audio["roots"], audio["notInManifest"] = manifest.sound_entries(audio_names)
+    entries = manifest.required_bundles(manifest.roots(audio=audio_names))
     # Extraction artifacts default to local-data so the browser example opens
     # right after a pull; the download/decrypt workspace stays under `output`.
     raw_dir, decrypted_dir = output / "raw", output / "decrypted"
@@ -189,9 +252,11 @@ def pull(manifest_path: str, out: str | os.PathLike[str] | None, asset_base_url:
     names.write_text("\n".join(entry.bundle_name for entry in entries) + "\n", encoding="utf-8", newline="\n")
     from .extract import extract_manifest
     report = extract_manifest(names, decrypted_dir, extracted_dir, master=master,
-                              master_cache=master_cache)
-    (output / "downloads.json").write_text(json.dumps(sorted(downloads, key=lambda item: item["bundleName"]), indent=2) + "\n", encoding="utf-8", newline="\n")
-    return {"requiredBundles": len(entries), "downloads": len(downloads), "extraction": report}
+                              master_cache=master_cache, vgmstream=vgmstream,
+                              ffmpeg=ffmpeg)
+    (output / "downloads.json").write_text(json.dumps(sorted(downloads, key=lambda item: item["bundleName"]), indent=2, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
+    return {"requiredBundles": len(entries), "downloads": len(downloads),
+            "audio": audio, "extraction": report}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -202,5 +267,5 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--retries", type=int, default=4)
     args = parser.parse_args(argv)
-    print(json.dumps(pull(args.manifest, args.out, args.asset_base_url, args.workers, args.retries), ensure_ascii=False))
+    print(json.dumps(pull(args.manifest, args.out, args.asset_base_url, args.workers, args.retries), ensure_ascii=False, allow_nan=False))
     return 0

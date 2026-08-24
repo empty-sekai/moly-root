@@ -11,8 +11,13 @@
 // Texture sampling stays linear and the renderer performs no tone mapping.
 // The default light angles are 48 degrees azimuth and 30 degrees elevation;
 // the head reference is (0, 0.6193, 0) in avatar space.
+//
+// 现象环境的全局量(envglobals.js)按引用铺进每份材质:本着色器只声明并消费其中的**雾**九参,
+// 其余全局量照样在 uniforms 里被推送,只是这一支着色器不读它们。环境层没起来时雾开关为 0,
+// 输出与不铺这组 uniform 完全一致。
 
 import * as THREE from './three.module.min.js';
+import { withEnvGlobals, ENV_FOG_CHUNK } from './envglobals.js';
 
 export const LIGHT_DIR = [0.5795, 0.5, 0.6435];      // cos48·cos30, sin30, sin48·cos30
 export const LIGHT_DAY = [1, 1, 1, 1];
@@ -27,7 +32,9 @@ const VERT = /* glsl */`
 varying vec2 vUv;
 varying vec3 vNormal;
 varying vec3 vWorldPos;
+varying float vFogRamp;
 uniform vec2 uvOffset;
+${ENV_FOG_CHUNK}
 #include <skinning_pars_vertex>
 void main() {
   vUv = uv + uvOffset;   // Apply the atlas offset before all texture samples
@@ -38,6 +45,9 @@ void main() {
   #include <skinning_vertex>
   vec4 wp = modelMatrix * vec4(transformed, 1.0);
   vWorldPos = wp.xyz;
+  // 雾的能见度斜坡逐顶点算(与原版同一位置),片元只吃插值结果。
+  // 距离用线性眼空间前向深度:眼空间 z 是负的,取负即前向距离。
+  vFogRamp = envFogRamp(-(viewMatrix * wp).z);
 #ifdef EYEBROW
   vNormal = vec3(0.0);   // Eyebrow geometry intentionally has no normal input
 #else
@@ -72,7 +82,8 @@ uniform float eyebrowAlpha;
 varying vec2 vUv;
 varying vec3 vNormal;
 varying vec3 vWorldPos;
-
+varying float vFogRamp;
+${ENV_FOG_CHUNK}
 void main() {
   vec4 albedo = texture2D(mainTex, vUv);
 #ifdef EYEBROW
@@ -109,6 +120,7 @@ void main() {
   vec3 color = mix(lit, lit * shadeCol.rgb, shading);
   if (debugMode == 3)                              // 诊断:分支可视化(红=球面支,蓝=阶调支)
     color = mix(color, mix(vec3(0.2,0.2,1.0), vec3(1.0,0.2,0.2), pick), 0.35);
+  color = envApplyFogRamp(color, vFogRamp, vWorldPos.y);   // 现象的雾(开关为 0 时原样返回)
 #ifdef EYEBROW
   gl_FragColor = vec4(color, albedo.a * ebm * eyebrowAlpha) * brightness;
 #else
@@ -116,6 +128,9 @@ void main() {
 #endif
 }
 `;
+
+// 环境层要按名字数出「谁在消费哪个全局量」,所以把片元源码导出(只读用途)。
+export const CHARACTER_FRAG = FRAG;
 
 let _black = null, _white = null;
 function tex1x1(rgba) {
@@ -150,7 +165,7 @@ export function makeCharacterMaterial(opts) {
     defines,
     vertexShader: VERT,
     fragmentShader: FRAG,
-    uniforms: {
+    uniforms: withEnvGlobals({
       mainTex: { value: prepTexture(mainTex) || whiteTex() },
       bodyMaskTex: { value: prepTexture(bodyMaskTex) || blackTex() },
       shaderUsage: { value: +usage || 0 },
@@ -173,7 +188,7 @@ export function makeCharacterMaterial(opts) {
         eyebrowClip: { value: eyebrow.clip ?? 0.5 },
         eyebrowAlpha: { value: eyebrow.alpha ?? 1 },
       } : {}),
-    },
+    }),
     side: THREE.FrontSide, // Cull Back
   });
   if (eyebrow) {
@@ -218,6 +233,15 @@ export function setGlobal(materials, key, setter) {
 export function setNight(materials, night) {
   const c = night ? LIGHT_NIGHT : LIGHT_DAY;
   setGlobal(materials, 'lightColor', (u) => u.value.set(c[0], c[1], c[2], c[3]));
+}
+// 现象环境接管时用的三个入口:光色取现象的**角色**方向光色,两个暗部色取皮肤/身体暗部色。
+// 三者都是 `[r,g,b,a]`,alpha 照原样用 —— 着色器里它是「这一项施加多少」的权重,不是透明度。
+export function setLightColor(materials, c) {
+  setGlobal(materials, 'lightColor', (u) => u.value.set(c[0], c[1], c[2], c[3] ?? 1));
+}
+export function setShadeColors(materials, skin, body) {
+  setGlobal(materials, 'skinShade', (u) => u.value.set(skin[0], skin[1], skin[2], skin[3] ?? 1));
+  setGlobal(materials, 'bodyShade', (u) => u.value.set(body[0], body[1], body[2], body[3] ?? 1));
 }
 // Light direction from azimuth and elevation:
 // L = (cos(xz)·cos(y), sin(y), sin(xz)·cos(y)).

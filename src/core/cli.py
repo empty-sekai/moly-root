@@ -59,10 +59,13 @@ def main(argv=None):
     p.add_argument("--master-url", nargs="?", const="", default=None,
                     help="base URL to append <table>.json to; no value uses the public default base")
     p.add_argument("--master-cache", help="where fetched tables are cached")
+    p.add_argument("--vgmstream", help="path to the external audio decoder "
+                                       "(vgmstream-cli), or the directory holding it")
+    p.add_argument("--ffmpeg", help="path to ffmpeg, used only to write a compressed copy of each decoded sound")
     x = sub.add_parser("extract", help="extract bundles listed in a manifest")
     x.add_argument("--manifest",
-                   help="optional bundle list; omitted = select every character-asset-pack "
-                        "bundle found under --bundles")
+                   help="optional bundle list; omitted = select every supported "
+                        "asset-pack bundle found under --bundles")
     x.add_argument("--bundles", required=True)
     x.add_argument("--out", default="local-data",
                    help="output directory (default: local-data, which stays out of version control)")
@@ -72,6 +75,9 @@ def main(argv=None):
     x.add_argument("--master-url", nargs="?", const="", default=None,
                     help="base URL to append <table>.json to; no value uses the public default base")
     x.add_argument("--master-cache", help="where fetched tables are cached")
+    x.add_argument("--vgmstream", help="path to the external audio decoder "
+                                       "(vgmstream-cli), or the directory holding it")
+    x.add_argument("--ffmpeg", help="path to ffmpeg, used only to write a compressed copy of each decoded sound")
     c = sub.add_parser("characters", help="extract one character bundle")
     c.add_argument("--bundle", required=True); c.add_argument("--out-dir", required=True); c.add_argument("--name", required=True)
     c.add_argument("--aux-bundle", action="append", default=[]); c.add_argument("--motion-bundle"); c.add_argument("--clips"); c.add_argument("--unit-id", type=int); c.add_argument("--facial-tables"); c.add_argument("--atlas-cell", default="512x256"); c.add_argument("--no-cloth", action="store_true")
@@ -100,6 +106,32 @@ def main(argv=None):
 
     e = sub.add_parser("emoticons", help="extract overhead-item effect packages")
     e.add_argument("--bundle", action="append", required=True); e.add_argument("--out-dir", required=True)
+    w = sub.add_parser("phenomena", help="extract weather (phenomena) environment packages")
+    w.add_argument("--bundle", action="append", required=True,
+                   help="an environment package, or the shared phenomena thumbnail package")
+    w.add_argument("--bundle-root",
+                   help="directory the packages a bundle depends on are read from")
+    w.add_argument("--out-dir", required=True)
+    w.add_argument("--master", help="directory of caller-supplied master tables")
+    w.add_argument("--master-url", nargs="?", const="", default=None,
+                   help="base URL to append <table>.json to; no value uses the public default base")
+    w.add_argument("--master-cache", help="where fetched tables are cached")
+    w.add_argument("--vgmstream", help="path to the external audio decoder "
+                                      "(vgmstream-cli), or the directory holding it; "
+                                      "without it PATH is searched and the audio "
+                                      "entry says what is missing")
+    w.add_argument("--ffmpeg", help="path to ffmpeg, used only to write a compressed "
+                                    "copy of each decoded sound")
+    q = sub.add_parser("site", help="extract the site (place) asset packages")
+    q.add_argument("--bundle", action="append", required=True,
+                   help="a package under the site path; repeat for as many as wanted")
+    q.add_argument("--bundle-root",
+                   help="directory the packages a bundle depends on are read from")
+    q.add_argument("--out-dir", required=True)
+    q.add_argument("--master", help="directory of caller-supplied master tables")
+    q.add_argument("--master-url", nargs="?", const="", default=None,
+                   help="base URL to append <table>.json to; no value uses the public default base")
+    q.add_argument("--master-cache", help="where fetched tables are cached")
     a = sub.add_parser("fetch-apk", help="discover, download, or inspect an Android APK")
     a.add_argument("--endpoint", default=None); a.add_argument("--timeout", type=float, default=30.0); a.add_argument("--retries", type=int, default=3)
     asub = a.add_subparsers(dest="apk_command", required=True)
@@ -111,11 +143,23 @@ def main(argv=None):
         from .fetch import pull
         source, cache = _master_source(args)
         report = pull(args.manifest, args.out, args.asset_base_url, args.workers, args.retries,
-                      master=source, master_cache=cache, extract_out=args.extract_out)
+                      master=source, master_cache=cache, extract_out=args.extract_out,
+                      vgmstream=args.vgmstream, ffmpeg=args.ffmpeg)
         if args.json:
             print(json.dumps(report, ensure_ascii=False))
         else:
             print(f"downloaded {report['downloads']}/{report['requiredBundles']} bundles")
+            # The sound packages are the one part of the set that master rows name,
+            # so "no audio" has a reason the caller must see without asking for JSON.
+            audio = report.get("audio") or {}
+            if audio.get("roots"):
+                print(f"audio: {len(audio['roots'])} sound packages named by master tables")
+            elif audio.get("error"):
+                print(f"audio: no sound package pulled ({audio['error']})")
+            if audio.get("notInManifest"):
+                print(f"audio: {len(audio['notInManifest'])} named sound packages "
+                      f"are not in this manifest: "
+                      f"{', '.join(audio['notInManifest'])}")
             _print_extract_summary(report["extraction"], args.extract_out or "local-data")
         return 0 if not report["extraction"]["summary"]["failed"] else 1
     if args.cmd == "fetch-apk":
@@ -134,7 +178,8 @@ def main(argv=None):
         from .extract import extract_manifest
         source, cache = _master_source(args)
         report = extract_manifest(args.manifest, args.bundles, args.out, args.unity_version,
-                                  master=source, master_cache=cache)
+                                  master=source, master_cache=cache,
+                                  vgmstream=args.vgmstream, ffmpeg=args.ffmpeg)
         if args.json:
             print(json.dumps(report, ensure_ascii=False))
         else:
@@ -174,7 +219,7 @@ def main(argv=None):
             client_configs = None
         document = build_registry(master, units, index, client_configs=client_configs)
         with open(args.out, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(document, handle, ensure_ascii=False, indent=1)
+            json.dump(document, handle, ensure_ascii=False, indent=1, allow_nan=False)
             handle.write("\n")
         print(json.dumps(document["summary"], ensure_ascii=False))
         return 0
@@ -193,6 +238,25 @@ def main(argv=None):
         from chara.emoticons import extract_emoticons
         print(json.dumps(extract_emoticons(args.bundle, args.out_dir), ensure_ascii=False))
         return 0
+    if args.cmd == "phenomena":
+        from phenomena.environments import extract_phenomena
+        source, cache = _master_source(args)
+        report = extract_phenomena(args.bundle, args.out_dir,
+                                   bundle_root=args.bundle_root, master=source,
+                                   master_cache=cache, vgmstream=args.vgmstream,
+                                   ffmpeg=args.ffmpeg)
+        print(json.dumps({k: v for k, v in report.items() if k != "perBundle"},
+                         ensure_ascii=False))
+        return 0
+    if args.cmd == "site":
+        from sites.pack import extract_sites
+        source, cache = _master_source(args)
+        report = extract_sites(args.bundle, args.out_dir,
+                               bundle_root=args.bundle_root, master=source,
+                               master_cache=cache)
+        print(json.dumps({k: v for k, v in report.items() if k != "perBundle"},
+                         ensure_ascii=False))
+        return 0
     if args.cmd == "alone-actions":
         from chara.alone_actions import write_alone_actions
         print(json.dumps(write_alone_actions(args.bundle, args.out), ensure_ascii=False))
@@ -200,7 +264,7 @@ def main(argv=None):
     if args.cmd == "facial-tables":
         tables = characters.facial_tables(args.bundle)
         with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump(tables, fh, ensure_ascii=False, indent=1); fh.write("\n")
+            json.dump(tables, fh, ensure_ascii=False, indent=1, allow_nan=False); fh.write("\n")
         print(json.dumps({k: len(v) for k, v in tables.items()})); return 0
     sampled = None
     if args.motion_bundle and args.clips:

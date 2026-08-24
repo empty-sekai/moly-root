@@ -12,6 +12,13 @@ modelled here is listed by name so the gap is visible instead of looking like an
 effect that simply does nothing.
 
 Angular values are radians per second, as serialized.
+
+Serialized field names and the names the engine's scripting API exposes differ
+in several places, and a lookup under the scripting name returns nothing without
+complaining.  This module always reads the serialized name and reports the value
+under the readable one, so ``m_EnergyLossOnCollision`` is emitted as
+``lifetimeLoss`` and ``octaves`` keeps its serialized spelling rather than
+``octaveCount``.
 """
 
 CURVE_MODES = {0: "constant", 1: "curve", 2: "twoCurves", 3: "twoConstants"}
@@ -28,10 +35,47 @@ RENDER_MODES = {0: "Billboard", 1: "Stretch", 2: "HorizontalBillboard",
 SIMULATION_SPACES = {0: "Local", 1: "World", 2: "Custom"}
 GRADIENT_TIME_SCALE = 65535.0
 
+# Custom data: two streams, each either off, four independent scalar curves, or
+# one colour.  All four component curves are serialized whatever the count says.
+CUSTOM_DATA_MODES = {0: "disabled", 1: "vector", 2: "color"}
+CUSTOM_DATA_COMPONENTS = 4
+
+# Sub-emitters: the trigger that makes a child emit, and the flags saying what
+# the child takes from its parent.
+SUB_EMITTER_TYPES = {0: "birth", 1: "collision", 2: "death", 3: "trigger",
+                     4: "manual"}
+SUB_EMITTER_INHERIT = (("color", 1), ("size", 2), ("rotation", 4),
+                       ("lifetime", 8), ("duration", 16))
+
+# Noise quality is the number of dimensions the field is sampled in, not a
+# level of detail: 3 samples a 3D field, 1 and 2 sample a 2D one.
+NOISE_QUALITY = {0: "low", 1: "medium", 2: "high"}
+NOISE_DIMENSIONS = {0: 1, 1: 2, 2: 3}
+
+# Collision: what is collided with, in how many dimensions, and how carefully.
+COLLISION_TYPES = {0: "planes", 1: "world"}
+COLLISION_MODES = {0: "3d", 1: "2d"}
+COLLISION_QUALITY = {0: "high", 1: "medium", 2: "low"}
+
+TRAIL_MODES = {0: "perParticle", 1: "ribbon"}
+TRAIL_TEXTURE_MODES = {0: "stretch", 1: "tile", 2: "distributePerSegment",
+                       3: "repeatPerSegment", 4: "static"}
+
+# The renderer's material slots: the particles are drawn with the first, and a
+# trail — when the trail module is on — with the second.  There is no separate
+# trail-material field on disk.
+TRAIL_MATERIAL_SLOT = 1
+
+UNMODELLED_MODULE = "particle module not modelled"
+UNRESOLVED_SUB_EMITTER = "sub-emitter is not in this package"
+UNRESOLVED_PLANE = "collision plane is not in this package"
+
 # Modules this decoder understands; anything else that is enabled is reported.
 MODELLED_MODULES = {
     "InitialModule", "EmissionModule", "ShapeModule", "SizeModule", "ColorModule",
     "RotationModule", "VelocityModule", "ClampVelocityModule", "UVModule",
+    "CustomDataModule", "SubModule", "NoiseModule", "ForceModule",
+    "CollisionModule", "TrailModule",
 }
 
 
@@ -110,8 +154,155 @@ def _vec(node, keys="xyz"):
     return [round(float(node.get(k, 0.0)), 6) for k in keys]
 
 
-def decode_system(tree):
-    """Emitter parameters of one particle system, plus its unmodelled modules."""
+def _number(node, key, default=0.0):
+    return round(float(node.get(key, default)), 6)
+
+
+def _enum(table, value):
+    return table.get(value, value)
+
+
+def _node_path(pointer, resolve_node, gaps, module, reason):
+    """The prefab node a pointer names, or ``None`` when it names none.
+
+    A pointer that is null on disk is an authored state — that entry does
+    nothing — so it is not a gap.  A pointer that names something this package
+    does not hold is a gap, and is reported rather than flattened to the same
+    ``None``.
+    """
+    if not (pointer or {}).get("m_PathID", 0):
+        return None
+    path = None if resolve_node is None else resolve_node(pointer)
+    if path is None:
+        gaps.append({"module": module, "reason": reason})
+    return path
+
+
+def _custom_data_stream(module, stream):
+    """One custom-data stream: four independent curves, or one colour.
+
+    ``componentCount`` says how many components are *evaluated*; all four are
+    serialized regardless, so all four are reported and none of the authored
+    data is dropped.
+    """
+    mode = module.get(f"mode{stream}")
+    return {
+        "mode": _enum(CUSTOM_DATA_MODES, mode),
+        "componentCount": module.get(f"vectorComponentCount{stream}"),
+        "components": [min_max_curve(module.get(f"vector{stream}_{component}", {}))
+                       for component in range(CUSTOM_DATA_COMPONENTS)],
+        "color": min_max_gradient(module.get(f"color{stream}", {})),
+    }
+
+
+def _sub_emitter(entry, resolve_node, gaps):
+    """One sub-emitter: which system, on what trigger, inheriting what."""
+    properties = entry.get("properties", 0)
+    return {
+        "emitter": _node_path(entry.get("emitter"), resolve_node, gaps,
+                              "SubModule", UNRESOLVED_SUB_EMITTER),
+        "type": _enum(SUB_EMITTER_TYPES, entry.get("type")),
+        "properties": properties,
+        "inherit": {name: bool(properties & bit) for name, bit in SUB_EMITTER_INHERIT},
+        "emitProbability": _number(entry, "emitProbability", 1.0),
+    }
+
+
+def _noise(module):
+    """Noise field parameters, with the dimension count `quality` selects."""
+    quality = module.get("quality")
+    out = {
+        "separateAxes": bool(module.get("separateAxes")),
+        "strength": min_max_curve(module.get("strength", {})),
+        "strengthY": min_max_curve(module.get("strengthY", {})),
+        "strengthZ": min_max_curve(module.get("strengthZ", {})),
+        "frequency": _number(module, "frequency"),
+        "damping": bool(module.get("damping")),
+        "octaves": module.get("octaves"),
+        "octaveMultiplier": _number(module, "octaveMultiplier"),
+        "octaveScale": _number(module, "octaveScale"),
+        "quality": _enum(NOISE_QUALITY, quality),
+        "dimensions": _enum(NOISE_DIMENSIONS, quality),
+        "scrollSpeed": min_max_curve(module.get("scrollSpeed", {})),
+        "remapEnabled": bool(module.get("remapEnabled")),
+        "remap": min_max_curve(module.get("remap", {})),
+        "remapY": min_max_curve(module.get("remapY", {})),
+        "remapZ": min_max_curve(module.get("remapZ", {})),
+        "positionAmount": min_max_curve(module.get("positionAmount", {})),
+        "rotationAmount": min_max_curve(module.get("rotationAmount", {})),
+        "sizeAmount": min_max_curve(module.get("sizeAmount", {})),
+    }
+    return out
+
+
+def _collision(module, resolve_node, gaps):
+    """Collision parameters, with the plane slots counted separately from the
+    planes that are actually in them."""
+    slots = module.get("m_Planes") or []
+    planes = [_node_path(pointer, resolve_node, gaps, "CollisionModule",
+                         UNRESOLVED_PLANE) for pointer in slots]
+    return {
+        "type": _enum(COLLISION_TYPES, module.get("type")),
+        "mode": _enum(COLLISION_MODES, module.get("collisionMode")),
+        "dampen": min_max_curve(module.get("m_Dampen", {})),
+        "bounce": min_max_curve(module.get("m_Bounce", {})),
+        "lifetimeLoss": min_max_curve(module.get("m_EnergyLossOnCollision", {})),
+        "minKillSpeed": _number(module, "minKillSpeed"),
+        "maxKillSpeed": _number(module, "maxKillSpeed"),
+        "radiusScale": _number(module, "radiusScale"),
+        "quality": _enum(COLLISION_QUALITY, module.get("quality")),
+        "voxelSize": _number(module, "voxelSize"),
+        "collidesWith": (module.get("collidesWith") or {}).get("m_Bits"),
+        "collidesWithDynamic": bool(module.get("collidesWithDynamic")),
+        "interiorCollisions": bool(module.get("interiorCollisions")),
+        "maxCollisionShapes": module.get("maxCollisionShapes"),
+        "collisionMessages": bool(module.get("collisionMessages")),
+        "colliderForce": _number(module, "colliderForce"),
+        "multiplyColliderForceByParticleSize":
+            bool(module.get("multiplyColliderForceByParticleSize")),
+        "multiplyColliderForceByParticleSpeed":
+            bool(module.get("multiplyColliderForceByParticleSpeed")),
+        "multiplyColliderForceByCollisionAngle":
+            bool(module.get("multiplyColliderForceByCollisionAngle")),
+        "planeSlots": len(slots),
+        "planes": [path for path in planes if path is not None],
+    }
+
+
+def _trails(module):
+    """Trail geometry and appearance."""
+    return {
+        "mode": _enum(TRAIL_MODES, module.get("mode")),
+        "ratio": _number(module, "ratio", 1.0),
+        "lifetime": min_max_curve(module.get("lifetime", {})),
+        "minVertexDistance": _number(module, "minVertexDistance"),
+        "textureMode": _enum(TRAIL_TEXTURE_MODES, module.get("textureMode")),
+        "textureScale": _vec(module.get("textureScale", {}), "xy"),
+        "ribbonCount": module.get("ribbonCount"),
+        "shadowBias": _number(module, "shadowBias"),
+        "worldSpace": bool(module.get("worldSpace")),
+        "dieWithParticles": bool(module.get("dieWithParticles")),
+        "sizeAffectsWidth": bool(module.get("sizeAffectsWidth")),
+        "sizeAffectsLifetime": bool(module.get("sizeAffectsLifetime")),
+        "inheritParticleColor": bool(module.get("inheritParticleColor")),
+        "generateLightingData": bool(module.get("generateLightingData")),
+        "splitSubEmitterRibbons": bool(module.get("splitSubEmitterRibbons")),
+        "attachRibbonsToTransform": bool(module.get("attachRibbonsToTransform")),
+        "colorOverLifetime": min_max_gradient(module.get("colorOverLifetime", {})),
+        "widthOverTrail": min_max_curve(module.get("widthOverTrail", {})),
+        "colorOverTrail": min_max_gradient(module.get("colorOverTrail", {})),
+    }
+
+
+def decode_system(tree, resolve_node=None):
+    """Emitter parameters of one particle system, plus its unmodelled modules.
+
+    *resolve_node* maps a pointer to the prefab node path it names; sub-emitters
+    and collision planes point at other objects of the same prefab and are
+    useless to a consumer as raw ids.  Returns ``(system, unsupported)``, where
+    each unsupported entry is ``{module, reason}``.
+    """
+    gaps = []
     initial = tree.get("InitialModule", {})
     out = {
         "duration": round(float(tree.get("lengthInSec", 0.0)), 6),
@@ -222,15 +413,61 @@ def decode_system(tree):
             "frameOverTime": min_max_curve(uv.get("frameOverTime", {})),
         }
 
-    unsupported = sorted(name for name, value in tree.items()
-                         if isinstance(value, dict) and value.get("enabled")
-                         and name not in MODELLED_MODULES)
-    return out, unsupported
+    custom = tree.get("CustomDataModule", {})
+    if custom.get("enabled"):
+        out["customData"] = {"custom1": _custom_data_stream(custom, 0),
+                             "custom2": _custom_data_stream(custom, 1)}
+
+    sub = tree.get("SubModule", {})
+    if sub.get("enabled"):
+        out["subEmitters"] = [_sub_emitter(entry, resolve_node, gaps)
+                              for entry in sub.get("subEmitters") or []]
+
+    noise = tree.get("NoiseModule", {})
+    if noise.get("enabled"):
+        out["noise"] = _noise(noise)
+
+    force = tree.get("ForceModule", {})
+    if force.get("enabled"):
+        out["forceOverLifetime"] = {
+            "x": min_max_curve(force.get("x", {})),
+            "y": min_max_curve(force.get("y", {})),
+            "z": min_max_curve(force.get("z", {})),
+            "inWorldSpace": bool(force.get("inWorldSpace")),
+            "randomizePerFrame": bool(force.get("randomizePerFrame")),
+        }
+
+    collision = tree.get("CollisionModule", {})
+    if collision.get("enabled"):
+        out["collision"] = _collision(collision, resolve_node, gaps)
+
+    trail = tree.get("TrailModule", {})
+    if trail.get("enabled"):
+        out["trails"] = _trails(trail)
+
+    unsupported = [{"module": name, "reason": UNMODELLED_MODULE}
+                   for name in sorted(name for name, value in tree.items()
+                                      if isinstance(value, dict) and value.get("enabled")
+                                      and name not in MODELLED_MODULES)]
+    return out, unsupported + gaps
 
 
-def decode_renderer(tree, material):
-    """Draw settings of one particle renderer."""
-    return {
+def decode_renderer(tree, material, trail_material=None):
+    """Draw settings of one particle renderer.
+
+    A renderer holds one material slot per thing it draws.  The particles are
+    drawn with the first; a second slot exists only when the trail module is on,
+    and it is the material the trail is drawn with — there is no separate
+    trail-material field on disk.  The key is emitted whenever the slot exists,
+    so a second material can never be dropped without it showing.
+
+    ``enabled`` is the renderer's own switch.  It is the only per-renderer gate
+    there is: the particle system component carries no enabled flag, so a
+    renderer that ships disabled draws nothing no matter what its system says.
+    A consumer that ignores it draws emitters the original never shows.
+    """
+    out = {
+        "enabled": bool(tree.get("m_Enabled", 1)),
         "renderMode": RENDER_MODES.get(tree.get("m_RenderMode"), tree.get("m_RenderMode")),
         "sortMode": tree.get("m_SortMode"),
         "sortingOrder": tree.get("m_SortingOrder"),
@@ -243,3 +480,6 @@ def decode_renderer(tree, material):
         "alignment": tree.get("m_RenderAlignment"),
         "material": material,
     }
+    if len(tree.get("m_Materials") or []) > TRAIL_MATERIAL_SLOT:
+        out["trailMaterial"] = trail_material
+    return out

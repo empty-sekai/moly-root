@@ -98,7 +98,7 @@ html, body {
 
 #stage {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) 42px;
   min-width: 0;
   min-height: 0;
 }
@@ -183,6 +183,39 @@ details.note .body {
 }
 .uchip:hover { border-color: var(--accent-line); }
 .uchip.on { background: var(--accent-bg); border-color: var(--accent-line); color: #eaf1ff; }
+
+/* 现象网格:图标 + 名字,一屏全见(15 个)。图标是数据里的缩略图,缺图时留空位不塌行 */
+#gEnv .list { margin: 0; }
+.egrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: var(--sp-1); }
+
+.echip {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: var(--sp-1) 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: transparent;
+  color: var(--fg-2);
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.echip:hover { border-color: var(--accent-line); background: var(--bg-ctl); }
+.echip.on { background: var(--accent-bg); border-color: var(--accent-line); color: #eaf1ff; }
+
+.echip img, .echip .ph {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--r-1);
+  object-fit: cover;
+  background: var(--bg-ctl);
+}
+
+.echip .ph { display: block; }        /* 无图标现象:同尺寸占位,网格不错行 */
+.echip .en { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 
 /* 动作库折叠区:summary 顶 h2 的位置,带展开箭头与悬停态(要一眼看出可点) */
 #gMotion > summary {
@@ -473,22 +506,32 @@ input[type=range]:hover::-webkit-slider-thumb { background: #9dbcfa; }
   display: flex;
   align-items: center;
   gap: var(--sp-4);
+  height: 42px;
+  min-height: 42px;
   padding: var(--sp-2) var(--sp-3);
   border-top: 1px solid var(--line);
   background: var(--bg-rail);
   font-size: var(--fs-sm);
+  overflow: hidden;
 }
 
 #status {
   display: flex;
   flex: 1 1 auto;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: baseline;
   gap: 2px var(--sp-4);
   min-width: 0;
+  overflow: hidden;
 }
 
-#status .cell { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+#status .cell {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
 
 #status .k {
   color: var(--fg-3);
@@ -499,6 +542,8 @@ input[type=range]:hover::-webkit-slider-thumb { background: #9dbcfa; }
 }
 
 #status .v {
+  min-width: 0;
+  max-width: 100%;
   font-family: var(--mono);
   white-space: nowrap;
   overflow: hidden;

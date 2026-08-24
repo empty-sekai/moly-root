@@ -28,6 +28,14 @@ FURNITURE_CONDITIONS = ("mysekai_fixture_id", "mysekai_fixture_tag_id",
                         "after_set_fixture")
 UNIT_GROUP_SLOTS = 5                     # gameCharacterUnitId1..5
 
+# Tables that name a sound package.  Music is two layers -- a base keyed by site
+# and brightness, and a per-phenomenon row that replaces it -- and a row of
+# either layer names the leaf of its own package.  Ambience is addressed the
+# other way round: a row names only a cue, and every ambience cue lives in one
+# shared package, so those rows say *whether* ambience is wanted, not where.
+BGM_TABLES = ("mysekaiPhenomenaBgms", "mysekaiSiteBgms")
+AMBIENCE_TABLE = "mysekaiSiteMysekaiPhenomenaSounds"
+
 
 class MissingTable(LookupError):
     """A required master table is not in the supplied directory."""
@@ -70,7 +78,7 @@ class Master:
         if cached:
             os.makedirs(self.cache_dir, exist_ok=True)
             with open(cached, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(rows, handle, ensure_ascii=False)
+                json.dump(rows, handle, ensure_ascii=False, allow_nan=False)
         return rows
 
     def table(self, name):
@@ -82,6 +90,40 @@ class Master:
                 rows = rows.get("data") or next(iter(rows.values()), [])
             self._cache[name] = rows
         return self._cache[name]
+
+    # -- sound packages -----------------------------------------------------
+
+    def sound_packages(self):
+        """Sound packages these tables name, and which of the tables were absent.
+
+        Returns ``(names, report)``: *names* are logical package names, and
+        *report* says how many packages each table named and which tables are
+        not in this source.  Several rows naming one package are one package —
+        the site layer has one row per brightness over the same music.
+        """
+        from .assets.router import AMBIENCE_PACKAGE, BGM_PACKAGE_PREFIX
+        packages, counted, absent = set(), {}, []
+        for table in BGM_TABLES:
+            try:
+                rows = self.table(table)
+            except MissingTable:
+                absent.append(table)
+                continue
+            named = {BGM_PACKAGE_PREFIX + str(row["assetbundleName"])
+                     for row in rows if row.get("assetbundleName")}
+            counted[table] = len(named)
+            packages |= named
+        try:
+            rows = self.table(AMBIENCE_TABLE)
+        except MissingTable:
+            absent.append(AMBIENCE_TABLE)
+        else:
+            # The rows carry cues, so they answer "is the shared package wanted".
+            wanted = any(row.get("cue") for row in rows)
+            counted[AMBIENCE_TABLE] = int(wanted)
+            if wanted:
+                packages.add(AMBIENCE_PACKAGE)
+        return sorted(packages), {"tables": counted, "absentTables": sorted(absent)}
 
     # -- identity -----------------------------------------------------------
 

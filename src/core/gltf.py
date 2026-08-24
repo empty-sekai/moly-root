@@ -66,15 +66,19 @@ class GLB:
         self.g["accessors"].append(a)
         return len(self.g["accessors"]) - 1
 
-    def save(self, path):
+    def blob(self):
+        """The whole file as bytes, so a caller can hash it before writing."""
         self._pad()
         self.g["buffers"] = [{"byteLength": len(self.bin)}]
-        js = json.dumps(self.g, separators=(",", ":")).encode("utf-8")
+        js = json.dumps(self.g, separators=(",", ":"), allow_nan=False).encode("utf-8")
         while len(js) % 4:
             js += b" "
-        blob = bytes(self.bin)
-        total = 12 + 8 + len(js) + 8 + len(blob)
+        binary = bytes(self.bin)
+        total = 12 + 8 + len(js) + 8 + len(binary)
+        return (b"glTF" + struct.pack("<II", 2, total)
+                + struct.pack("<I", len(js)) + b"JSON" + js
+                + struct.pack("<I", len(binary)) + b"BIN\x00" + binary)
+
+    def save(self, path):
         with open(path, "wb") as f:
-            f.write(b"glTF" + struct.pack("<II", 2, total))
-            f.write(struct.pack("<I", len(js)) + b"JSON" + js)
-            f.write(struct.pack("<I", len(blob)) + b"BIN\x00" + blob)
+            f.write(self.blob())

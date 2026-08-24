@@ -70,6 +70,33 @@
   </main>
 
   <aside class="rail" id="railR">
+    <section class="group" id="gEnv">
+      <h2>环境<span class="count" id="envCount"></span></h2>
+      <!-- 15 个现象:图标网格,单击切换(0.25 秒交叉淡化);当前项高亮 -->
+      <div class="list egrid" id="envList" aria-label="现象列表"><div class="empty">载入中…</div></div>
+      <div class="hintline dim" id="envHint">&nbsp;</div>
+      <div class="controls mt">
+        <button id="bEnv" class="btn toggle" type="button"
+          title="环境层:天空/光照/雾/云影/粒子/后处理(关掉回到默认外观)">环境层</button>
+        <button id="bEnvIndoor" class="btn toggle" type="button"
+          title="用带覆盖的那个站点(室内):配置与后处理走两级查找的第一级">室内覆盖</button>
+      </div>
+      <div class="controls">
+        <button id="bEnvParticles" class="btn toggle on" type="button"
+          title="现象粒子(天空族挂世界、相机族跟相机、站点族挂世界)">环境粒子</button>
+        <button id="bEnvPost" class="btn toggle on" type="button"
+          title="后处理链:粒子泛光 → 泛光 → 扩散 → 耀斑 → 白平衡 → 颜色调整 → 分离色调">后处理</button>
+      </div>
+      <div class="controls">
+        <button id="bEnvSky" class="btn toggle on" type="button" title="天空可见性">天空</button>
+        <button id="bEnvGround" class="btn toggle on" type="button" title="地面可见性">地面</button>
+      </div>
+      <div class="controls">
+        <select id="selEnvSite" class="field"
+          title="站点粒子挂哪一站(站点自身的地形与着色量不在现象包里)"></select>
+      </div>
+    </section>
+
     <section class="group">
       <h2>外观与光照</h2>
       <div class="controls">
@@ -96,6 +123,7 @@
         <div class="controls">
           <button id="bLightReset" class="btn" type="button" title="恢复默认 48°/30°">光复位</button>
         </div>
+        <div class="hintline dim" id="lightHint">&nbsp;</div>
       </div>
     </section>
 
