@@ -231,6 +231,19 @@ function updateRenderFacts() {
     ? `通道 ${binding.channels} · 按路径绑上 ${binding.bound} · 绑不上 ${binding.unbound.length}`
       + `（后缀命中 ${binding.viaSuffix} · 歧义 ${binding.ambiguous} · 拒绝根兜底 ${binding.rootFallback}）`
     : '—');
+  // 外插账：本轨有多少 clip 声明了 Hold、此刻有多少正保持在边界值、
+  // 以及出现了但本页未实现的模式（本语料该项应为 0，非 0 就是语料换了）。
+  const laneEvents = state.lane?.events || [];
+  const holdDeclared = laneEvents.filter((event) =>
+    event.preExtrapolation === 'Hold' || event.postExtrapolation === 'Hold').length;
+  const unhandled = Object.entries(state.unhandledExtrapolation || {});
+  setText('extrapolation-facts', laneEvents.length
+    ? `声明 Hold 的 clip ${holdDeclared}/${laneEvents.length}`
+      + ` · 此刻保持在边界值 ${state.extrapolationHeld || 0}`
+      + (unhandled.length
+        ? ` · 未实现的模式 ${unhandled.map(([n, c]) => `${n}×${c}`).join(' ')}`
+        : '')
+    : '—');
   const lane = state.lane;
   setText('playable-facts', lane
     ? `本轨 clip ${lane.events.length} · 可播 ${lane.playable} · 不可播 ${lane.unplayable}`
@@ -745,20 +758,74 @@ function startEvent(event) {
   state.activeActions.set(event.index, action);
 }
 
+// clip 区间之外做什么，由它自己的外插模式说。引擎闭集 5 值
+// （`None/Hold/Loop/PingPong/Continue`），窗口**半开**：
+//   pre  = [start − preTime, start)
+//   post = (end, end + postTime]
+// 所以 **`t == end` 两个外插域都不属于**。外插段里权重保持边界值——`Hold` 就是
+// 「停在那一帧」，不是「回到原样」。
+// 本语料实际分布：`None` 15553 条 / `Hold` 6565 条（29.7%）/ 其余三值 0 条。
+// 只实现 `Hold`：另外三值在本语料里一条都没有，实现它们等于写没有输入验证过的代码；
+// 出现了就落进 `unhandledExtrapolation` 计数，不静默当 `None`。
+const EXTRAPOLATION_HOLD = 'Hold';
+const EXTRAPOLATION_NONE = 'None';
+
+/** 时钟处这个 clip 的状态：`off` / `clip`（区间内）/ `hold-pre` / `hold-post`。 */
+function clipPhaseAt(event, now) {
+  const start = event.start;
+  const end = event.start + event.duration;
+  if (now >= start && now < end) return 'clip';
+  const pre = String(event.preExtrapolation || '');
+  const post = String(event.postExtrapolation || '');
+  // 半开：post 用严格大于，`now == end` 落不进来。
+  if (post === EXTRAPOLATION_HOLD
+      && now > end && now <= end + (event.postExtrapolationTime || 0)) {
+    return 'hold-post';
+  }
+  if (pre === EXTRAPOLATION_HOLD
+      && now >= start - (event.preExtrapolationTime || 0) && now < start) {
+    return 'hold-pre';
+  }
+  return 'off';
+}
+
 function updateEvents(dt) {
   const events = state.lane?.events || [];
   const now = state.timelineTime;
+  let held = 0;
+  const unhandled = {};
   for (const event of events) {
-    const start = event.start;
-    const end = event.start + event.duration;
-    const active = state.activeActions.has(event.index);
-    if (now >= start && now < end) {
-      if (!active) startEvent(event);
-    } else if (active && now >= end) {
-      state.activeActions.get(event.index).stop();
-      state.activeActions.delete(event.index);
+    for (const mode of [event.preExtrapolation, event.postExtrapolation]) {
+      const name = String(mode || '');
+      if (name && name !== EXTRAPOLATION_NONE && name !== EXTRAPOLATION_HOLD) {
+        unhandled[name] = (unhandled[name] || 0) + 1;
+      }
+    }
+    const phase = clipPhaseAt(event, now);
+    const action = state.activeActions.get(event.index);
+    if (phase === 'off') {
+      if (action) {
+        action.stop();
+        state.activeActions.delete(event.index);
+      }
+      continue;
+    }
+    if (!action) startEvent(event);
+    const live = state.activeActions.get(event.index);
+    if (!live) continue;
+    if (phase === 'clip') {
+      live.paused = false;
+    } else {
+      // 保持边界值：停在该端点那一帧，而不是让它继续走或回到原样。
+      held += 1;
+      live.paused = true;
+      live.time = phase === 'hold-pre'
+        ? Math.max(0, event.clipIn || 0)
+        : Math.max(0, live.getClip().duration - 1e-4);
     }
   }
+  state.extrapolationHeld = held;
+  state.unhandledExtrapolation = unhandled;
   updateTalkMotion();
   if (state.playing) state.mixer?.update(dt);
 }
@@ -1298,6 +1365,9 @@ window.__stageProbe = {
     boundByNode: Object.fromEntries(state.talkBinding?.boundByNode || []),
   } : { status: state.talkStatus, choices: state.talkChoices.length }),
   bodyChannels: () => Object.fromEntries(bodyChannelCounts()),
+  // 此刻有多少 clip 正被外插窗口保持在边界值。判据要的是它**变过非零**,
+  // 「声明了 Hold 的条数」证明不了这个特性真的在生效。
+  extrapolationHeld: () => state.extrapolationHeld || 0,
   bodyBones: () => [...BODY_BONES],
   // 已装载的演出动画包，按包名取。判据要能拿运行时**真正用的那份** gltf/json/
   // nodeObjects 去比，而不是自己再读一遍文件——两份读法不同正是要查的东西。

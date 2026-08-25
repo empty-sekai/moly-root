@@ -212,6 +212,10 @@ function clipFields(clip, trackClass, trackName, target, trackPathId, clipIndex)
     blendOut: Number(clip?.m_BlendOutDuration) || 0,
     postExtrapolation: clip?.m_PostExtrapolationMode?.name || '',
     preExtrapolation: clip?.m_PreExtrapolationMode?.name || '',
+    // 外插窗口的长度。区间是**半开**的：`pre = [start − preTime, start)`、
+    // `post = (end, end + postTime]`，所以 `t == end` 两个外插域都不属于。
+    preExtrapolationTime: Number(clip?.m_PreExtrapolationTime) || 0,
+    postExtrapolationTime: Number(clip?.m_PostExtrapolationTime) || 0,
     target: target || null,
   };
 }
