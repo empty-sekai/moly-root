@@ -63,6 +63,35 @@ DOMAIN_OBJECT_TYPES = {
 }
 
 
+# Not every reader is a domain.  The animation export is a derived pass: what it
+# reads is decided by the clip-target documents the timeline jobs write, never by
+# a package name, so no domain declares its types and a domain-only model reports
+# them as read by nobody.  Measured: 1781 AnimationClips sit in the furniture
+# packages and this pass exports 1384 of them as glTF animations, the remainder
+# being humanoid Animator curves it keeps verbatim instead -- so calling them
+# unclaimed was this model's own false positive, not a gap.
+#
+# A pass declares the domains and types it covers explicitly.  No wildcard: a
+# pass that quietly widened its claim would hide the next real gap.
+DERIVED_PASS_COVERAGE = {
+    "perf-animations/": {
+        "fixture-interface": {"AnimationClip"},
+        "fixture-timeline": {"AnimationClip"},
+        "cutscene-timeline": {"AnimationClip"},
+    },
+}
+
+
+def claimed_types(domain, declarations=None, derived=None):
+    """Every type something declares it reads for *domain*, domains and passes."""
+    declarations = DOMAIN_OBJECT_TYPES if declarations is None else declarations
+    derived = DERIVED_PASS_COVERAGE if derived is None else derived
+    claimed = set(declarations.get(domain) or ())
+    for coverage in derived.values():
+        claimed |= set(coverage.get(domain) or ())
+    return claimed
+
+
 def input_gaps(report):
     """Every artifact in *report* whose input was not supplied, with its reason.
 
@@ -104,7 +133,7 @@ def check_input_gaps(report, accepted=()):
 
 
 def check_type_coverage(census, declarations=None, structural=None,
-                        adjudicated=()):
+                        adjudicated=(), derived=None):
     """Gate: an object type in the source that no domain claims to read is red.
 
     *census* is ``{domain: {type: count}}`` counted from the **source packages**,
@@ -124,10 +153,11 @@ def check_type_coverage(census, declarations=None, structural=None,
     """
     declarations = DOMAIN_OBJECT_TYPES if declarations is None else declarations
     structural = STRUCTURAL_TYPES if structural is None else structural
+    derived = DERIVED_PASS_COVERAGE if derived is None else derived
     ruled = set(adjudicated or ())
     uncovered = []
     for domain in sorted(census):
-        claimed = set(declarations.get(domain) or ())
+        claimed = claimed_types(domain, declarations, derived)
         for type_name, count in sorted((census.get(domain) or {}).items()):
             if type_name in structural or type_name in claimed:
                 continue

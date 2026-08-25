@@ -758,3 +758,36 @@ def test_the_report_records_its_own_input_gaps(tmp_path):
     assert any(gap["artifact"] == "ui/talk.json"
                for gap in report["inputGaps"]["gaps"])
     assert report["inputGaps"]["ok"] is False
+
+
+def test_a_derived_pass_counts_as_a_reader():
+    # Not every reader is a domain: the animation export is driven by the
+    # clip-target documents rather than by a package name, so no domain declares
+    # its types.  A domain-only model called 1781 furniture AnimationClips
+    # unclaimed while that pass exports 1384 of them -- the model's own false
+    # positive, and a gate that cries wolf gets ignored.
+    from core.extract import check_type_coverage
+
+    census = {"fixture-interface": {"AnimationClip": 1781}}
+    ok, uncovered = check_type_coverage(
+        census, declarations={"fixture-interface": set()}, structural={},
+        derived={})
+    assert ok is False, "with no reader declared it must be red"
+
+    ok, uncovered = check_type_coverage(
+        census, declarations={"fixture-interface": set()}, structural={},
+        derived={"perf-animations/": {"fixture-interface": {"AnimationClip"}}})
+    assert ok is True and not uncovered
+
+
+def test_a_pass_only_covers_the_domains_it_names():
+    # No wildcard: a pass that quietly widened its claim would hide the next
+    # real gap behind a type it does not actually read for that domain.
+    from core.extract import check_type_coverage
+
+    census = {"camera": {"AnimationClip": 5}}
+    ok, uncovered = check_type_coverage(
+        census, declarations={"camera": set()}, structural={},
+        derived={"perf-animations/": {"fixture-interface": {"AnimationClip"}}})
+    assert ok is False
+    assert uncovered == [{"domain": "camera", "type": "AnimationClip", "count": 5}]
