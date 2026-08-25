@@ -23,6 +23,121 @@ FIXTURE_MESHES_SKIPPED = ("furniture geometry was not requested; it is one glb "
 DEFAULT_UNITY_VERSION = "2022.3.62f3"
 
 
+# Object types that are containers or metadata rather than content of their own,
+# with the reason each is one.  A type is only allowed in here with a statement
+# of which other rows carry what it holds -- "structural" is not a bucket for
+# things nobody wanted to classify, and a type put here without that statement is
+# the same silence this module exists to prevent.
+STRUCTURAL_TYPES = {
+    "GameObject": "a node's identity; its content is the components on it",
+    "Transform": "a node's placement; exported as the node's TRS",
+    "RectTransform": "a Transform for UI nodes; same",
+    "MonoScript": "names the class a MonoBehaviour is; carries no instance data",
+    "AssetBundle": "the package's own container object, one per package; it "
+                   "lists contents rather than being content",
+    "CanvasRenderer": "a draw record the Canvas owns; carries no authored data",
+}
+
+# What each domain's extractor declares it reads.  This is the promise the
+# coverage criterion holds against the source census: a type present in the
+# source but in no declaration is a type nobody is even claiming to read.
+#
+# Declaring is what makes the gap visible.  The failure this catches leaves no
+# empty field behind to notice -- a whole object type can be absent from every
+# product while every artifact reports success, because no extractor ever said
+# it wanted them.
+DOMAIN_OBJECT_TYPES = {
+    "character": {"Mesh", "SkinnedMeshRenderer", "MeshFilter", "MeshRenderer",
+                  "Material", "Texture2D", "Shader", "Avatar", "Animator",
+                  "AnimatorController"},
+    "motion": {"AnimationClip", "Avatar"},
+    "facial": {"MonoBehaviour"},
+    "performance": {"TextAsset"},
+    "talk": {"TextAsset"},
+    "talk-constants": {"TextAsset"},
+    "camera": {"MonoBehaviour", "PlayableDirector"},
+    "fixture-interface": {"MonoBehaviour", "Mesh", "MeshFilter", "MeshRenderer",
+                          "SkinnedMeshRenderer", "Material", "Texture2D"},
+    "cutscene-timeline": {"MonoBehaviour", "PlayableDirector", "AnimationClip"},
+    "fixture-timeline": {"MonoBehaviour", "PlayableDirector", "AnimationClip"},
+}
+
+
+def input_gaps(report):
+    """Every artifact in *report* whose input was not supplied, with its reason.
+
+    An artifact that reports ``skipped`` because nobody handed it its input, or
+    that names missing dependencies, is a gap: the capability ran and wrote
+    nothing.  Three of these have shipped as silently empty products -- a UI
+    document with no player data, an icon set with no master tables, a family
+    that raised on every package -- and each looked like a clean run.
+    """
+    gaps = []
+    for key in ("derived", "playerData"):
+        for entry in report.get(key) or []:
+            reasons = []
+            if entry.get("status") in ("skipped", "failed"):
+                reasons.append(entry.get("status"))
+            if entry.get("missingDependencies"):
+                reasons.append("missingDependencies")
+            if entry.get("missing"):
+                reasons.append("missing")
+            if reasons:
+                gaps.append({"artifact": entry.get("artifact", "?"),
+                             "why": ",".join(reasons),
+                             "detail": entry.get("error", "")})
+    return gaps
+
+
+def check_input_gaps(report, accepted=()):
+    """Gate: a gap the caller has not named is red.
+
+    *accepted* is the list of artifact names the caller states it knows about
+    and accepts.  Accepting is deliberately per-artifact and explicit: a blanket
+    "ignore gaps" switch would put the run back to reporting success while
+    writing nothing.  Returns ``(ok, gaps, unaccepted)``.
+    """
+    gaps = input_gaps(report)
+    accepted = set(accepted or ())
+    unaccepted = [gap for gap in gaps if gap["artifact"] not in accepted]
+    return not unaccepted, gaps, unaccepted
+
+
+def check_type_coverage(census, declarations=None, structural=None,
+                        adjudicated=()):
+    """Gate: an object type in the source that no domain claims to read is red.
+
+    *census* is ``{domain: {type: count}}`` counted from the **source packages**,
+    never from the products -- a census of our own output cannot show what our
+    own output dropped.  *adjudicated* names ``"domain:Type"`` pairs that have
+    been ruled on, so a known gap is carried as a named decision rather than
+    disappearing.
+
+    This is the half that has no empty field to give it away.  The other gate
+    reads a gap out of an artifact that at least reported something; here the
+    extractor never said it wanted the type, so nothing anywhere is empty --
+    2207 particle systems can be absent from every product while every artifact
+    reports success.
+
+    Returns ``(ok, uncovered)`` where *uncovered* lists
+    ``{domain, type, count}`` for each type nobody reads and nobody has ruled on.
+    """
+    declarations = DOMAIN_OBJECT_TYPES if declarations is None else declarations
+    structural = STRUCTURAL_TYPES if structural is None else structural
+    ruled = set(adjudicated or ())
+    uncovered = []
+    for domain in sorted(census):
+        claimed = set(declarations.get(domain) or ())
+        for type_name, count in sorted((census.get(domain) or {}).items()):
+            if type_name in structural or type_name in claimed:
+                continue
+            if f"{domain}:{type_name}" in ruled:
+                continue
+            uncovered.append({"domain": domain, "type": type_name,
+                              "count": count})
+    return not uncovered, uncovered
+
+
 def _configure_unity_version(unity_version):
     """Set the fallback Unity version for this run.
 
@@ -344,7 +459,8 @@ def write_pack_manifest(out):
 def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                      player_data=None,
                      fixture_meshes=False,
-                     master_cache=None, vgmstream=None, ffmpeg=None):
+                     master_cache=None, vgmstream=None, ffmpeg=None,
+                     accept_input_gaps=()):
     """Extract every logical bundle in *manifest* and write a JSON report.
 
     With ``manifest=None`` the bundle set is discovered from the *bundles*
@@ -931,6 +1047,20 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
         "status": "succeeded" if pack_manifest else "skipped",
         "counts": {"units": len(json.loads(pack_manifest.read_text(encoding="utf-8"))["units"])} if pack_manifest else {},
         "error": "" if pack_manifest else "no character artifacts on disk"})
+    # The run's own account of what it did not get. Recorded on every run, so
+    # "nobody handed it its input" is a number in the report rather than an
+    # empty directory somebody notices months later.
+    # Its own top-level block, not inside ``summary``: that one counts bundles by
+    # outcome and a consumer reads its four keys as a closed set, so widening it
+    # would change a shape the data contract fixes.  These are per-artifact rows,
+    # a different kind of thing.
+    ok, gaps, unaccepted = check_input_gaps(report, accepted=accept_input_gaps)
+    report["inputGaps"] = {
+        "gaps": gaps,
+        "unaccepted": unaccepted,
+        "accepted": sorted(accept_input_gaps or ()),
+        "ok": ok,
+    }
     report_path = out / "extraction-report.json"
     report["report"] = str(report_path)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=1, allow_nan=False) + "\n", encoding="utf-8", newline="\n")

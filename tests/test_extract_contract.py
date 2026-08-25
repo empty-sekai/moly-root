@@ -642,3 +642,119 @@ def test_fixture_geometry_runs_and_is_registered_when_asked_for(tmp_path,
               if e["artifact"] == "fixture-interface/attach-points.json"]
     assert len(attach) == 1
     assert "fixture-models" not in json.dumps(attach[0])
+
+
+# ---------------------------------------------------------------------------
+# Input gaps and type coverage.  Two shapes of the same failure: a capability
+# that ran and wrote nothing.  The first leaves an artifact saying so; the
+# second leaves nothing at all, because no extractor ever claimed the type.
+# ---------------------------------------------------------------------------
+
+def test_an_unnamed_input_gap_is_red_and_naming_it_turns_it_green():
+    # The violation is planted by taking the input away, which is the real
+    # starting state for three shipped-empty products.  Naming the artifact is
+    # per-artifact on purpose: a blanket "ignore gaps" switch would put the run
+    # back to reporting success while writing nothing.
+    from core.extract import check_input_gaps
+
+    report = {"derived": [
+        {"artifact": "ui/talk.json", "status": "skipped",
+         "error": "no player-data file supplied"},
+        {"artifact": "camera/", "status": "succeeded", "error": ""},
+    ]}
+    ok, gaps, unaccepted = check_input_gaps(report)
+    assert ok is False
+    assert [gap["artifact"] for gap in unaccepted] == ["ui/talk.json"]
+
+    ok, gaps, unaccepted = check_input_gaps(report, accepted=["ui/talk.json"])
+    assert ok is True
+    assert not unaccepted
+    assert [gap["artifact"] for gap in gaps] == ["ui/talk.json"]
+
+
+def test_accepting_one_gap_does_not_accept_another():
+    from core.extract import check_input_gaps
+
+    report = {"derived": [
+        {"artifact": "ui/talk.json", "status": "skipped", "error": ""},
+        {"artifact": "emoticons/emoticons.json", "status": "failed", "error": "boom"},
+    ]}
+    ok, _, unaccepted = check_input_gaps(report, accepted=["ui/talk.json"])
+    assert ok is False
+    assert [gap["artifact"] for gap in unaccepted] == ["emoticons/emoticons.json"]
+
+
+def test_missing_dependencies_count_as_a_gap_even_when_the_artifact_succeeded():
+    # An artifact can report success while naming dependencies it could not
+    # resolve; the product is then partial and nothing else says so.
+    from core.extract import check_input_gaps
+
+    report = {"derived": [{"artifact": "perf-animations/", "status": "succeeded",
+                           "missingDependencies": ["a", "b"], "error": ""}]}
+    ok, gaps, unaccepted = check_input_gaps(report)
+    assert ok is False
+    assert gaps[0]["why"] == "missingDependencies"
+
+
+def test_a_source_type_no_domain_claims_is_red_then_adjudicating_it_turns_green():
+    # The half with no empty field to give it away: the extractor never said it
+    # wanted the type, so every artifact reports success while the type is
+    # absent from every product.  Red until someone rules on it by name.
+    from core.extract import check_type_coverage
+
+    census = {"fixture-interface": {"Mesh": 10, "ParticleSystem": 669}}
+    declarations = {"fixture-interface": {"Mesh"}}
+    ok, uncovered = check_type_coverage(census, declarations=declarations,
+                                        structural={})
+    assert ok is False
+    assert uncovered == [{"domain": "fixture-interface",
+                          "type": "ParticleSystem", "count": 669}]
+
+    ok, uncovered = check_type_coverage(
+        census, declarations=declarations, structural={},
+        adjudicated=["fixture-interface:ParticleSystem"])
+    assert ok is True
+    assert not uncovered
+
+
+def test_removing_a_type_from_the_declaration_turns_coverage_red():
+    # The planted violation is removal of data -- the declaration entry -- not a
+    # skipped step, so a later fallback cannot quietly satisfy it.
+    from core.extract import check_type_coverage
+
+    census = {"camera": {"MonoBehaviour": 20}}
+    ok, _ = check_type_coverage(census, declarations={"camera": {"MonoBehaviour"}},
+                                structural={})
+    assert ok is True
+    ok, uncovered = check_type_coverage(census, declarations={"camera": set()},
+                                        structural={})
+    assert ok is False
+    assert uncovered[0]["count"] == 20
+
+
+def test_structural_types_are_declared_with_a_reason_each():
+    # `structural` is not a bucket for whatever nobody classified: every type in
+    # it carries the statement of what covers its content instead.
+    from core.extract import STRUCTURAL_TYPES
+
+    assert STRUCTURAL_TYPES
+    for name, reason in STRUCTURAL_TYPES.items():
+        assert isinstance(reason, str) and len(reason) > 20, name
+
+
+def test_the_report_records_its_own_input_gaps(tmp_path):
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text("mysekai__system__unrelated\n", encoding="utf-8")
+    report = extract_manifest(manifest, bundles, tmp_path / "out")
+    # Its own block rather than inside `summary`, whose four keys a consumer
+    # reads as a closed set -- the data contract fixes that shape.
+    assert set(report["summary"]) == {"requested", "succeeded", "failed",
+                                      "unsupported"}
+    assert set(report["inputGaps"]) == {"gaps", "unaccepted", "accepted", "ok"}
+    # The UI artifact has no player data in this run, so it is a gap and it is
+    # named as one rather than being absent from the report.
+    assert any(gap["artifact"] == "ui/talk.json"
+               for gap in report["inputGaps"]["gaps"])
+    assert report["inputGaps"]["ok"] is False
