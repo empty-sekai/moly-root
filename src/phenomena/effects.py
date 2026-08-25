@@ -59,6 +59,8 @@ OMITTED_COMPONENTS = {
 
 # Render mode that draws each particle as a copy of a mesh.
 MESH_RENDER_MODE = "Mesh"
+# The shape whose birth positions come off a mesh surface rather than a solid.
+MESH_SHAPE = "Mesh"
 
 UNMODELLED_COMPONENT = "prefab component not modelled"
 
@@ -235,6 +237,18 @@ def decode_effect(root_id, kinds, trees, resolve_material, kind=None, site=None,
                 continue
             if component_kind == "ParticleSystem":
                 system, gaps = decode_system(trees[component], resolve_node)
+                shape = system.get("shape") or {}
+                if shape.get("type") == MESH_SHAPE and resolve_mesh is not None:
+                    # A mesh-shaped emitter draws its birth positions from a
+                    # mesh's surface.  Without the reference there is no surface
+                    # to draw from, and the shape cannot be carried out at all.
+                    mesh, gap = resolve_mesh(
+                        (trees[component].get("ShapeModule") or {}).get("m_Mesh") or {})
+                    shape["meshes"] = ([{"file": mesh["file"], "node": item["node"]}
+                                        for item in mesh.get("meshes", [])]
+                                       if mesh is not None else [])
+                    if gap is not None:
+                        unsupported.append(dict(gap, node=path))
                 emitters.setdefault(path, {"node": path})["system"] = system
                 for gap in gaps:
                     unsupported.append(dict(gap, node=path))

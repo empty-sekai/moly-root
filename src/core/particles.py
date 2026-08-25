@@ -378,6 +378,11 @@ def decode_system(tree, resolve_node=None):
             "alignToDirection": bool(shape.get("alignToDirection")),
             "randomDirectionAmount": round(float(shape.get("randomDirectionAmount", 0.0)), 6),
             "sphericalDirectionAmount": round(float(shape.get("sphericalDirectionAmount", 0.0)), 6),
+            # Where on the mesh a particle is born, and how far off its surface.
+            "meshPlacement": shape.get("placementMode"),
+            "meshNormalOffset": round(float(shape.get("m_MeshNormalOffset", 0.0)), 6),
+            "meshMaterialIndex": (shape.get("m_MeshMaterialIndex")
+                                  if shape.get("m_UseMeshMaterialIndex") else None),
         }
 
     size = tree.get("SizeModule", {})
