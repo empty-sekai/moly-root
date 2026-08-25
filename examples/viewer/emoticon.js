@@ -752,9 +752,16 @@ class Emitter {
     this.state = renderState(material);
     // 基础贴图的 `<名>_ST`:顶点侧算的是 `uv * ST.xy + ST.zw`。取值来自贴图槽自己的
     // 缩放/偏移对,不是 floats —— 缺了它,非 1 的平铺会整片取错贴图区域。
-    const st = (material && !material.external && material.textureScaleOffset?.[key]) || null;
+    // 缩放偏移要跟着**实际在采的那一槽**走。数组与单图两槽同时绑着,各自带一份
+    // `_ST`,而它们不一定相同 —— 采数组却拿单图那份,就会把一个本不存在的平铺按到
+    // 图上。语料里有两个发射器正是这样:远景闪电的单图槽声明了 8 倍横向平铺,而它
+    // 实际采的是数组、数组那份是恒等。
+    const stKey = this.arraySlices && material && !material.external
+      && material.textureScaleOffset?.[`${key}2DArray`] ? `${key}2DArray` : key;
+    const st = (material && !material.external && material.textureScaleOffset?.[stKey]) || null;
     this.uvScaleOffset = st
       ? [num(st[0], 1), num(st[1], 1), num(st[2], 0), num(st[3], 0)] : [1, 1, 0, 0];
+    this.uvSlot = stKey;
     const sheet = this.system.textureSheet;
     this.tiles = sheet && (num(sheet.tilesX, 1) > 1 || num(sheet.tilesY, 1) > 1)
       ? { x: num(sheet.tilesX, 1), y: num(sheet.tilesY, 1), spec: sheet } : null;
@@ -858,6 +865,7 @@ class Emitter {
       shapeScale: sh && sh.scale ? [num(sh.scale[0], 1), num(sh.scale[1], 1), num(sh.scale[2], 1)] : [1, 1, 1],
       live: this.particles.length,
       peak: this.peak,
+      spawnedTotal: this.spawnedTotal || 0,
       births: b.n,
       radialMax: +b.radialMax.toFixed(4),
       radialMean: b.n ? +(b.radialSum / b.n).toFixed(4) : 0,
@@ -958,6 +966,9 @@ class Emitter {
       gravity: sampleValue(start.gravityModifier, 0, r),
     };
     this.particles.push(p);
+    // 累计发射数。存活数量说明不了「还在不在发」:一个容量 1 的系统,发一次就停和
+    // 每轮顶替一次,存活数**都是** 1,差别全在这个累计量上。
+    this.spawnedTotal = (this.spawnedTotal || 0) + 1;
     if (this.ringMode) this._ringPlace(p);
     for (const h of this.hooks) h.onSpawn?.(p);
   }
