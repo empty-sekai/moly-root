@@ -37,8 +37,11 @@ export const ASSET_SPECS = [
   { id: 'fixture-models', label: 'fixture-models/', path: 'fixture-models/', kind: 'directory' },
   { id: 'camera', label: 'camera/', path: 'camera/', kind: 'directory' },
   { id: 'perf-animations', label: 'perf-animations/', path: 'perf-animations/', kind: 'directory' },
+  { id: 'fixture-talks', label: 'fixture-talks/talks.json', path: 'fixture-talks/talks.json', kind: 'file' },
   { id: 'ui', label: 'ui/talk.json（UI 域）', path: 'ui/talk.json', kind: 'file', expectedNotReady: true },
 ];
+
+export const FIXTURE_TALKS_PATH = 'fixture-talks/talks.json';
 
 export const ATTACH_POINTS_PATH = 'fixture-interface/attach-points.json';
 
@@ -302,6 +305,53 @@ export async function findFixtureAnimation(fixturePackage) {
   return match
     ? { status: 'ready', url: assetUrl(`perf-animations/${match}`), files: [match] }
     : { status: 'missing', url: '', files: listing.files, error: `没有匹配 ${exact}` };
+}
+
+// 家具演出的角色动作不在 timeline 上。87 份 fixture-timeline 文档里只有 5 份引用
+// `mysekai__character_motion`，其余动的都是家具本体 —— 与运行时一致：timeline 不含
+// 角色分派，NPC 由别处驱动。角色要做什么写在家具旁对话里（`change_animation`），
+// 所以这一族的角色动作要从对话产物取，不能只看 timeline。
+export async function loadFixtureTalks() {
+  const fetched = await fetchOptionalJson(FIXTURE_TALKS_PATH);
+  const doc = fetched.value;
+  if (!doc) {
+    return {
+      status: 'missing', doc: null, talks: [], fixtures: new Map(),
+      byPackage: new Map(), error: fetched.error,
+    };
+  }
+  const fixtures = new Map();
+  for (const [fid, pkg] of Object.entries(doc.summary?.fixtures || {})) {
+    if (pkg) fixtures.set(String(fid), pkg);
+  }
+  return {
+    status: 'ready', doc, talks: doc.talks || [], fixtures,
+    // 反向表：包 → 该包对应的 fixtureId 们。一个包可能对应多个 id。
+    byPackage: (() => {
+      const out = new Map();
+      for (const [fid, pkg] of fixtures) {
+        if (!out.has(pkg)) out.set(pkg, []);
+        out.get(pkg).push(fid);
+      }
+      return out;
+    })(),
+  };
+}
+
+/**
+ * 某个家具包上的对话。`fixtureIds` → 包的对照来自产物 `summary.fixtures`
+ * （由 master 行给出），**不按包名相似度猜**：egg1 对 837 这种对应关系是表里写的，
+ * 不是名字看着像。对照缺失时返回空并说明，不退回猜测。
+ */
+export function talksForPackage(talkData, fixturePackage) {
+  if (!talkData?.doc) return { status: 'missing', ids: [], talks: [] };
+  const ids = talkData.byPackage?.get(fixturePackage) || [];
+  if (!ids.length) return { status: 'no-fixture-id', ids: [], talks: [] };
+  const wanted = new Set(ids.map(Number));
+  const talks = talkData.talks.filter(
+    (talk) => (talk.fixtureIds || []).some((fid) => wanted.has(Number(fid))),
+  );
+  return { status: talks.length ? 'ready' : 'no-talks', ids, talks };
 }
 
 export async function findFixtureGeometry(fixturePackage) {

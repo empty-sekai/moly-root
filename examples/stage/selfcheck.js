@@ -449,13 +449,82 @@ function checkMotion(panel, probe, boundObjects) {
     }
     moved = Math.max(moved, chunkMoved);
   }
-  const ok = movedBound > 0;
-  panel.set('c9', '实际在动', ok ? 'pass' : 'fail',
-    `推进 ${frames} 帧（${(frames / 60).toFixed(1)} s）：单段内位置/旋转变过的节点最多 ${moved} 个，`
-    + `其中被本轨通道绑到的 ${movedBound} 个`, [
-      { status: moved > 0 ? 'pass' : 'fail', label: '场景图里变过的节点（含布料与表情等非动画驱动）', detail: String(moved) },
-      { status: ok ? 'pass' : 'fail', label: '其中被本轨动画通道绑到的节点', detail: `${movedBound}${names.size ? ` · ${[...names].join(' ')}` : ''}` },
-    ]);
+  // 「有节点在动」远不足以说明角色在做动作：这条判据曾经只要求 movedBound > 0，
+  // 而两根 twist 骨在动就满足它 —— 画面上角色仍然整场 T-pose。所以判据的主体换成
+  // **指向身体骨的通道数**：Hips / Spine / Head 各自都要有通道绑上，缺任何一根都红。
+  // 「变过的节点数」留着看，但不再单独决定颜色。
+  const bones = probe.bodyBones ? probe.bodyBones() : ['Hips', 'Spine', 'Head'];
+  const body = probe.bodyChannels ? probe.bodyChannels() : {};
+  const missingBones = bones.filter((bone) => !(Number(body[bone]) > 0));
+  const ok = missingBones.length === 0;
+  const rows = [
+    { status: 'pass', label: '场景图里变过的节点（含布料与表情等非动画驱动）', detail: String(moved) },
+    { status: movedBound > 0 ? 'pass' : 'fail',
+      label: '其中被动画通道绑到的节点',
+      detail: `${movedBound}${names.size ? ` · ${[...names].join(' ')}` : ''}` },
+  ];
+  for (const bone of bones) {
+    const count = Number(body[bone]) || 0;
+    rows.push({
+      status: count > 0 ? 'pass' : 'fail',
+      label: `指向 ${bone} 的通道`,
+      detail: count > 0 ? String(count) : '0（这根骨没有任何动画通道）',
+    });
+  }
+  if (missingBones.length) {
+    rows.push({
+      status: 'fail',
+      label: '判据说明',
+      detail: `${missingBones.join(' / ')} 上没有通道：动的只可能是别的骨（twist / collider 一类），`
+        + '身体没有被驱动，画面就是 T-pose。',
+    });
+  }
+  panel.set('c9', '身体通道与实际在动', ok ? 'pass' : 'fail',
+    `推进 ${frames} 帧（${(frames / 60).toFixed(1)} s）：`
+    + bones.map((bone) => `${bone} ${Number(body[bone]) || 0}`).join(' · ')
+    + ` · 变过的节点 ${moved}（其中被通道绑到 ${movedBound}）`,
+    rows);
+}
+
+// c11：角色动作的来源。家具演出的 timeline 上没有角色动画，所以这一族的角色动作
+// 必须来自家具旁对话；这条判据数的就是「对话给了几条动作、绑上了几条、缺了哪些」。
+// 时长里由 demo 替身补的秒数单列，不并进总时长——那不是游戏值。
+function checkTalkSource(panel, probe) {
+  const talk = probe?.talk?.();
+  if (!talk || talk.talkId === undefined || talk.talkId === null) {
+    panel.set('c11', '角色动作来源', 'fail',
+      `没有选中的家具旁对话${talk?.status ? ` · ${talk.status}` : ''}`
+      + (talk?.choices ? ` · 可选 ${talk.choices} 条` : ''));
+    return;
+  }
+  // 对话点的是**族名**，库里放的是该族的 S/L/E 分段。所以「绑上了没有」要按族比，
+  // 按分段名比族名会把每一族都算成缺（实测过：3 个族、9 条分段，比出来「缺 3」）。
+  const wanted = talk.motionsWanted || [];
+  const families = new Set(talk.familiesBound || []);
+  const segments = talk.segmentsBound || [];
+  const missing = wanted.filter((name) => !families.has(name));
+  const unresolved = talk.unresolvedTokens || [];
+  const rows = [
+    { status: wanted.length ? 'pass' : 'fail', label: '对话要的角色动作',
+      detail: wanted.length ? `${wanted.length} 条 · ${wanted.slice(0, 6).join(' ')}` : '0（这条对话没有 change_animation）' },
+    { status: missing.length ? 'fail' : 'pass', label: '绑上动作库的族',
+      detail: `${families.size}/${wanted.length} 族 · ${segments.length} 条分段`
+        + (missing.length ? ` · 缺 ${missing.join(' ')}` : '') },
+    { status: unresolved.length ? 'fail' : 'pass', label: '提取侧未解开的常量',
+      detail: unresolved.length ? unresolved.join(' ') : '0' },
+    { status: 'pass', label: '时长：数据给的 / 点击替身补的',
+      detail: `${talk.dataSeconds.toFixed(1)} s / ${talk.standInSeconds.toFixed(1)} s（点击 ${talk.clickWaits} 次）` },
+  ];
+  const unscheduled = Object.keys(talk.unscheduled || {});
+  if (unscheduled.length) {
+    rows.push({ status: 'pass', label: '时间表未编排的算子',
+      detail: JSON.stringify(talk.unscheduled) });
+  }
+  const ok = wanted.length > 0 && !missing.length && !unresolved.length;
+  panel.set('c11', '角色动作来源', ok ? 'pass' : 'fail',
+    `对话 #${talk.talkId} · 形态 ${talk.form} · 家具 ${(talk.fixtureIds || []).join('/')}`
+    + ` · 动作族 ${families.size}/${wanted.length}（分段 ${segments.length}）`,
+    rows);
 }
 
 async function checkPlayability(panel, probe) {
@@ -520,7 +589,7 @@ async function checkPlayability(panel, probe) {
 async function checkRenderAndMotion(panel) {
   const probe = window.__stageProbe;
   if (!probe) {
-    for (const [id, name] of [['c6', '贴图上链'], ['c7', '材质非默认'], ['c8', '通道绑定残差'], ['c9', '实际在动'], ['c10', '不可播如实']]) {
+    for (const [id, name] of [['c6', '贴图上链'], ['c7', '材质非默认'], ['c8', '通道绑定残差'], ['c9', '身体通道与实际在动'], ['c10', '不可播如实'], ['c11', '角色动作来源']]) {
       panel.set(id, name, 'fail', '没有场景图探针（stage.js 未起来）');
     }
     return;
@@ -529,6 +598,7 @@ async function checkRenderAndMotion(panel) {
   checkMaterials(panel, probe);
   const boundObjects = await checkChannelBinding(panel, probe);
   checkMotion(panel, probe, boundObjects);
+  checkTalkSource(panel, probe);
   await checkPlayability(panel, probe);
 }
 
@@ -546,8 +616,9 @@ export async function runSelfcheck() {
   panel.set('c6', '贴图上链', 'pending', '等待场景图');
   panel.set('c7', '材质非默认', 'pending', '等待场景图');
   panel.set('c8', '通道绑定残差', 'pending', '等待动画上链');
-  panel.set('c9', '实际在动', 'pending', '等待动画上链');
+  panel.set('c9', '身体通道与实际在动', 'pending', '等待动画上链');
   panel.set('c10', '不可播如实', 'pending', '等待选中演出');
+  panel.set('c11', '角色动作来源', 'pending', '等待家具旁对话');
   const assetsPromise = checkAssets(panel);
   const catalogPromise = loadCatalogForCheck();
   const catalog = await catalogPromise;

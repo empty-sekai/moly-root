@@ -19,6 +19,8 @@ import { Environment, CROSS_FADE_SECONDS } from '../viewer/environment.js';
 import { buildCharacter, updateCharacter } from './character.js';
 import { applyFixtureMaterials, applyPhenomenaLight } from './fixture-materials.js';
 import * as Bind from './anim-bind.js';
+import * as Talk from './talk-schedule.js';
+import { groupClips, splitName, SegmentController } from '../viewer/segments.js';
 import {
   RECOMMENDED_PACKAGES,
   RECOMMENDATION_NOTE,
@@ -29,8 +31,10 @@ import {
   fetchOptionalJson,
   findFixtureAnimation,
   findFixtureGeometry,
+  loadFixtureTalks,
   loadPerformance,
   loadTrackCatalog,
+  talksForPackage,
 } from './data.js';
 import { runSelfcheck } from './selfcheck.js';
 
@@ -66,6 +70,20 @@ const state = {
   runToken: 0,
   mode: 'spontaneous',
   unplayable: [],
+  // 家具旁对话：这一族的角色动作来源。talkData 是整份产物，talk 是选中的一条，
+  // talkSchedule 是它的时间表，talkClips 是时间表要的动作库剪辑。
+  talkData: null,
+  talkChoices: [],
+  talk: null,
+  talkSchedule: null,
+  talkClips: new Map(),
+  talkFamilies: new Map(),
+  talkSegments: null,
+  talkBinding: null,
+  talkMissing: [],
+  talkAction: null,
+  talkMotion: '',
+  talkStatus: '未读取',
   env: { environment: null, on: false, error: '', failed: false, name: '' },
 };
 
@@ -111,6 +129,7 @@ function setText(id, value) {
 }
 
 function updateFacts() {
+  updateTalkFacts();
   const performance = state.performance;
   const entry = performance?.entry;
   setText('package-name', entry?.package || '—');
@@ -122,6 +141,43 @@ function updateFacts() {
     : (performance?.fixtureTarget ? '未命中' : '无家具目标'));
   setText('clip-count', String(performance?.clipCount || 0));
   setText('timeline-time', `${state.timelineTime.toFixed(2)} / ${state.totalDuration.toFixed(2)} s`);
+}
+
+// 身体通道计数：这是「角色真的在做动作」的判据面。
+// 「会动的节点数 > 0」不够——两根 twist 骨在动就能满足它，画面仍然是 T-pose。
+// 指向 Hips / Spine / Head 的通道数各自都要 > 0，才说明这条动画驱动的是身体。
+const BODY_BONES = ['Hips', 'Spine', 'Head'];
+
+function bodyChannelCounts() {
+  const counts = new Map();
+  for (const report of [state.talkBinding, state.binding]) {
+    for (const [name, count] of report?.boundByNode || []) {
+      counts.set(name, (counts.get(name) || 0) + count);
+    }
+  }
+  return BODY_BONES.map((bone) => [bone, counts.get(bone) || 0]);
+}
+
+function updateTalkFacts() {
+  const schedule = state.talkSchedule;
+  setText('talk-facts', state.talk
+    ? `${talkLabel(state.talk)} · 动作绑上 ${state.talkClips.size}`
+      + (state.talkMissing.length ? ` · 缺 ${state.talkMissing.length}` : '')
+    : state.talkStatus);
+  if (!schedule) {
+    setText('talk-timing', '—');
+  } else {
+    // 数据给的秒数与 demo 替身补的秒数分开说：替身不是游戏值。
+    setText('talk-timing',
+      `${schedule.duration.toFixed(1)} s（数据 ${schedule.dataSeconds.toFixed(1)} s`
+      + ` · 点击替身 ${schedule.standInSeconds.toFixed(1)} s ×${schedule.clickWaits}）`
+      + (Object.keys(schedule.unscheduled).length
+        ? ` · 未编排算子 ${JSON.stringify(schedule.unscheduled)}` : ''));
+  }
+  const body = bodyChannelCounts();
+  const missing = body.filter(([, count]) => count === 0).map(([bone]) => bone);
+  setText('body-facts', body.map(([bone, count]) => `${bone} ${count}`).join(' · ')
+    + (missing.length ? ` · 缺 ${missing.join('/')}` : ''));
 }
 
 function updateRenderFacts() {
@@ -452,6 +508,161 @@ async function bindLane(lane) {
   return state.binding;
 }
 
+// -------------------------------------------------- 家具旁对话驱动的角色动作
+//
+// 家具演出的 timeline 上没有角色动画：87 份文档里只有 5 份引用共享动作库，其余动的是
+// 家具本体。角色要做什么写在对话脚本的 `change_animation` 里，所以这一族的角色动作
+// 从对话产物取，按对话自己的调用流排时间表（见 talk-schedule.js）。
+//
+// 时间表与 timeline 是两条并行的时间线，共用同一个时钟：timeline 事件驱动家具，
+// 对话事件驱动角色。两者都不改对方的时长口径。
+
+function talkLabel(talk) {
+  const form = talk.form === 1 ? '自发型' : '玩家参与型';
+  const units = (talk.unitIds || []).join('/') || '?';
+  const steps = (talk.steps || []).length;
+  const motions = (talk.steps || []).filter(
+    (step) => step.op === 'change_animation' || step.op === 'play_animation').length;
+  return `#${talk.talkId} · ${form} · 角色 ${units} · step ${steps} · 换动作 ${motions}`;
+}
+
+function populateTalks(choices, note) {
+  const select = $('talk-select');
+  if (!select) return;
+  select.innerHTML = '';
+  if (!choices.length) {
+    const option = document.createElement('option');
+    option.textContent = note || '该家具没有对话';
+    select.appendChild(option);
+    select.disabled = true;
+    return;
+  }
+  for (const talk of choices) {
+    const option = document.createElement('option');
+    option.value = String(talk.talkId);
+    option.textContent = talkLabel(talk);
+    select.appendChild(option);
+  }
+  select.disabled = false;
+}
+
+function stopTalkAction() {
+  if (state.talkSegments?.current) state.talkSegments.current.stop();
+  state.talkAction = null;
+  state.talkMotion = '';
+}
+
+/**
+ * 把时间表要的动作从共享动作库绑到角色骨架上。
+ *
+ * `change_animation` 给的是**族名**（`mov_cw_adult_nod002`），库里放的是它的分段
+ * （`_S` 起 / `_L` 循环 / `_E` 收 / `_O` 单发）——索引里 383 个族名，glb 里 1125 条分段。
+ * 所以要的不是「一条同名剪辑」，而是该族的全部分段；播放也不是播一条，而是
+ * S→L→E 的衔接，与 viewer 同一套（`../viewer/segments.js`），不另写一份。
+ */
+async function bindTalkMotions(schedule) {
+  stopTalkAction();
+  state.talkClips = new Map();
+  state.talkFamilies = new Map();
+  state.talkBinding = null;
+  state.talkMissing = [];
+  state.talkSegments = null;
+  const { names, unresolvedTokens } = Talk.motionsWanted(schedule);
+  for (const token of unresolvedTokens) state.talkMissing.push(`${token}（提取侧未解开的常量）`);
+  if (!names.size) return;
+  const motion = await loadMotionLibrary();
+  if (!motion) {
+    for (const name of names) state.talkMissing.push(`${name}（动作库未加载）`);
+    return;
+  }
+  // 族名 → 该族在库里实有的分段名。库里一个分段都没有的族才算缺。
+  const wantSegments = new Set();
+  const segmentsOf = new Map();
+  for (const clip of motion.clips) {
+    const { base } = splitName(clip.name);
+    if (!names.has(base)) continue;
+    wantSegments.add(clip.name);
+    if (!segmentsOf.has(base)) segmentsOf.set(base, []);
+    segmentsOf.get(base).push(clip.name);
+  }
+  for (const name of names) {
+    if (!segmentsOf.has(name)) state.talkMissing.push(`${name}（库里没有这个族）`);
+  }
+  if (!wantSegments.size) return;
+  const report = Bind.retargetByName({
+    clips: motion.clips, root: state.character?.root, want: wantSegments,
+  });
+  for (const [name, clip] of report.clips) state.talkClips.set(name, clip);
+  for (const segment of wantSegments) {
+    if (!state.talkClips.has(segment)) state.talkMissing.push(`${segment}（绑不上角色骨架）`);
+  }
+  state.talkBinding = report;
+  for (const family of groupClips([...state.talkClips.keys()].map((name) => ({ name })))) {
+    state.talkFamilies.set(family.base, family);
+  }
+  state.talkSegments = new SegmentController(state.mixer, state.talkClips, state.loopByName);
+}
+
+/** 时钟处该放的角色动作族；换了才切，同一族不重启（S→L 正在衔接时不打断）。 */
+function updateTalkMotion() {
+  if (!state.talkSchedule || !state.talkSegments) return;
+  const event = Talk.animationAt(state.talkSchedule, state.timelineTime);
+  const wanted = event?.motion || '';
+  if (wanted === state.talkMotion) return;
+  state.talkMotion = wanted;
+  const family = wanted ? state.talkFamilies.get(wanted) : null;
+  if (!family) return;
+  state.talkSegments.playFamily(family);
+}
+
+/** 对话行与头顶 tweet：形态一只有 HUD，形态二有底部对话窗。 */
+function updateTalkOverlay() {
+  const line = state.talkSchedule
+    ? Talk.textAt(state.talkSchedule, state.timelineTime) : null;
+  const text = line?.text || '';
+  const target = $('dialogue-text');
+  if (target) target.textContent = text || '（本刻没有对话行）';
+  const hud = $('tweet-hud');
+  if (hud && state.talk) {
+    const tweet = state.talk.tweet;
+    hud.textContent = tweet?.text
+      ? `tweet · ${tweet.text}`
+      : (text ? `tweet HUD · 本条对话没有 tweet 行` : 'tweet HUD · 等待演出');
+  }
+}
+
+async function applyTalk(talk) {
+  state.talk = talk || null;
+  state.talkSchedule = talk ? Talk.buildSchedule(talk.steps || []) : null;
+  if (talk) {
+    // 形态由数据决定（NoTalk 表里的 (fixtureId, unitId) 对），不由界面上的按钮决定。
+    setForm(talk.form === 1 ? 'spontaneous' : 'participatory');
+  }
+  await bindTalkMotions(state.talkSchedule);
+  // 对话时间表可能比 timeline 长；总时长取两者较大者，否则对话走不完就停了。
+  state.totalDuration = Math.max(
+    state.performance?.totalDuration || 0, state.talkSchedule?.duration || 0);
+  state.talkMotion = '';
+  updateTalkMotion();
+  updateFacts();
+}
+
+function selectTalkFor(fixturePackage) {
+  const result = talksForPackage(state.talkData, fixturePackage);
+  state.talkChoices = result.talks;
+  if (result.status === 'missing') {
+    state.talkStatus = '产物里没有 fixture-talks/talks.json';
+  } else if (result.status === 'no-fixture-id') {
+    state.talkStatus = `产物的 fixtureId→包对照里没有 ${fixturePackage || '(无家具目标)'}`;
+  } else if (result.status === 'no-talks') {
+    state.talkStatus = `fixtureId ${result.ids.join('/')} 上没有对话`;
+  } else {
+    state.talkStatus = `fixtureId ${result.ids.join('/')} · 对话 ${result.talks.length} 条`;
+  }
+  populateTalks(state.talkChoices, state.talkStatus);
+  return state.talkChoices[0] || null;
+}
+
 function loopFor(name) {
   const known = state.loopByName.get(name);
   if (known !== undefined) return known;
@@ -495,6 +706,7 @@ function updateEvents(dt) {
       state.activeActions.delete(event.index);
     }
   }
+  updateTalkMotion();
   if (state.playing) state.mixer?.update(dt);
 }
 
@@ -719,7 +931,9 @@ function resetPlayback(playing = true) {
   stopActions();
   state.timelineTime = 0;
   state.playing = playing;
-  state.totalDuration = state.performance?.totalDuration || 0;
+  state.totalDuration = Math.max(
+    state.performance?.totalDuration || 0, state.talkSchedule?.duration || 0);
+  stopTalkAction();
   updateFacts();
 }
 
@@ -734,6 +948,9 @@ async function applyLane(lane) {
   state.performance.attach = attach;
   const placement = placeCharacter(attach);
   frameObject(state.fixture?.root, state.character?.root);
+  // 动作库要绑到角色骨架上，所以放在角色就位、mixer 建好之后。
+  await applyTalk(state.talkPick || null);
+  if (token !== state.runToken) return;
   resetPlayback(true);
   updateFacts();
   updateRenderFacts();
@@ -755,6 +972,8 @@ async function applyPerformance(performance) {
   renderTree(performance.timeline);
   await loadFixtureGeometry(performance.fixtureTarget?.targetPackage || '');
   if (token !== state.runToken) return;
+  // 角色动作要在轨之前定下来：这一族的角色动画来自对话，不来自轨。
+  state.talkPick = selectTalkFor(performance.fixtureTarget?.targetPackage || '');
   const lanes = buildLanes(performance);
   await scoreLanes(lanes);
   if (token !== state.runToken) return;
@@ -825,12 +1044,21 @@ function updateOverlay() {
     (clip) => state.timelineTime >= clip.start && state.timelineTime < clip.start + clip.duration,
   );
   $('emoticon-bubble').textContent = active ? '气泡轨道 · 在区间内（产物里没有气泡条目名）' : '气泡轨道 · —';
-  $('tweet-hud').textContent = `${performance.entry.timeline} · ${state.timelineTime.toFixed(2)} s`;
   setText('active-clip', activeClipLabel());
-  const talk = performance.allClips.find(
+  // 对话行与 tweet 有两个可能的来源，同一刻只认一个，不让两处互相盖写：
+  // 选中了家具旁对话就以它为准（它有真正的对话文本与 tweet 行），没有才退回
+  // timeline 上的 TextTrack 名字，并说明那只是轨名不是台词。
+  if (state.talkSchedule) {
+    updateTalkOverlay();
+    return;
+  }
+  $('tweet-hud').textContent = `${performance.entry.timeline} · ${state.timelineTime.toFixed(2)} s`;
+  const timelineText = performance.allClips.find(
     (clip) => clip.class === 'TextTrack' && state.timelineTime >= clip.start && state.timelineTime < clip.start + clip.duration,
   );
-  $('dialogue-text').textContent = talk?.displayName || 'UI 字段待接入';
+  $('dialogue-text').textContent = timelineText
+    ? `${timelineText.displayName}（timeline 轨名，不是台词）`
+    : '本演出没有选中的对话';
 }
 
 function setForm(form) {
@@ -914,6 +1142,18 @@ async function boot() {
 
   $('performance-select').addEventListener('change', (event) => selectPerformance(event.target.value));
   $('lane-select')?.addEventListener('change', (event) => selectLane(event.target.value));
+  $('talk-select')?.addEventListener('change', async (event) => {
+    const talk = state.talkChoices.find((item) => String(item.talkId) === event.target.value);
+    if (!talk) return;
+    $('talk-select').disabled = true;
+    try {
+      await applyTalk(talk);
+      resetPlayback(true);
+    } finally {
+      $('talk-select').disabled = false;
+    }
+    runSelfcheck();
+  });
   $('play-button').addEventListener('click', () => { if (state.performance) state.playing = true; });
   $('stop-button').addEventListener('click', () => resetPlayback(false));
   $('speed-select').addEventListener('change', (event) => { state.playbackRate = Number(event.target.value) || 1; });
@@ -926,6 +1166,9 @@ async function boot() {
   try {
     state.manifest = await fetchJson('manifest.json');
     state.attachDoc = await fetchJson(ATTACH_POINTS_PATH);
+    // 家具旁对话是这一族角色动作的来源；读不到就如实说，不静默退回「只看 timeline」。
+    state.talkData = await loadFixtureTalks();
+    if (state.talkData.status !== 'ready') state.talkStatus = '产物里没有 fixture-talks/talks.json';
     const facial = await fetchOptionalJson('facial-tables.json');
     state.tables = Facial.normalizeTables(facial.value) || Facial.fallbackTables();
     const wanted = params.get('unit');
@@ -979,6 +1222,30 @@ window.__stageProbe = {
     events: state.lane.events.length,
   } : null),
   duration: () => state.totalDuration,
+  // 角色动作的来源与它的通道账：判据要能分开问「这条动画绑上了几条通道」与
+  // 「其中指向身体骨的有几条」，所以两样都给，且给的是绑定时数下来的计数，
+  // 不让判据自己去反查改绑后的 track 名（那里已经只有 uuid）。
+  talk: () => (state.talkSchedule ? {
+    talkId: state.talk?.talkId ?? null,
+    form: state.talk?.form ?? null,
+    fixtureIds: state.talk?.fixtureIds || [],
+    unitIds: state.talk?.unitIds || [],
+    duration: state.talkSchedule.duration,
+    dataSeconds: state.talkSchedule.dataSeconds,
+    standInSeconds: state.talkSchedule.standInSeconds,
+    clickWaits: state.talkSchedule.clickWaits,
+    unscheduled: state.talkSchedule.unscheduled,
+    motionsWanted: [...Talk.motionsWanted(state.talkSchedule).names],
+    unresolvedTokens: [...Talk.motionsWanted(state.talkSchedule).unresolvedTokens],
+    // 分段名与族名分开给：对话点的是族（`mov_*`），库里放的是它的 S/L/E 分段，
+    // 判据要拿「族对族」比，拿分段名去比族名必然全缺。
+    segmentsBound: [...state.talkClips.keys()],
+    familiesBound: [...state.talkFamilies.keys()],
+    missing: [...state.talkMissing],
+    boundByNode: Object.fromEntries(state.talkBinding?.boundByNode || []),
+  } : { status: state.talkStatus, choices: state.talkChoices.length }),
+  bodyChannels: () => Object.fromEntries(bodyChannelCounts()),
+  bodyBones: () => [...BODY_BONES],
   advance(frames = 30, dt = 1 / 60) {
     const wasPlaying = state.playing;
     state.playing = true;

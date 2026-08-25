@@ -117,7 +117,16 @@ function emptyReport() {
   return {
     channels: 0, bound: 0, viaSuffix: 0, rootFallback: 0, ambiguous: 0,
     unbound: [], clips: new Map(), boundObjects: new Set(), emptyClips: [],
+    // 每个目标节点绑上了几条通道。改绑之后 track 名字变成 `uuid.property`，
+    // 骨名就不在剪辑里了；而「这条动画到底动的是身体还是两根 twist 骨」只能按
+    // 骨名数——所以在绑的时候就记下来，不留给下游去反查。
+    boundByNode: new Map(),
   };
+}
+
+function countBound(report, object) {
+  const name = object?.name || '(unnamed)';
+  report.boundByNode.set(name, (report.boundByNode.get(name) || 0) + 1);
 }
 
 /**
@@ -160,6 +169,7 @@ export function retargetClips({ clips, json, nodeObjects, resolvers, want = null
       tracks.push(retargeted);
       report.bound += 1;
       report.boundObjects.add(hit.object);
+      countBound(report, hit.object);
     }
     if (tracks.length) {
       report.clips.set(clip.name, new THREE.AnimationClip(clip.name, clip.duration, tracks, clip.blendMode));
@@ -194,6 +204,7 @@ export function retargetByName({ clips, root, want = null }) {
       tracks.push(retargeted);
       report.bound += 1;
       report.boundObjects.add(object);
+      countBound(report, object);
     }
     if (tracks.length) {
       report.clips.set(clip.name, new THREE.AnimationClip(clip.name, clip.duration, tracks, clip.blendMode));
@@ -216,6 +227,9 @@ export function mergeReports(reports) {
     total.unbound.push(...report.unbound);
     total.emptyClips.push(...report.emptyClips);
     for (const object of report.boundObjects) total.boundObjects.add(object);
+    for (const [name, count] of report.boundByNode || []) {
+      total.boundByNode.set(name, (total.boundByNode.get(name) || 0) + count);
+    }
   }
   return total;
 }
