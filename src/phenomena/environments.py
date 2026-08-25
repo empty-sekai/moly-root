@@ -41,6 +41,23 @@ CONFIG_SCRIPT = "SiteEnvironmentConfig"
 PROFILE_SCRIPT = "VolumeProfile"
 RAMP_SCRIPT = "RampTexture"
 
+
+def _gradient_end(gradient):
+    """A gradient's colour at its end, as the runtime evaluates it there.
+
+    Colour keys and alpha keys run on their own lists, so the end colour is the
+    last colour key and the end alpha is the last alpha key.  A gradient with no
+    keys has no end to report.
+    """
+    colours = int(gradient.get("m_NumColorKeys") or 0)
+    alphas = int(gradient.get("m_NumAlphaKeys") or 0)
+    if colours <= 0:
+        return None
+    colour = gradient.get(f"key{colours - 1}") or {}
+    alpha = gradient.get(f"key{max(0, alphas - 1)}") or {}
+    return [round(float(colour.get(channel, 0.0)), 6) for channel in "rgb"] + [
+        round(float(alpha.get("a", 1.0)), 6)]
+
 # Effect placement, as told by the prefab name.
 EFFECT_KINDS = (("fx_env_sky_", "sky"), ("fx_env_camera_", "camera"),
                 ("fx_env_site_", "site"))
@@ -569,9 +586,16 @@ class _Phenomenon:
             self._gap(bundle_name, variant=variant, ramp=asset_name,
                       reason=f"{type(exc).__name__}: {exc}")
             return
+        # The colour the runtime hands the shaders as the sky's bottom is the
+        # gradient's own end, not the picture's last pixel.  The picture is baked
+        # through parameters the gradient reading does not go through, so on one
+        # phenomenon here the two differ, and reading the picture instead would
+        # be wrong by that much without saying so.
         self.entry["ramp"] = {"file": f"{self.name}/ramp.png",
                              "width": tree.get("m_Width"),
-                             "height": tree.get("m_Height")}
+                             "height": tree.get("m_Height"),
+                             "skyBottomColor": _gradient_end(
+                                 record.tree(path_id).get("_gradient") or {})}
         self._count(bundle_name, "ramps")
 
     def _effect(self, variant, bundle_name, asset_name, record, path_id, site,

@@ -188,6 +188,13 @@ def _global_bundle(phenomenon, ramp_image=None, extra_modules=None):
             "m_Script": {"m_FileID": 0, "m_PathID": 903},
             "m_Name": f"ramp_sky_{phenomenon}",
             "_widthNpot2": 5,
+            # The gradient the runtime reads the sky's bottom colour off. Its end
+            # is a different colour from the picture's last pixel here, the way it
+            # is in the real data for one phenomenon, so a reader that took the
+            # pixel instead would show up.
+            "_gradient": {"m_NumColorKeys": 2, "m_NumAlphaKeys": 2,
+                          "key0": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0},
+                          "key1": {"r": 0.25, "g": 0.5, "b": 0.75, "a": 0.5}},
             "_texture": {"m_FileID": 0, "m_PathID": 300}}, archive),
         _Object("Texture2D", 300, {"m_Name": "ramp", "m_Width": 32, "m_Height": 1},
                 archive, image=ramp_image),
@@ -706,8 +713,10 @@ def test_ramp_is_written_as_the_one_pixel_tall_gradient(tmp_path, monkeypatch):
     result, out, index = _run(tmp_path, monkeypatch, mapping)
     ramp = out / "001_sunny" / "ramp.png"
     assert Image.open(ramp).size == (32, 1)
-    assert index["phenomena"]["001_sunny"]["ramp"] == {"file": "001_sunny/ramp.png",
-                                                       "width": 32, "height": 1}
+    assert index["phenomena"]["001_sunny"]["ramp"] == {
+        "file": "001_sunny/ramp.png", "width": 32, "height": 1,
+        # The gradient's end, not the picture's last pixel: the two differ here.
+        "skyBottomColor": [0.25, 0.5, 0.75, 0.5]}
     assert result["phenomena"] == 1 and result["ramps"] == 1
 
 
