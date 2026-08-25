@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <meta charset="utf-8">
-<title>Character viewer</title>
+<title>demo</title>
 <link rel="stylesheet" href="./ui.css?v=4">
 <!-- 结构说明:左栏=角色网格 + 表演场景列表(主入口) + 播放控制 + 折叠的动作库;
      中间=画面 + 状态条(状态条走文档流,画面上零浮层);右栏=旋钮(短、固定)。 -->
@@ -8,8 +8,7 @@
 
   <aside class="rail" id="railL">
     <div id="brand">
-      <h1>Character viewer</h1>
-      <div class="tag">toon 着色 · 布料物理 · 段衔接 · 头顶件</div>
+      <h1>demo</h1>
       <details class="note">
         <summary>规格</summary>
         <div class="body">toon 着色 · 眉眼透发(stencil)· 眨眼口型 · 布料实时物理 · S→L→E 段衔接 ·
@@ -93,13 +92,23 @@
       </div>
       <div class="controls">
         <select id="selEnvSite" class="field"
-          title="换站点:真站点几何 + 站点粒子挂哪一站。室内/室外由站点产物判(室内不挂天气特效与天空)"></select>
+          title="换站点:真站点几何 + 站点粒子挂哪一站。**一行一个站点,不是一行一个场景包**:室内那一个场景包承载三个站点(1/2/3 楼),三行只差 placement 表给的世界位置。室内/室外由站点产物判(室内不挂天气特效与天空)"></select>
       </div>
       <!-- 室内等级:房间由套件按等级模块拼装。等级本身在 master 表里(本仓没有),
            所以做成面板下发,默认取产物里最高的一级。 -->
       <div class="controls">
         <select id="selEnvLevel" class="field"
-          title="室内房间等级:房间 = 该级扩张模块摆出来的套件网格 + 该级的可走面。等级由 master 表决定,本仓拿不到,所以做成面板下发"></select>
+          title="室内房间等级:房间 = 该级扩张模块摆出来的套件网格 + 该级的可走面。名单 = 产物里的扩张模块等级 ∩ placement 表里这一站开放的等级(2 楼与 3 楼只开放 5 级);当前是第几级由服务端决定,所以做成面板下发"></select>
+      </div>
+      <!-- 站点这一族八个程序**都写两个渲染目标**:第一个是颜色,第二个是发光。
+           只有 Object 与 Fixture/Basic 会往第二个写非零值,而且发光**从不加进主目标**。 -->
+      <div class="controls">
+        <select id="selEnvEmission" class="field"
+          title="站点的第二个渲染目标(发光):不产 / 每帧产一张缓冲 / 把缓冲直显到屏幕。三态都不把发光加进主目标">
+          <option value="off">发光缓冲:不产</option>
+          <option value="buffer" selected>发光缓冲:产出</option>
+          <option value="view">发光缓冲:直显</option>
+        </select>
       </div>
       <div class="hintline dim" id="envSiteHint">&nbsp;</div>
       <!-- 现象时间轴:打雷天那一下亮就出自它(天空与光的附加色/附加强度)。

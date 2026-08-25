@@ -140,6 +140,7 @@ export class FacialController {
     this.lipRow = null;
     this._eyePhase = 'idle';
     this._mouthPhase = 'idle';
+    this.mouthHeldOpen = false;
     this._eyeDeadline = 0;
     this._mouthDeadline = 0;
     this.currentEyeIndex = -999;
@@ -161,9 +162,21 @@ export class FacialController {
     this.applyMouth(idx);
   }
 
+  // Inspection hold: park the mouth on the cell its pattern is named for.
+  // A lip row is a pair of cells and the resting law shows the closed one, so at
+  // rest every pattern looks like one of a few near-identical closed lines and the
+  // name says nothing. This is entered only by a manual pick; speech and any
+  // performance step clear it, so playback keeps the law unchanged.
+  holdMouthOpen(on) {
+    this.mouthHeldOpen = !!on;
+    if (!this.lipRow) return;
+    this._setMouth(this.mouthHeldOpen && !this.speaking ? this.lipRow.open : this.lipRow.close);
+  }
+
   setPatterns(eyeRow, lipRow) {
     this.eyeRow = eyeRow;
     this.lipRow = lipRow;
+    this.mouthHeldOpen = false;
     this._setEye(eyeRow.open);
     this._setMouth(lipRow.close);
     // Changing a pattern updates the current cell without restarting the blink clock.
@@ -178,6 +191,7 @@ export class FacialController {
 
   setSpeaking(on) {
     this.speaking = !!on;
+    if (on) this.mouthHeldOpen = false;
     if (!this.lipRow) return;
     if (on) {
     // Enter speech with a closed cell, then open after [50,100) ms.
@@ -248,7 +262,8 @@ export class FacialController {
 
   _updateMouth(t) {
     const row = this.lipRow;
-    if (!this.speaking) { this._setMouth(row.close); return; } // Resting mode keeps Close
+    // Resting mode keeps Close; the inspection hold is the one exception.
+    if (!this.speaking) { this._setMouth(this.mouthHeldOpen ? row.open : row.close); return; }
     if (t < this._mouthDeadline) return;
     switch (this._mouthPhase) {
       case 'close':

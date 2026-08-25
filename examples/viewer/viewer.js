@@ -138,14 +138,65 @@ function buildScenarioList(perf) {
 // ---- 眼口标签(表情表的行)手动选择:检查工具,选择即应用 ----
 // 眨眼机取所选眼行的开/闭格,说话机取所选口行的开合格;与动作库同规则,
 // 选择时停用自动演出(否则编排的 eye/mouth 步下一拍就把脸盖回去)。
+// 表里三族行,只有一族对着 SD 角色自己的图集:
+//   base   —— 本图集的行,闭合格全落在真闭眼那几格上;
+//   egg*   —— 家具头像(蛋)的行,寻的是另一张图集,所以闭合格会指到本图集的睁眼格;
+//   uniq*  —— 「本角色专属槽」,同一格号在每个角色的图集里画着各自的脸,
+//             名字里的角色名对当前角色不成立。眼表写作 uniq1_/uniq2_(两个槽),
+//             口表只有一个槽,写作 uniq_(不带序号)。
+// 三族混在一个下拉里发给所有角色,选中时都会换脸——但换到的是名字没承诺的那一格。
+// 所以这里只发本图集的行:egg 族整族扣下(数目写在提示里,不静默),
+// uniq 族按它实际指向的格子归并成「专属槽」,不再挂别人的名字。
+const FACIAL_FAMILY = /^(egg\d|uniq\d?)_/;
+
+function facialFamily(name) {
+  const m = FACIAL_FAMILY.exec(name);
+  return m ? m[1] : 'base';
+}
+
+// uniq 行按 (开格, 闭格, 是否眨眼) 归并:12 行 uniq1 只有两种取值,4 行 uniq2 只有一种。
+function uniqueSlots(rows, openOf, closeOf, blinkOf) {
+  const seen = new Map();
+  for (const [name, row] of rows) {
+    const fam = facialFamily(name);
+    if (!fam.startsWith('uniq')) continue;
+    const key = `${fam}/${openOf(row)}/${closeOf(row)}/${blinkOf ? blinkOf(row) : 0}`;
+    if (!seen.has(key)) {
+      seen.set(key, { name, slot: fam.slice(4), blink: blinkOf ? !!blinkOf(row) : false });
+    }
+  }
+  return [...seen.values()];
+}
+
+// 一行表情是「开格/闭格」一对;把格号写进标签,名字指向哪一格就当场看得见。
+function cells(row) {
+  return row ? `${row.open}/${row.close > 0 ? row.close : '-'}` : '?';
+}
+
 function fillFacialSelects() {
   const se = $('selEye'), sm = $('selMouth');
   if (!se || !sm || !tables) return;
   se.innerHTML = ''; sm.innerHTML = '';
   se.append(new Option('眼型:默认', ''));
-  for (const name of tables.eye.keys()) se.append(new Option(`眼型:${name}`, name));
   sm.append(new Option('口型:默认', ''));
-  for (const name of tables.lip.keys()) sm.append(new Option(`口型:${name}`, name));
+  let heldEye = 0, heldLip = 0;
+  for (const [name] of tables.eye) {
+    const fam = facialFamily(name);
+    if (fam === 'base') se.append(new Option(`眼型:${name} ·${cells(tables.eye.get(name))}`, name));
+    else if (fam.startsWith('egg')) heldEye++;
+  }
+  for (const s of uniqueSlots(tables.eye, (r) => r.open, (r) => r.close, (r) => r.blink))
+    se.append(new Option(`眼型:专属${s.slot}${s.blink ? '·眨眼' : ''}`, s.name));
+  for (const [name] of tables.lip) {
+    const fam = facialFamily(name);
+    if (fam === 'base') sm.append(new Option(`口型:${name} ·${cells(tables.lip.get(name))}`, name));
+    else if (fam.startsWith('egg')) heldLip++;
+  }
+  for (const s of uniqueSlots(tables.lip, (r) => r.open, (r) => r.close, null))
+    sm.append(new Option(`口型:专属${s.slot}`, s.name));
+  const held = (n) => n ? `;另有 ${n} 行属家具头像(蛋)的图集,选了也对不上名字,已扣下` : '';
+  se.title = `眼型标签(表情表行);选择即应用并停用自动演出,眨眼取所选行的开/闭格${held(heldEye)}`;
+  sm.title = `口型标签(表情表行);选择即应用并停用自动演出,说话取所选行的开/闭格${held(heldLip)}`;
 }
 
 function resetFacialSelects() {
@@ -163,6 +214,9 @@ function applyFacialSelection() {
   current.facial.setPatterns(
     (eyeName && tables.eye.get(eyeName)) || d.eyeRow,
     (lipName && tables.lip.get(lipName)) || d.lipRow);
+  // 手选口型时停在它的开格:一行口型是「开/闭」一对格子,静止律显示的是闭格,
+  // 而闭格只有几种几乎一样的线条,名字在上面看不出来。演出与说话不受影响。
+  current.facial.holdMouthOpen(!!lipName);
 }
 
 // ---- 气泡(emoticon)----
@@ -224,7 +278,8 @@ function buildEnvList() {
   if (!environment) {
     box.innerHTML = `<div class="empty">${envErr ? `缺 phenomena 数据(${envErr})` : '无现象数据'}</div>`;
     for (const id of ['bEnv', 'bEnvIndoor', 'bEnvParticles', 'bEnvPost', 'bEnvSky', 'bEnvGround',
-      'selEnvSite', 'selEnvLevel', 'bEnvTimeline', 'bEnvTimelineReset', 'rEnvTimeline']) {
+      'selEnvSite', 'selEnvLevel', 'selEnvEmission', 'bEnvTimeline', 'bEnvTimelineReset',
+      'rEnvTimeline']) {
       const el = $(id); if (el) el.disabled = true;
     }
     return;
@@ -245,29 +300,43 @@ function buildEnvList() {
   }
   const badge = $('envCount');
   if (badge) badge.textContent = environment.names.length || '';
+  buildSiteLists();
+}
+
+/**
+ * 站点与室内等级两个下拉框。**一行一个站点,不是一行一个场景包** ——
+ * placement 表里 `first_floor` 这一个场景包**承载三个站点**(1/2/3 楼),三行只差
+ * `sitePosition.y`(0 / 500 / 1000)。等级名单跟着站点走:2 楼与 3 楼在 placement 表里
+ * **只开放 5 级**,所以换站点后要重建这一框。
+ */
+function buildSiteLists() {
+  if (!environment) return;
   const sel = $('selEnvSite');
   if (sel) {
-    // 站点名单从**站点产物**读出来(8 个场景包),室内/室外也是产物判的 —— 见 environment.js
-    // 里 SiteView 顶上那段。选一项 = 换真站点几何,不只是换粒子挂哪一站。
     const list = environment.siteScenes();
-    sel.innerHTML = list
-      .map((s) => `<option value="${s.key}">站点:${s.key}${s.indoor ? '(室内)' : ''}</option>`)
-      .join('');
+    sel.innerHTML = list.map((s) => {
+      const floor = (s.siteType && s.siteType !== s.scene) ? `·${s.siteType}` : '';
+      const y = s.position && s.position[1] ? ` y=${s.position[1]}` : '';
+      return `<option value="${s.key}">站点:${s.key}${floor}${s.indoor ? '(室内)' : ''}${y}</option>`;
+    }).join('');
     if (list.some((s) => s.key === environment.site)) sel.value = environment.site;
     else if (list.length) sel.value = list[0].key;
     if (!list.length) sel.innerHTML = '<option value="">站点产物读不到</option>';
   }
   const lvl = $('selEnvLevel');
   if (lvl) {
-    // 等级名单从产物读(`indoor.levels`)。默认那一项标出来:它是「产物里最高的一级」,
-    // 不是读出来的当前等级 —— 当前等级在 master 表里,本仓没有。
+    // 等级名单 = 产物里的扩张模块等级 ∩ placement 表里这一站开放的等级。
+    // 当前是第几级由服务端决定,本仓拿不到,所以做成面板下发。
     const levels = environment.siteLevels();
+    const top = levels.length ? levels[levels.length - 1].key : null;
     lvl.innerHTML = levels.length
       ? levels.map((x) => `<option value="${x.key}">室内等级:lv_${x.key}`
-        + `${x.key === environment.siteView.topLevel ? '(默认:产物最高级)' : ''}</option>`).join('')
+        + `${x.key === top ? '(默认:本站最高级)' : ''}</option>`).join('')
       : '<option value="">室内等级读不到</option>';
-    if (levels.length) lvl.value = environment.siteLevel || levels[levels.length - 1].key;
+    if (levels.length) lvl.value = environment.siteLevel || top;
   }
+  const em = $('selEnvEmission');
+  if (em && environment.siteView) em.value = environment.siteView.emission;
 }
 
 /** 时间轴那一行:当前时刻 / 第几帧 / 这一拍四条轨写出了什么。面板与判据看同一份读数。 */
@@ -339,14 +408,27 @@ function syncEnvUI() {
   }
   const sh = $('envSiteHint');
   if (sh) {
-    // 室内拼装:哪一级、拼上去几件、各自多少三角。每一件的出处在 status().site.mounted.assembly 里。
-    const m = environment && envOn ? (environment.status().site.mounted || null) : null;
-    if (!m || !m.indoor) sh.innerHTML = '&nbsp;';
+    // 三件一起说:这一站的材质各走哪一族程序、站点的世界位置、室内拼装情况。
+    const S = environment && envOn ? environment.status().site : null;
+    const m = S ? S.mounted : null;
+    if (!m) sh.innerHTML = '&nbsp;';
     else {
-      const parts = (m.assembly || []).map((f) => `${f.part}${f.skipped ? '(无几何)' : ` ${f.triangles}`}`);
-      sh.innerHTML = `<span class="ok">室内 lv_${m.level}</span> <span class="dim">${m.levelSource}`
-        + ` · 场景 ${m.files.length} 件共 ${m.triangles} 三角(画 ${m.drawnTriangles})`
-        + `${parts.length ? ` · 拼装:${parts.join('、')}` : ''}</span>`;
+      const fam = Object.entries(m.families || {})
+        .sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join('、');
+      const org = (m.worldOrigin || [0, 0, 0]).map((x) => +x).join(',');
+      const em = S.emission || {};
+      const lines = [];
+      lines.push(`<span class="ok">站点族</span> <span class="dim">${fam || '无'}`
+        + `${m.vertexColorRescaled ? ` · 顶点色还原 ${m.vertexColorRescaled}` : ''}`
+        + ` · 世界位置 (${org}) 施加在${m.worldOriginApplied === 'shading' ? '着色的世界坐标' : '场景变换'}`
+        + ` · 发光缓冲 ${em.mode}(${em.emissiveMaterials || 0} 份材质写非零,不合成)</span>`);
+      if (m.indoor) {
+        const parts = (m.assembly || []).map((f) => `${f.part}${f.skipped ? '(无几何)' : ` ${f.triangles}`}`);
+        lines.push(`<span class="ok">室内 lv_${m.level}</span> <span class="dim">${m.levelSource}`
+          + ` · 场景 ${m.files.length} 件共 ${m.triangles} 三角(画 ${m.drawnTriangles})`
+          + `${parts.length ? ` · 拼装:${parts.join('、')}` : ''}</span>`);
+      }
+      sh.innerHTML = lines.join('<br>');
     }
   }
   syncTimelineUI();
@@ -358,7 +440,8 @@ function syncEnvUI() {
   }
   const ib = $('bEnvIndoor');
   if (ib) ib.disabled = !environment || !envOn;
-  for (const id of ['bEnvParticles', 'bEnvPost', 'bEnvSky', 'bEnvGround', 'selEnvSite', 'selEnvLevel']) {
+  for (const id of ['bEnvParticles', 'bEnvPost', 'bEnvSky', 'bEnvGround', 'selEnvSite',
+    'selEnvLevel', 'selEnvEmission']) {
     const el = $(id); if (el) el.disabled = !environment || !envOn;
   }
 }
@@ -1154,6 +1237,14 @@ $('bEnvGround').onclick = (e) => {
 $('selEnvSite').onchange = async (e) => {
   if (!environment) return;
   await environment.setSite(e.target.value);   // 换站点 = 重挂几何 + 重判室内 + 重取两级查找
+  buildSiteLists();                            // 2 楼与 3 楼只开放 5 级:等级名单跟着站点重建
+  syncEnvUI();
+};
+$('selEnvEmission').onchange = (e) => {
+  if (!environment) return;
+  // 站点的**第二个渲染目标**:不产 / 只产缓冲 / 把缓冲直显到屏幕。
+  // 三态都**不把发光加进主目标**。
+  environment.setSiteEmission(e.target.value);
   syncEnvUI();
 };
 $('selEnvLevel').onchange = async (e) => {
