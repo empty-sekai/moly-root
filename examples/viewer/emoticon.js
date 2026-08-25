@@ -520,6 +520,22 @@ class Emitter {
    * 例如 11 = custom1.x。选择器为常量(或指不到)时,全体粒子同层。
    * **层在出生时定死、终生不翻页** —— 所以这里只在出生时调一次。
    */
+  /**
+   * 自定义数据里某个向量某个分量在归一化年龄 `u` 处的取值。
+   *
+   * 模块声明成向量时,四个分量各是一条独立的取值曲线;声明成颜色或整个关掉时,
+   * 这里没有可取的分量 —— 取不到就是取不到,返回 0 并数出来,不拿别的量顶替。
+   */
+  _customValue(vector, component, u, rand) {
+    const data = (this.system.customData || {})[vector];
+    const index = 'xyzw'.indexOf(String(component));
+    const list = data && data.mode === 'vector' ? (data.components || []) : null;
+    const spec = list && index >= 0 ? list[index] : null;
+    if (!spec) { this.customMisses = (this.customMisses || 0) + 1; return 0; }
+    this.customReads = (this.customReads || 0) + 1;
+    return num(sampleValue(spec, u, rand), 0);
+  }
+
   _arrayLayer(rand) {
     if (!this.arraySlices) return null;
     const s = this.arraySampling || {};
@@ -530,10 +546,11 @@ class Emitter {
     let source = 0;
     const src = s.progressSource || {};
     if (!src.constant && src.vector != null && src.component != null) {
-      // 选择器指向 custom1/custom2 的某个分量。那两组量本身是**出生时定死的随机量**
-      // (见现象域的自定义数据律),消费侧拿这颗粒子的随机因子当那个分量即可 ——
-      // 一颗粒子一个层,且终生不变,与原版同义。
-      source = num(rand, 0);
+      // 选择器指向 custom1/custom2 的某个分量,而那个分量是自定义数据模块按曲线
+      // 定出来的,不是一个通用随机数 —— 拿粒子的随机因子顶替它,只有在那个分量
+      // 恰好声明成 0 到 1 的均匀随机时才碰巧相同,别的声明(常量、曲线、两条曲线
+      // 之间取随机)一律取错层。层在出生时定死,所以按出生那一刻求值。
+      source = this._customValue(src.vector, src.component, 0, rand);
     }
     let v = source + progress;
     v = Math.min(Math.max(v, 0), clampTo);
@@ -1462,6 +1479,8 @@ export class EmoticonView {
       ringEmitters: this.emitters.filter((e) => e.ringMode).length,
       ringEvicted: this.emitters.reduce((n, e) => n + (e.ringEvicted || 0), 0),
       ringRetired: this.emitters.reduce((n, e) => n + (e.ringRetired || 0), 0),
+      customReads: this.emitters.reduce((n, e) => n + (e.customReads || 0), 0),
+      customMisses: this.emitters.reduce((n, e) => n + (e.customMisses || 0), 0),
       drawFaults: this.emitters.reduce((n, e) => n + (e.drawFaults || 0), 0),
       // 模块自己报的数,按模块名归并到一处。判据要读的就是这里 —— 没有它,
       // 模块跑没跑、跑出什么数,外面一个字也看不到,「绿」就无从谈起。
