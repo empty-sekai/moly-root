@@ -50,20 +50,22 @@ export const ATTACH_POINTS_PATH = 'fixture-interface/attach-points.json';
 //   * clb1102_fixture_egg1..4 —— 家具本体自己带整套骨骼动画（动画包里全是本包节点的通道，
 //     一条借来的角色骨都没有），是唯一能一眼看出「家具在动」的一组；
 //   * ext0001_fixture_sofa1 —— 被动画引用最多的一件（605 次），五个座位挂点齐全，
-//     是看「角色坐上去 + 挂点选取」最典型的一件。
-// 另有一件带操作型脚本的机器人件（fixtureId 423）：产物里没有 fixtureId → 包名的对照表，
-// 所以这里不猜它的包名，界面上如实说明。
+//     是看「角色坐上去 + 挂点选取」最典型的一件；
+//   * chr0004_fixture_nenerobo1 —— 唯一带 play_fixture_gimmick / stop_fixture_gimmick
+//     的操作型件（fixtureId 423）。它的包名不是猜的：家具旁对话产物的
+//     `summary.fixtures` 给出 fixtureId → 包名的对照，423 在那里。
 export const RECOMMENDED_PACKAGES = [
   { match: 'mdl_ext0001_fixture_sofa1', mark: '★ 挂点/坐姿' },
   { match: 'mdl_clb1102_fixture_egg1', mark: '★ 本体动画' },
   { match: 'mdl_clb1102_fixture_egg2', mark: '★ 本体动画' },
   { match: 'mdl_clb1102_fixture_egg3', mark: '★ 本体动画' },
   { match: 'mdl_clb1102_fixture_egg4', mark: '★ 本体动画' },
+  { match: 'mdl_chr0004_fixture_nenerobo1', mark: '★ 操作型' },
 ];
 
 export const RECOMMENDATION_NOTE = '★ 本体动画：家具自己带骨骼动画（egg1..4）。'
   + '★ 挂点/坐姿：被动画引用最多的沙发件（605 次，五个座位挂点）。'
-  + '第五件操作型家具（机器人件 fixtureId 423）在产物里没有 fixtureId→包名的对照，未标注。';
+  + '★ 操作型：带 play_fixture_gimmick 的机器人件（fixtureId 423）。';
 
 function baseUrl() {
   const value = new URL(BASE, location.href);

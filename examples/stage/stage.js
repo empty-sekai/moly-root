@@ -25,6 +25,7 @@ import {
   RECOMMENDED_PACKAGES,
   RECOMMENDATION_NOTE,
   ATTACH_POINTS_PATH,
+  TIMELINE_FAMILIES,
   attachForTarget,
   assetUrl,
   fetchJson,
@@ -128,8 +129,34 @@ function setText(id, value) {
   if (element) element.textContent = value;
 }
 
+// 页面顶栏说这一页**装着什么**,不挂缺席清单。
+// 缺口不是不报——它们进自检面板与覆盖账本,并且照旧计数;但产品表面陈列的是做到的东西。
+// 「西红柿炒蛋」不该叫成「西红柿炒蛋(没有青椒、没有青菜)」。
+function updateHeadline() {
+  const performance = state.performance;
+  if (!performance) {
+    setText('stage-headline', '读取演出产物…');
+    return;
+  }
+  const family = TIMELINE_FAMILIES.find(
+    (item) => item.id === performance.entry.family);
+  const parts = [];
+  if (state.character) parts.push(`角色 sd_${state.character.unit ?? '?'}`);
+  parts.push(family ? family.label : performance.entry.family);
+  if (state.talk) {
+    parts.push(`对话 #${state.talk.talkId}`);
+    parts.push(state.talk.form === 1 ? '自发型' : '玩家参与型');
+  }
+  if (state.talkFamilies.size) {
+    parts.push(`动作 ${state.talkFamilies.size} 族 / ${state.talkClips.size} 段`);
+  }
+  if (state.motion) parts.push(`动作库 ${state.motion.clips.length} 段`);
+  setText('stage-headline', parts.join(' · '));
+}
+
 function updateFacts() {
   updateTalkFacts();
+  updateHeadline();
   const performance = state.performance;
   const entry = performance?.entry;
   setText('package-name', entry?.package || '—');
