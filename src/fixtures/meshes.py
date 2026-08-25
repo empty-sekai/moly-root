@@ -37,6 +37,7 @@ transforms), but the bone transforms stay in the hierarchy as ordinary nodes.
 """
 import io
 import json
+import math
 import os
 import struct
 from pathlib import Path
@@ -313,19 +314,40 @@ def _material_properties(tree, glb, record, tex_cache):
     """
     props = tree.get("m_SavedProperties") or {}
     floats, colors, textures, scale_offset = {}, {}, {}, {}
+    non_finite = {}
     for entry in props.get("m_Floats") or []:
         if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
             continue
         name, value = entry
-        if isinstance(value, (int, float)):
-            floats[str(name)] = round(float(value), 6)
+        if not isinstance(value, (int, float)):
+            continue
+        number = float(value)
+        if math.isfinite(number):
+            floats[str(name)] = round(number, 6)
+        else:
+            non_finite[str(name)] = repr(number)
     for entry in props.get("m_Colors") or []:
         if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
             continue
         name, value = entry
-        if isinstance(value, dict):
-            colors[str(name)] = [round(float(value.get(c, 0.0)), 6)
-                                 for c in "rgba"]
+        if not isinstance(value, dict):
+            continue
+        channels, odd = [], {}
+        for channel in "rgba":
+            number = float(value.get(channel, 0.0))
+            if math.isfinite(number):
+                channels.append(round(number, 6))
+            else:
+                # JSON has no infinity, and substituting a finite number would
+                # invent a limit the author did not set -- `_CameraFadeParams`
+                # uses an infinite channel to mean "no far fade".  So the
+                # numeric list keeps a placeholder and the real value is stated
+                # beside it, rather than the property being dropped or bent.
+                channels.append(0.0)
+                odd[channel] = repr(number)
+        colors[str(name)] = channels
+        if odd:
+            non_finite[str(name)] = odd
     for entry in props.get("m_TexEnvs") or []:
         if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
             continue
@@ -347,8 +369,13 @@ def _material_properties(tree, glb, record, tex_cache):
             textures[str(name)] = _texture_index(glb, record, path_id, tex_cache)
         except ValueError:
             textures[str(name)] = None
-    return {"floats": floats, "colors": colors, "textures": textures,
-            "textureScaleOffset": scale_offset}
+    out = {"floats": floats, "colors": colors, "textures": textures,
+           "textureScaleOffset": scale_offset}
+    if non_finite:
+        # Named, not dropped: a reader that needs the true value finds it here,
+        # and a reader that only wants numbers is not handed an unusable one.
+        out["nonFiniteProperties"] = non_finite
+    return out
 
 
 def _material_index(glb, record, path_id, cache, tex_cache, store):
@@ -636,7 +663,22 @@ def _export_package(store, name, out_dir):
         default = 0
     glb.g["scene"] = default
     path = out_dir / f"{name}.glb"
-    glb.save(path)
+    try:
+        glb.save(path)
+    except Exception:
+        # The writer opens the file before it serialises, so a serialisation
+        # failure leaves a zero-byte .glb behind -- and a zero-byte file passes
+        # every check that only lists names.  Measured once: a material carried
+        # an infinite colour channel, the JSON writer refused it (correctly),
+        # and four packages were left as empty files while the run's own counts
+        # reported them failed.  The counts were honest; the files were the
+        # trap.  So the partial file goes, and the failure propagates.
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+        raise
     document = {
         "name": name,
         "status": "exported" if report["hasGeometry"] else "no-mesh",
