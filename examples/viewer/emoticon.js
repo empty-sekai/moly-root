@@ -145,6 +145,16 @@ const BASE_MAP_KEY = {
   'Particles/Standard Unlit': '_MainTex',
 };
 const DEFAULT_BASE_MAP_KEY = '_BaseMap';
+const TINT_AREA_ALL = 1;
+// 打包的逐粒子选择器:**个位**选哪一个向量(0 是零流、1 是 custom1、2 是 custom2),
+// **十位**选哪一个分量。反过来读会整条绑错。
+const PROGRESS_VECTORS = { 1: 'custom1', 2: 'custom2' };
+function progressCoordSource(coord) {
+  const value = Math.round(num(coord, 0));
+  const vector = PROGRESS_VECTORS[value % 10];
+  if (!vector) return null;
+  return { vector, component: 'xyzw'[Math.floor(value / 10)] || 'x' };
+}
 
 /** 从材质读出渲染状态。材质缺失、跨包、或着色器不认识时退化成中性状态。 */
 function renderState(material) {
@@ -526,6 +536,38 @@ class Emitter {
    * 模块声明成向量时,四个分量各是一条独立的取值曲线;声明成颜色或整个关掉时,
    * 这里没有可取的分量 —— 取不到就是取不到,返回 0 并数出来,不拿别的量顶替。
    */
+  /**
+   * 这个发射器的材质染色乘数,或者 null(没开、或者这一种区域模式还没律)。
+   */
+  _tintMultiplier() {
+    const material = this.renderer.material;
+    if (!material || material.external) return null;
+    const keywords = new Set(material.keywords || []);
+    if (!keywords.has('_TINT_COLOR_ENABLED')) return null;
+    const floats = material.floats || {};
+    const area = Math.round(num(floats._TintAreaMode, 0));
+    if (area !== TINT_AREA_ALL) { this.tintRefused = (this.tintRefused || 0) + 1; return null; }
+    if (keywords.has('_TINT_MAP_ENABLED')) {
+      // 染色贴图逐像素给出乘数,拿它的常量部分冒充等于画错。
+      this.tintRefused = (this.tintRefused || 0) + 1;
+      return null;
+    }
+    const colour = (material.colors || {})._TintColor;
+    if (!Array.isArray(colour)) { this.tintRefused = (this.tintRefused || 0) + 1; return null; }
+    const source = progressCoordSource(floats._TintBlendRateCoord);
+    const vertex = source
+      ? this._customValue(source.vector, source.component, 0, 0.5) : 0;
+    const rate = Math.min(1, Math.max(0, vertex + num(floats._TintBlendRate, 0)));
+    this.tintApplied = (this.tintApplied || 0) + 1;
+    const mul = [0, 1, 2].map((i) => 1 + rate * (num(colour[i], 1) - 1));
+    // 有些染色是高动态的:乘数远大于 1,原版靠色调映射与泛光把它收回可显示范围。
+    // 这个示例是刻意的 gamma 直通管线,没有那一步,所以乘积超过 1 的部分会被削平。
+    // 算术照原样做 —— 削平是**缺色调映射**那条律的后果,记在它头上并数出来,不在
+    // 这里拿一个补偿系数去掩盖:那会让两条律都变得说不清。
+    if (mul.some((v) => v > 1)) this.tintClipped = (this.tintClipped || 0) + 1;
+    return new THREE.Color(mul[0], mul[1], mul[2]);
+  }
+
   _customValue(vector, component, u, rand) {
     const data = (this.system.customData || {})[vector];
     const index = 'xyzw'.indexOf(String(component));
@@ -632,6 +674,14 @@ class Emitter {
     //
     // 两处是推断,标出来:环的模数按未翻倍的容量取,游标每顶替一颗加一。这两个是彼此
     // 独立的未知,真源里都还没定死,别拿其中一条去推另一条。
+    // 材质染色:采样出来的基础色要乘上一个乘数,乘数是 1 加上混合率乘以(染色 - 1),
+    // 混合率是逐粒子流值加材质常量再夹到 [0,1]。整张图统一乘同一个数,所以这里在
+    // 逐粒子材质的颜色上乘一次即可,与逐像素乘等价。
+    //
+    // 只做**全域**那一种。边缘染色要按边缘权重逐像素给,第三种区域模式的律还没取得
+    // —— 两者都不画成全域,那会把「只在边上淡淡一层」画成整片变色,看着像有效果而
+    // 其实是错的。不做就数出来。
+    this.tint = this._tintMultiplier();
     this.ringMode = Math.round(num(this.system.ringBufferMode, 0));
     this.ringSize = Math.max(1, Math.round(num(this.system.maxParticles, 1)));
     this.ring = [];
@@ -860,6 +910,7 @@ class Emitter {
     const sizeY = start.size3D ? sampleValue(start.sizeY, 0, r) : sizeX;
     const sizeZ = start.size3D && start.sizeZ ? sampleValue(start.sizeZ, 0, r) : sizeX;
     const first = sampleColor(start.color, 0, r);
+    if (this.tint) first.color.multiply(this.tint);
     // 每粒子独立材质:颜色、透明度、旋转、贴图帧都是逐粒子量。
     // 贴图对象要在两种情形下各自复制一份:片表动画逐粒子推进帧;`_ST` 非恒等时
     // 平铺/偏移是**这个材质**的,共享贴图对象会把它按到同一张图的所有使用者头上。
@@ -1062,6 +1113,7 @@ class Emitter {
       if (s.colorOverLifetime) {
         const c = sampleColor(s.colorOverLifetime, u, p.r);
         p.draw.material.color.copy(c.color);
+        if (this.tint) p.draw.material.color.multiply(this.tint);
         p.draw.material.opacity = c.alpha;
       }
       if (s.rotationOverLifetime) {                    // 弧度每秒
@@ -1481,6 +1533,9 @@ export class EmoticonView {
       ringRetired: this.emitters.reduce((n, e) => n + (e.ringRetired || 0), 0),
       customReads: this.emitters.reduce((n, e) => n + (e.customReads || 0), 0),
       customMisses: this.emitters.reduce((n, e) => n + (e.customMisses || 0), 0),
+      tintApplied: this.emitters.reduce((n, e) => n + (e.tintApplied || 0), 0),
+      tintRefused: this.emitters.reduce((n, e) => n + (e.tintRefused || 0), 0),
+      tintClipped: this.emitters.reduce((n, e) => n + (e.tintClipped || 0), 0),
       drawFaults: this.emitters.reduce((n, e) => n + (e.drawFaults || 0), 0),
       // 模块自己报的数,按模块名归并到一处。判据要读的就是这里 —— 没有它,
       // 模块跑没跑、跑出什么数,外面一个字也看不到,「绿」就无从谈起。
