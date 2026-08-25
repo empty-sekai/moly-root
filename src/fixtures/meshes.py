@@ -286,6 +286,71 @@ def _shader_value(store, record, material_tree):
     return shader
 
 
+def _material_properties(tree, glb, record, tex_cache):
+    """Every authored property of a material: floats, colors, texture slots.
+
+    The three named properties this exporter used to keep -- cull mode, alpha
+    clip, the fixture shader usage flag -- are three of about 324 that a fixture
+    material carries (measured over a sample: 277 distinct float properties, 18
+    colors, 29 texture slots).  A consumer handed only those three cannot drive
+    the program the material names, however correctly it routes to it: the
+    gradient and parallax groups of ``Mysekai/Fixture/Basic`` read
+    ``_GradientMap`` / ``_GradientColor1`` / ``_ParallaxMap``, and the water
+    surfaces read ``_FlowMap`` / ``_FoamTex`` / ``_WaterColor`` -- none of which
+    were leaving this extractor at all.
+
+    The shape follows the emoticon extractor's, so the two products describe a
+    material the same way rather than each inventing a layout:
+
+    * ``floats`` / ``colors`` keyed by the authored property name;
+    * ``textures`` mapping a slot to the exported image index, or to ``None``
+      when the slot names an image this package does not hold -- a slot whose
+      image is elsewhere is still reported, because "the shader samples this
+      slot" is a fact even when the bytes are not here;
+    * ``textureScaleOffset`` for every slot, image or not, since the vertex
+      stage reads the scale/offset pair through ``<name>_ST`` whether or not the
+      image resolved.
+    """
+    props = tree.get("m_SavedProperties") or {}
+    floats, colors, textures, scale_offset = {}, {}, {}, {}
+    for entry in props.get("m_Floats") or []:
+        if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
+            continue
+        name, value = entry
+        if isinstance(value, (int, float)):
+            floats[str(name)] = round(float(value), 6)
+    for entry in props.get("m_Colors") or []:
+        if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
+            continue
+        name, value = entry
+        if isinstance(value, dict):
+            colors[str(name)] = [round(float(value.get(c, 0.0)), 6)
+                                 for c in "rgba"]
+    for entry in props.get("m_TexEnvs") or []:
+        if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
+            continue
+        name, value = entry
+        value = value or {}
+        scale = value.get("m_Scale") or {}
+        offset = value.get("m_Offset") or {}
+        scale_offset[str(name)] = [
+            round(float(scale.get("x", 1.0)), 6),
+            round(float(scale.get("y", 1.0)), 6),
+            round(float(offset.get("x", 0.0)), 6),
+            round(float(offset.get("y", 0.0)), 6)]
+        path_id = (value.get("m_Texture") or {}).get("m_PathID", 0)
+        if not path_id:
+            continue
+        # The slot is reported either way; None means the image is not in this
+        # package, which is a different fact from the slot being unused.
+        try:
+            textures[str(name)] = _texture_index(glb, record, path_id, tex_cache)
+        except ValueError:
+            textures[str(name)] = None
+    return {"floats": floats, "colors": colors, "textures": textures,
+            "textureScaleOffset": scale_offset}
+
+
 def _material_index(glb, record, path_id, cache, tex_cache, store):
     """Add a material to *glb* and return its glTF ``materials`` index.
 
@@ -328,6 +393,7 @@ def _material_index(glb, record, path_id, cache, tex_cache, store):
               "alphaClip": _float_prop(tt, "_AlphaClip"),
               "fixtureShaderUsage": _float_prop(tt, "_FixtureShaderUsage"),
               "shader": shader["name"] if shader["status"] == "resolved" else shader}
+    extras.update(_material_properties(tt, glb, record, tex_cache))
     if shader["status"] == "resolved":
         if "shaderPasses" in shader:
             extras["shaderPasses"] = shader["shaderPasses"]
