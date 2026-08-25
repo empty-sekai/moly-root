@@ -55,6 +55,15 @@ FIXTURE_TIMELINE_PREFIX = "mysekai__fixture_timeline__"
 # exact name leaves such a neighbour visible as ``unsupported`` instead.
 CAMERA_PACKAGE = "mysekai__camera"
 
+# The talk scripts name their arguments through constant tables, and the tables
+# are in a package of their own rather than in the talk package.  The domain is
+# named after what is read out of it — the constant tables — and not after the
+# package, because only one of its four assets is read; a domain called after
+# the package would promise the rest.  It has no product directory of its own:
+# both talk extractors resolve against the tables, and the report entry carries
+# the table sizes so "the constants were read" is a count rather than a claim.
+TALK_CONSTANTS_PACKAGE = "mysekai__talk__scenario__lib"
+
 
 @dataclass(frozen=True)
 class Route:
@@ -75,6 +84,8 @@ def route(name):
         return Route("emoticon", "emoticons")
     if name == "mysekai__talk__scenario__talk":
         return Route("talk", "talks")
+    if name == TALK_CONSTANTS_PACKAGE:
+        return Route("talk-constants", "fixture-talks")
     if name == CAMERA_PACKAGE:
         return Route("camera", "perf")
     if PHENOMENA_BUNDLE.match(name) or name == PHENOMENA_THUMBNAIL:

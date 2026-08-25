@@ -62,6 +62,172 @@ def test_route_new_domains_do_not_collide_with_existing():
         assert route(name).domain not in existing
 
 
+def test_the_constant_package_is_a_domain_of_its_own(tmp_path):
+    # The talk scripts resolve against tables this package carries, so it is
+    # read on every run that has it.  A package that is read must not be
+    # reported as having no extractor: `unsupported` means nobody looks at it,
+    # and reading it while saying that is the label promising less than the
+    # coverage.  It is also not folded into the talk domain, so a failure to
+    # read the tables is visible as its own entry.
+    from core.assets.router import TALK_CONSTANTS_PACKAGE
+
+    target = route(TALK_CONSTANTS_PACKAGE)
+    assert target is not None
+    assert target.domain == "talk-constants"
+    assert route("mysekai__talk__scenario__talk").domain == "talk"
+
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text(TALK_CONSTANTS_PACKAGE + "\nmysekai__talk__scenario__x\n",
+                        encoding="utf-8")
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    report = extract_manifest(manifest, bundles, tmp_path / "out")
+    by_name = {e["bundle"]: e for e in report["bundles"]}
+    assert by_name[TALK_CONSTANTS_PACKAGE]["status"] != "unsupported"
+    # A neighbour in the same path that nobody reads stays visible.
+    assert by_name["mysekai__talk__scenario__x"]["status"] == "unsupported"
+
+
+def test_the_constant_package_path_reaches_the_furniture_talk_reader(tmp_path, monkeypatch):
+    # The tables are an input to the reader, not something it finds for itself:
+    # if the path stops being handed over, every token stays a source token and
+    # only the document's own constants criterion would notice.
+    from core.assets.router import TALK_CONSTANTS_PACKAGE
+    from chara import talks as chara_talks
+    import perf.fixture_talks as perf_fixture_talks
+
+    seen = {}
+
+    def fake_talks(master_source, talk_bundle, out_path, master_cache=None,
+                   lib_bundle=None):
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text("{}", encoding="utf-8")
+        return {"talks": 0, "json": out_path}
+
+    def fake_fixture_talks(master_source, talk_bundle, out_path,
+                           master_cache=None, lib_bundle=None):
+        seen["lib"] = lib_bundle
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text("{}", encoding="utf-8")
+        return {"talks": 0}
+
+    def fake_read_constants(lib_bundle):
+        return {"Motions": {"a": "mov_a"}}, {}, "defines.lua"
+
+    monkeypatch.setattr(chara_talks, "extract_talks", fake_talks)
+    monkeypatch.setattr(perf_fixture_talks, "extract_fixture_talks",
+                        fake_fixture_talks)
+    monkeypatch.setattr(perf_fixture_talks, "read_constants", fake_read_constants)
+
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    for name in ("mysekai__talk__scenario__talk", TALK_CONSTANTS_PACKAGE):
+        (bundles / name).write_bytes(b"x")
+    manifest = tmp_path / "manifest.txt"
+    # The constant package listed *after* the talk package: the tables are read
+    # before the loop, so the order in the manifest must not decide the outcome.
+    manifest.write_text("mysekai__talk__scenario__talk\n"
+                        + TALK_CONSTANTS_PACKAGE + "\n", encoding="utf-8")
+    report = extract_manifest(manifest, bundles, tmp_path / "out",
+                              master=str(tmp_path / "master"))
+
+    assert seen.get("lib") == str(bundles / TALK_CONSTANTS_PACKAGE)
+    entry = {e["bundle"]: e for e in report["bundles"]}[TALK_CONSTANTS_PACKAGE]
+    assert entry["status"] == "succeeded"
+    assert entry["counts"]["entries"] == 1
+
+
+def test_the_furniture_talk_reader_is_told_when_there_are_no_constants(tmp_path, monkeypatch):
+    # A run without the constant package is not an error, but the reader must be
+    # told so its document can say the tokens are unresolved rather than
+    # describing them as resolved.
+    from chara import talks as chara_talks
+    import perf.fixture_talks as perf_fixture_talks
+
+    seen = {}
+
+    def fake_talks(master_source, talk_bundle, out_path, master_cache=None,
+                   lib_bundle=None):
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text("{}", encoding="utf-8")
+        return {"talks": 0, "json": out_path}
+
+    def fake_fixture_talks(master_source, talk_bundle, out_path,
+                           master_cache=None, lib_bundle=None):
+        seen["lib"] = lib_bundle
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text("{}", encoding="utf-8")
+        return {"talks": 0}
+
+    monkeypatch.setattr(chara_talks, "extract_talks", fake_talks)
+    monkeypatch.setattr(perf_fixture_talks, "extract_fixture_talks",
+                        fake_fixture_talks)
+
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "mysekai__talk__scenario__talk").write_bytes(b"x")
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text("mysekai__talk__scenario__talk\n", encoding="utf-8")
+    extract_manifest(manifest, bundles, tmp_path / "out",
+                     master=str(tmp_path / "master"))
+
+    assert "lib" in seen
+    assert seen["lib"] is None
+
+
+def test_an_explicit_unity_version_is_the_one_the_run_reads_with(tmp_path, monkeypatch):
+    # The parameter used to be accepted and ignored, so a caller that passed a
+    # version read with whatever an extractor module had assigned at import.
+    # Red when the argument stops reaching the reader configuration.
+    import UnityPy.config
+    from core.extract import DEFAULT_UNITY_VERSION
+
+    monkeypatch.setattr(UnityPy.config, "FALLBACK_UNITY_VERSION",
+                        "9.9.9f9", raising=False)
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text("mysekai__system__unrelated\n", encoding="utf-8")
+    extract_manifest(manifest, bundles, tmp_path / "out",
+                     unity_version="1.2.3f4")
+    assert UnityPy.config.FALLBACK_UNITY_VERSION == "1.2.3f4"
+    assert DEFAULT_UNITY_VERSION != "1.2.3f4"
+
+
+def test_a_run_with_nothing_configured_still_has_a_version(tmp_path, monkeypatch):
+    # The violation is planted by taking the configuration away, which is the
+    # real starting state: UnityPy ships this unset and raises on a header-less
+    # bundle.  The jobs that run before the per-bundle loop load bundles before
+    # any module that assigns it has been imported, so leaving it to import
+    # order is what made those domains fail.
+    import UnityPy.config
+    from core.extract import DEFAULT_UNITY_VERSION
+
+    monkeypatch.setattr(UnityPy.config, "FALLBACK_UNITY_VERSION",
+                        None, raising=False)
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text("mysekai__system__unrelated\n", encoding="utf-8")
+    extract_manifest(manifest, bundles, tmp_path / "out")
+    assert UnityPy.config.FALLBACK_UNITY_VERSION == DEFAULT_UNITY_VERSION
+
+
+def test_a_configured_version_is_not_overwritten_by_the_default(tmp_path, monkeypatch):
+    # Passing no version must not reset what the caller already chose; the
+    # command line configures it before calling.
+    import UnityPy.config
+
+    monkeypatch.setattr(UnityPy.config, "FALLBACK_UNITY_VERSION",
+                        "5.5.5f5", raising=False)
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text("mysekai__system__unrelated\n", encoding="utf-8")
+    extract_manifest(manifest, bundles, tmp_path / "out")
+    assert UnityPy.config.FALLBACK_UNITY_VERSION == "5.5.5f5"
+
+
 def test_new_domain_packages_not_reported_unsupported(tmp_path):
     # Adding the three routes must only shrink `unsupported` by exactly the
     # packages those families own; a package that stays outside them must still
@@ -191,13 +357,15 @@ def test_talk_package_feeds_both_talk_extractors(tmp_path, monkeypatch):
 
     written = {}
 
-    def fake_talks(master_source, talk_bundle, out_path, master_cache=None):
+    def fake_talks(master_source, talk_bundle, out_path, master_cache=None,
+                   lib_bundle=None):
         written["chara"] = out_path
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         Path(out_path).write_text('{"talks": 1412}', encoding="utf-8")
         return {"talks": 1412, "json": out_path}
 
-    def fake_fixture_talks(master_source, talk_bundle, out_path, master_cache=None):
+    def fake_fixture_talks(master_source, talk_bundle, out_path, master_cache=None,
+                           lib_bundle=None):
         written["perf"] = out_path
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         Path(out_path).write_text('{"talks": 4768}', encoding="utf-8")

@@ -57,13 +57,37 @@ EXPECTED_TALKS = 4768
 EXPECTED_TWO_PERSON = 409
 EXPECTED_FOUR_PERSON = 5
 
+# Where the constant tables live, and the reader both talk extractors use.  They
+# are *not* in the talk package: that one carries only the 5894 scripts.  The
+# reader belongs to the module that owns the parser, so that there is exactly one
+# reader of that file -- two readers is how the two lanes would come to disagree
+# about what a step means.  Re-exported here because this module's own callers
+# (the pipeline and the gate) ask for them by these names.
+LIB_PACKAGE = talks_chara.LIB_PACKAGE
+CONSTANT_ASSET = talks_chara.CONSTANT_ASSET
+read_constants = talks_chara.read_constants
+constant_census = talks_chara.constant_census
+# Tokens the constant source does not define, over both talk batches.  Owned by
+# the module that owns the source, so the two lanes cannot drift into separate
+# ideas of what the game leaves undefined.
+UNDEFINED_TOKENS = talks_chara.UNDEFINED_TOKENS
+
+# What an unresolved constant looks like once it reaches a step: the source token
+# the parser could not replace.  Used to tell "the tables were never read" apart
+# from "this animation name is not in the library".
+_CONSTANT_TOKEN = re.compile(r"[A-Za-z_]\w*\.[A-Za-z_]\w*")
+
 # The host furniture (the fixtureId a talk is gated on) each furniture operator
 # appears on, per an independent lua-side lane.  The five closed-set operators
-# run on the four 8xx fixtures; ``change_fixture_character_mouth`` excludes
-# 838 (大嘴吉) because ``defines.lua``'s LipSyncPresets block has no ``egg2_``
-# entry, so that piece never changes mouth; the two gimmick operators run only
-# on 423 (宁宁机器人摆件).  A c8 divergence means the parameter placeholder is
-# wrong or the selection missed a script — not something to filter away.
+# run on the four 8xx fixtures; ``change_fixture_character_mouth`` excludes 838
+# because the constant source's LipSyncPresets table carries entries for egg1
+# (8), egg3 (8) and egg4 (9) and **none** for egg2, while its EyePresets table
+# does carry 14 egg2 keys -- so that piece changes eye and never mouth.  (The
+# table to count is the one in ``LIB_PACKAGE``; the copy the alone-action
+# package ships has no egg entries at all, so it cannot tell egg2 apart from the
+# others.)  The two gimmick operators run only on 423.  A c8 divergence means
+# the parameter placeholder is wrong or the selection missed a script -- not
+# something to filter away.
 FURNITURE_HOSTS = {
     "change_fixture_timeline": {837, 838, 839, 840},
     "change_fixture_character_eye": {837, 838, 839, 840},
@@ -172,7 +196,7 @@ def _tweet(row):
     }
 
 
-def _semantics(resolved):
+def _semantics(source):
     return {
         "selection": (
             "Only talks whose condition group contains a "
@@ -210,7 +234,21 @@ def _semantics(resolved):
             "furniture have an operational script\" (count > 0) versus talks that "
             "merely happen beside it."
         ),
-        "constants": {"resolved": resolved, "unresolvedTokensPreserved": True},
+        "constants": {
+            "source": (f"{LIB_PACKAGE}/{source}" if source else None),
+            "rule": (
+                "steps carry resolved values: a Table.key token in a script "
+                "argument is replaced by the entry that table holds, and the "
+                "source token is kept beside it as alias. The tables are read "
+                f"from {LIB_PACKAGE}, not from the talk package, which carries "
+                "no constant tables at all. With no source supplied, source is "
+                "null and every token stays a source token -- read "
+                "summary.constants for how many, per table, rather than "
+                "assuming either state."
+            ),
+            "unresolvedTokensPreserved": True,
+            "undefinedTokens": dict(sorted(UNDEFINED_TOKENS.items())),
+        },
     }
 
 
@@ -296,24 +334,27 @@ def fixture_talks(master_source, master_cache=None):
     return records, report
 
 
-def extract_fixture_talks(master_source, talk_bundle, out_path, master_cache=None):
+def extract_fixture_talks(master_source, talk_bundle, out_path, master_cache=None,
+                          lib_bundle=None):
     """Write the furniture-side talks document to *out_path*.
 
     *master_source* is a directory of master tables or a base URL; *talk_bundle*
-    is the decrypted ``mysekai__talk__scenario__talk`` package.  Returns the
-    summary plus the selection report.
+    is the decrypted ``mysekai__talk__scenario__talk`` package; *lib_bundle* is
+    the decrypted :data:`LIB_PACKAGE`, which carries the constant tables the
+    scripts name.  Returns the summary plus the selection report.
     """
     records, report = fixture_talks(master_source, master_cache=master_cache)
     master = Master(master_source, cache_dir=master_cache)
     tweets = {row["id"]: row for row in master.table("mysekaiCharacterTalkTweets")}
     assets = _text_assets(talk_bundle)
+    tables, scalars, constant_source = read_constants(lib_bundle)
 
     operations, unknown_ops, voices = Counter(), Counter(), []
     fixture_ops = defaultdict(Counter)
     talks_doc = []
     missing_scripts = []
+    selected_scripts = []
     total_steps = 0
-    resolved = bool(assets)
     for record in records:
         talk = record["talk"]
         lua = talk.get("lua", "")
@@ -321,8 +362,9 @@ def extract_fixture_talks(master_source, talk_bundle, out_path, master_cache=Non
         if script is None:
             missing_scripts.append(lua)
             continue
+        selected_scripts.append(script)
         known, unknown = classify_ops(script, script_name=lua)
-        parsed = talks_chara.parse_script(script, {}, {}, script_name=lua)
+        parsed = talks_chara.parse_script(script, tables, scalars, script_name=lua)
         # The classify_ops known counter must agree with the parser's own scan.
         if parsed["operations"] and known and set(parsed["operations"]) != set(known):
             raise ValueError(f"{lua}: vocabulary disagreement between scans")
@@ -351,6 +393,12 @@ def extract_fixture_talks(master_source, talk_bundle, out_path, master_cache=Non
             "steps": parsed["steps"],
         })
 
+    census = constant_census(selected_scripts, tables)
+    unresolved_occurrences = sum(
+        sum(keys.values()) for keys in census["unresolved"].values())
+    undefined = {f"{table}.{key}"
+                 for table, keys in census["unresolved"].items()
+                 for key in keys}
     summary = {
         "selectedCount": report["talks"],
         "talks": len(talks_doc),
@@ -372,10 +420,22 @@ def extract_fixture_talks(master_source, talk_bundle, out_path, master_cache=Non
         "totalSteps": total_steps,
         "voiceCues": len(voices),
         "missingScripts": missing_scripts,
+        "constants": {
+            "source": (f"{LIB_PACKAGE}/{constant_source}"
+                       if constant_source else None),
+            "tables": {name: len(entries)
+                       for name, entries in sorted(tables.items())},
+            "scalars": len(scalars),
+            "referenced": census["referenced"],
+            "resolved": census["resolved"],
+            "unresolved": census["unresolved"],
+            "unresolvedOccurrences": unresolved_occurrences,
+            "unexpectedTokens": sorted(undefined - set(UNDEFINED_TOKENS)),
+        },
     }
     doc = {
         "version": 1,
-        "semantics": _semantics(resolved),
+        "semantics": _semantics(constant_source),
         "talks": talks_doc,
         "summary": summary,
     }
@@ -383,8 +443,11 @@ def extract_fixture_talks(master_source, talk_bundle, out_path, master_cache=Non
     return {**summary, "report": report}
 
 
-def check_doc(doc, sample_seed=0):
-    """Run the c1–c7 gates over an extracted furniture-talks document.
+def check_doc(doc, sample_seed=0, motion_library=None):
+    """Run the c1–c10 gates over an extracted furniture-talks document.
+
+    *motion_library* is the set of animation names the shared motion library
+    holds; c10 needs it and says so when it is absent.
 
     Returns a list of ``(name, ok, detail)``.  Each criterion states the input
     that would turn it red, and the detail carries what was measured.
@@ -487,12 +550,99 @@ def check_doc(doc, sample_seed=0):
         c8_detail += " | SYMDIFF=" + json.dumps(symdiff, ensure_ascii=False)
     check("c8", not symdiff, c8_detail)
 
+    # c9: the constant tokens the scripts name are resolved against the tables,
+    # and the only ones left over are the tokens no constant source defines.
+    # Red when the tables were not read (source null, so every token stays a
+    # source token), and red when a token outside UNDEFINED_TOKENS is left over
+    # -- which is what reading them from the wrong package looks like, since the
+    # alone-action copy has no egg entries.  Planting the violation is done by
+    # taking the constant package away, not by skipping the resolve step: a
+    # later fallback that guesses a value would leave a skipped step green.
+    constants = summary.get("constants", {})
+    source = constants.get("source")
+    unexpected = constants.get("unexpectedTokens", [])
+    referenced = constants.get("referenced", {})
+    resolved_counts = constants.get("resolved", {})
+    total_referenced = sum(referenced.values())
+    total_resolved = sum(resolved_counts.values())
+    c9_detail = (f"source={source} referenced={total_referenced} "
+                 f"resolved={total_resolved} "
+                 f"unresolvedOccurrences={constants.get('unresolvedOccurrences')}"
+                 f" | per table: " + json.dumps(
+                     {t: f"{resolved_counts.get(t, 0)}/{referenced.get(t, 0)}"
+                      for t in sorted(referenced)}, ensure_ascii=False))
+    if unexpected:
+        c9_detail += " | UNEXPECTED=" + json.dumps(unexpected, ensure_ascii=False)
+    check("c9", bool(source) and total_referenced > 0 and not unexpected,
+          c9_detail)
+
+    # c10: every animation a step asks for names a clip the motion library
+    # holds.  The library index is an input to this criterion; without it the
+    # criterion reports that it could not be run rather than passing, because
+    # "no library to check against" and "every motion is in the library" are the
+    # same colour otherwise.
+    #
+    # Every asked-for motion is classified into exactly one class and the
+    # classes must sum to the total -- there is no catch-all.  ``inLibrary`` is
+    # the one that counts; ``undefinedToken`` is a motion the constant source
+    # does not define, so no library clip can correspond to it and the token is
+    # named in UNDEFINED_TOKENS with why.  Red when a motion resolved to a real
+    # name the library does not hold (the case that matters: the value is a
+    # clip name and the clip is missing), and red when a token is left over that
+    # UNDEFINED_TOKENS does not name -- which is what reading the constants from
+    # the wrong package looks like.
+    library = set(motion_library or ())
+    wanted = Counter()
+    in_library, undefined_token, unnamed_token, absent = (
+        Counter(), Counter(), Counter(), Counter())
+    for t in talks:
+        for s in t.get("steps", []):
+            if s.get("op") not in ("change_animation", "play_animation"):
+                continue
+            motion = s.get("motion")
+            if not isinstance(motion, str) or not motion:
+                continue
+            wanted[motion] += 1
+            if _CONSTANT_TOKEN.fullmatch(motion):
+                bucket = (undefined_token if motion in UNDEFINED_TOKENS
+                          else unnamed_token)
+                bucket[motion] += 1
+            elif motion in library:
+                in_library[motion] += 1
+            else:
+                absent[motion] += 1
+    total = sum(wanted.values())
+    classified = (sum(in_library.values()) + sum(undefined_token.values())
+                  + sum(unnamed_token.values()) + sum(absent.values()))
+    c10_detail = (f"motions={total} distinct={len(wanted)} library={len(library)}"
+                  f" | inLibrary={sum(in_library.values())}"
+                  f" undefinedToken={sum(undefined_token.values())}"
+                  f" notInLibrary={sum(absent.values())}"
+                  f" unnamedToken={sum(unnamed_token.values())}"
+                  f" residual={total - classified}")
+    if not library:
+        check("c10", False,
+              c10_detail + " | no motion-library index supplied; criterion not run")
+    else:
+        if undefined_token:
+            c10_detail += " | undefined (named): " + json.dumps(
+                sorted(undefined_token), ensure_ascii=False)
+        if unnamed_token:
+            c10_detail += " | UNNAMED-TOKEN=" + json.dumps(
+                sorted(unnamed_token), ensure_ascii=False)
+        if absent:
+            c10_detail += " | NOT-IN-LIBRARY=" + json.dumps(
+                sorted(absent), ensure_ascii=False)
+        check("c10",
+              not absent and not unnamed_token and classified == total,
+              c10_detail)
+
     return checks
 
 
-def verify(doc, out=None):
+def verify(doc, out=None, motion_library=None):
     """Run the gates and print them; returns the all-green boolean."""
-    results = check_doc(doc)
+    results = check_doc(doc, motion_library=motion_library)
     for name, ok, detail in results:
         print(f"[{name}] {'green' if ok else 'RED'}  {detail}")
     if out is not None:

@@ -48,9 +48,38 @@ def _base_doc():
     return {"summary": summary, "talks": talks}
 
 
-def _gate(doc, name):
-    results = dict((n, ok) for n, ok, _ in check_doc(doc))
+def _gate(doc, name, library=None):
+    results = dict((n, ok) for n, ok, _ in
+                   check_doc(doc, motion_library=library or LIBRARY))
     return results[name]
+
+
+# The synthetic motion library c10 checks against.  A name in a step's `motion`
+# is a clip name after the constants resolve, so the library is a set of those.
+LIBRARY = {"mov_synth_001", "mov_synth_002"}
+
+# One token the constant source does not define, taken from the named set so the
+# test proves the gate consults that set rather than a local copy of it.
+UNDEFINED_MOTION = sorted(
+    t for t in fixture_talks.UNDEFINED_TOKENS if t.startswith("Motions."))[0]
+
+
+def _constants(source="pkg/defines.lua", referenced=None, resolved=None,
+               unresolved=None, unexpected=()):
+    """A summary.constants block, resolved everywhere unless told otherwise."""
+    referenced = {"Motions": 100} if referenced is None else referenced
+    resolved = dict(referenced) if resolved is None else resolved
+    return {
+        "source": source,
+        "tables": {"Motions": 2},
+        "scalars": 0,
+        "referenced": referenced,
+        "resolved": resolved,
+        "unresolved": unresolved or {},
+        "unresolvedOccurrences": sum(
+            sum(keys.values()) for keys in (unresolved or {}).values()),
+        "unexpectedTokens": sorted(unexpected),
+    }
 
 
 def _clean_full_doc():
@@ -87,6 +116,12 @@ def _clean_full_doc():
             "talkId": i + 1, "form": form, "pairs": [[10, (i % 30) + 1]],
             "tweet": _tw(f"tweet {i}", i + 1), "steps": steps, "fixtureIds": fids,
         })
+    # One script asks for a motion the constant source does not define, which is
+    # the shape the shipped scripts have: c10 classifies it as a named undefined
+    # token rather than as a missing clip.
+    talks[0]["steps"].append(
+        {"op": "change_animation", "who": 1, "motion": UNDEFINED_MOTION,
+         "alias": UNDEFINED_MOTION})
     summary = {
         "selectedCount": N, "talks": N,
         "singlePerson": 4354, "twoPerson": fixture_talks.EXPECTED_TWO_PERSON,
@@ -96,6 +131,7 @@ def _clean_full_doc():
         "operations": {op: 10 for op in fixture_talks.FURNITURE_OPS},
         "unknownOperations": {}, "missingScripts": [],
         "fixtureOps": _fixture_ops(talks),
+        "constants": _constants(),
     }
     return {"summary": summary, "talks": talks}
 
@@ -262,5 +298,112 @@ def test_fixture_ops_table_answers_operational_question():
 
 def test_full_document_is_green():
     doc = _clean_full_doc()
-    results = dict((n, ok) for n, ok, _ in check_doc(doc))
+    results = dict((n, ok) for n, ok, _ in
+                   check_doc(doc, motion_library=LIBRARY))
     assert all(results.values()), str(results)
+
+
+# --- c9: the constant tables were read, and only the named tokens are left ---
+
+def test_c9_red_when_the_constant_source_was_not_read_then_green():
+    # The violation is planted by taking the constant package away, not by
+    # skipping the resolve step: a later fallback that guessed a value would
+    # leave a skipped step green while this stays red.
+    doc = _clean_full_doc()
+    doc["summary"]["constants"] = _constants(source=None)
+    assert _gate(doc, "c9") is False
+    doc["summary"]["constants"] = _constants()
+    assert _gate(doc, "c9") is True
+
+
+def test_c9_red_when_nothing_was_referenced():
+    # A document that resolved nothing because it looked at nothing must not
+    # read as "all resolved": zero over zero is the vacuous pass this guards.
+    doc = _clean_full_doc()
+    doc["summary"]["constants"] = _constants(referenced={}, resolved={})
+    assert _gate(doc, "c9") is False
+
+
+def test_c9_red_on_a_token_the_named_set_does_not_carry_then_green():
+    # Reading the constants from a package that has fewer entries leaves tokens
+    # over that UNDEFINED_TOKENS does not name -- which is what happens with the
+    # copy that carries no egg entries.
+    doc = _clean_full_doc()
+    doc["summary"]["constants"] = _constants(
+        referenced={"EyePresets": 100}, resolved={"EyePresets": 60},
+        unresolved={"EyePresets": {"egg1_normal": 40}},
+        unexpected=["EyePresets.egg1_normal"])
+    assert _gate(doc, "c9") is False
+    doc["summary"]["constants"] = _constants(
+        referenced={"EyePresets": 100}, resolved={"EyePresets": 100})
+    assert _gate(doc, "c9") is True
+
+
+# --- c10: every motion a step asks for names a clip the library holds ---
+
+def test_c10_red_when_a_resolved_motion_is_not_in_the_library_then_green():
+    doc = _clean_full_doc()
+    doc["talks"][1]["steps"].append(
+        {"op": "change_animation", "who": 1, "motion": "mov_absent_999"})
+    assert _gate(doc, "c10") is False
+    doc["talks"][1]["steps"].pop()
+    assert _gate(doc, "c10") is True
+
+
+def test_c10_red_when_the_library_is_absent():
+    # No library and every motion present are the same colour unless absence is
+    # reported, so the criterion says it could not run instead of passing.
+    doc = _clean_full_doc()
+    results = dict((n, ok) for n, ok, _ in check_doc(doc, motion_library=None))
+    assert results["c10"] is False
+
+
+def test_c10_red_when_a_motion_is_still_an_unnamed_constant_token():
+    # A motion left as a Table.key token that UNDEFINED_TOKENS does not name
+    # means the tables were read from the wrong place -- separate from the named
+    # tokens no source defines, which stay green.
+    doc = _clean_full_doc()
+    doc["talks"][1]["steps"].append(
+        {"op": "change_animation", "who": 1, "motion": "Motions.some_key"})
+    assert _gate(doc, "c10") is False
+
+
+def test_c10_classes_sum_to_the_motions_asked_for():
+    # Every asked-for motion lands in exactly one class; a residual would mean a
+    # motion was counted in none of them and quietly left out of the check.
+    doc = _clean_full_doc()
+    detail = dict((n, d) for n, _, d in
+                  check_doc(doc, motion_library=LIBRARY))["c10"]
+    assert "residual=0" in detail, detail
+    assert "notInLibrary=0" in detail, detail
+    assert "undefinedToken=1" in detail, detail
+
+
+# --- the census that feeds c9 ---
+
+def test_constant_census_counts_references_from_the_script_source():
+    # The census reads the scripts, not the steps: a resolved token no longer
+    # looks like one in a step, so a census of the output could only ever see
+    # the failures.
+    tables = {"Motions": {"calm": "mov_calm"}, "Characters": {"A": 1}}
+    script = 'change_animation(Characters.A, Motions.calm, 0)\n' \
+             'change_animation(Characters.A, Motions.absent, 0)\n'
+    census = fixture_talks.constant_census([script], tables)
+    assert census["referenced"] == {"Characters": 2, "Motions": 2}
+    assert census["resolved"] == {"Characters": 2, "Motions": 1}
+    assert census["unresolved"] == {"Motions": {"absent": 1}}
+
+
+def test_constant_census_does_not_count_a_token_named_only_in_a_comment():
+    tables = {"Motions": {"calm": "mov_calm"}}
+    script = '-- Motions.absent is not used here\nlabel("x")\n'
+    census = fixture_talks.constant_census([script], tables)
+    assert census["referenced"] == {}
+    assert census["unresolved"] == {}
+
+
+def test_read_constants_without_a_package_reports_no_source():
+    # Not an error and not a silent empty: the caller gets an explicit "no
+    # source", which is what turns c9 red rather than making it vacuous.
+    tables, scalars, source = fixture_talks.read_constants(None)
+    assert (tables, scalars, source) == ({}, {}, None)

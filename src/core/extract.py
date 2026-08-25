@@ -16,6 +16,28 @@ FIXTURE_MESHES_SKIPPED = ("furniture geometry was not requested; it is one glb "
                           "per package over the whole fixture family, so the "
                           "pass is opt-in via fixture_meshes=True")
 
+# The version a bundle whose header carries none is read against.  Several
+# extractor modules assign this at import, which is enough when the caller comes
+# through the command line and nothing else, but the jobs that run before any of
+# them is imported would then read with nothing set at all.
+DEFAULT_UNITY_VERSION = "2022.3.62f3"
+
+
+def _configure_unity_version(unity_version):
+    """Set the fallback Unity version for this run.
+
+    An explicit *unity_version* always wins.  With None, whatever the caller
+    already configured is kept -- the command line sets it before calling -- and
+    only a wholly unconfigured process gets :data:`DEFAULT_UNITY_VERSION`, so a
+    direct call does not depend on which extractor module was imported first.
+    """
+    import UnityPy.config
+    if unity_version:
+        UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
+    elif not getattr(UnityPy.config, "FALLBACK_UNITY_VERSION", None):
+        UnityPy.config.FALLBACK_UNITY_VERSION = DEFAULT_UNITY_VERSION
+    return UnityPy.config.FALLBACK_UNITY_VERSION
+
 # Every output path this module's jobs write that does *not* vary with a package
 # or unit name, relative to the output directory, with a trailing ``/`` on the
 # ones that are directories the jobs fill with per-package files.  The name says
@@ -352,7 +374,18 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
     is off by default because that is the heaviest artifact the pipeline makes;
     off, its entry is reported ``skipped`` with the reason, never omitted, so a
     reader can tell "nobody asked for it" from "this domain does not exist".
+
+    *unity_version* is the version to read a bundle whose header carries none
+    against.  It is applied here, for the whole run, rather than being left to
+    whichever extractor module happens to be imported first: the domains that
+    run before the per-bundle loop -- the overhead items, the phenomena family,
+    the site family -- load bundles before any of the per-package modules is
+    imported, so with nothing set they raise instead of reading.  Passing None
+    keeps whatever the caller already configured, and configures the shipped
+    default when the caller configured nothing, so a direct call behaves like
+    the command line rather than depending on import order.
     """
+    _configure_unity_version(unity_version)
     if manifest is None:
         names, ignored = discover_bundles(bundles)
         discovery = {"scanned": len(names) + ignored, "selected": len(names), "ignored": ignored}
@@ -581,6 +614,38 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
     # **0** nodes, so the whole cut-scene family could not play.  Only an
     # end-to-end run shows this — each domain's own gate prepares its inputs by
     # hand and never hits the ordering.  See the call site below the loop.
+    # The talk scripts resolve their arguments against constant tables that are
+    # in a package of their own, so the tables are read before the loop: the
+    # talk job needs them on its own turn, and reading them there would tie the
+    # result to whichever of the two packages the manifest happens to list
+    # first.  A run without the package is not an error — the talk documents
+    # still carry every step — but the tokens stay unresolved, which the
+    # documents state and their constants criterion turns red on.
+    constants_paths = {}
+    constants_errors = {}
+    for name in names:
+        target = route(name)
+        if target is None or target.domain != "talk-constants":
+            continue
+        try:
+            constants_paths[name] = _bundle_path(bundles, name)
+        except Exception as exc:
+            constants_errors[name] = f"{type(exc).__name__}: {exc}"
+    constants_result = None
+    constants_error = None
+    if constants_paths:
+        try:
+            from perf.fixture_talks import read_constants
+            path = next(iter(constants_paths.values()))
+            tables, scalars, source = read_constants(str(path))
+            constants_result = {
+                "asset": source,
+                "tables": {key: len(value) for key, value in sorted(tables.items())},
+                "scalars": len(scalars),
+                "entries": sum(len(value) for value in tables.values()),
+            }
+        except Exception as exc:
+            constants_error = f"{type(exc).__name__}: {exc}"
     # The one talk package feeds two extractors; the second one's own outcome is
     # reported separately so that a failure there cannot be read as a failure of
     # the first, nor hide behind its success.
@@ -702,8 +767,11 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                     report["bundles"].append(entry)
                     continue
                 from chara.talks import extract_talks
+                lib_bundle = (str(next(iter(constants_paths.values())))
+                              if constants_paths else None)
                 result = extract_talks(master, str(bundle), str(out / "talks.json"),
-                                       master_cache=master_cache)
+                                       master_cache=master_cache,
+                                       lib_bundle=lib_bundle)
                 # One package, two families.  ``chara/talks`` reads the
                 # single-character talks that happen away from any fixture;
                 # ``perf/fixture_talks`` reads the beside-the-fixture ones.
@@ -716,11 +784,22 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                     from perf.fixture_talks import extract_fixture_talks
                     fixture_talks_result = extract_fixture_talks(
                         master, str(bundle), str(fixture_talks_path),
-                        master_cache=master_cache)
+                        master_cache=master_cache,
+                        lib_bundle=lib_bundle)
                     result = dict(result)
                     result["fixtureTalks"] = str(fixture_talks_path)
                 except Exception as exc:
                     fixture_talks_error = f"{type(exc).__name__}: {exc}"
+            elif target.domain == "talk-constants":
+                # No product of its own: what this package contributes is the
+                # constant tables the talk extractors resolve against, so the
+                # entry carries their sizes.  A read failure is this package's
+                # own failure and is not folded into the talk domain's.
+                if name in constants_errors:
+                    raise FileNotFoundError(constants_errors[name])
+                if constants_error:
+                    raise RuntimeError(constants_error)
+                result = dict(constants_result or {})
             elif target.domain == "performance":
                 from chara.alone_actions import write_alone_actions
                 result = write_alone_actions(str(bundle), str(out / "alone-actions.json"))
