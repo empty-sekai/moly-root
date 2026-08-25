@@ -235,10 +235,62 @@ def _float_prop(tt, key):
     return None
 
 
-def _material_index(glb, record, path_id, cache, tex_cache):
+def _shader_value(store, record, material_tree):
+    """Read a material's Shader name and declared pass tags."""
+    pointer = material_tree.get("m_Shader") or {}
+    path_id = pointer.get("m_PathID", 0)
+    if not path_id:
+        return {"status": "unresolved", "reason": "material has no Shader pointer"}
+    target = _resolve(store, record, pointer)
+    if target is None:
+        archive = None
+        try:
+            archive = store.archive_of(record, pointer)
+        except (AttributeError, IndexError):
+            archive = None
+        target_name = str(archive) if archive else "same asset file"
+        return {"status": "unresolved",
+                "reason": f"Shader pointer {target_name}:{path_id} did not resolve"}
+    shader_record, shader_id = target
+    shader_obj = shader_record.objects.get(shader_id)
+    if shader_obj is None:
+        return {"status": "unresolved",
+                "reason": f"Shader object {shader_id} is absent"}
+    shader_tree = shader_obj.read_typetree() or {}
+    parsed = shader_tree.get("m_ParsedForm") or {}
+    shader_name = parsed.get("m_Name")
+    if not isinstance(shader_name, str) or not shader_name:
+        return {"status": "unresolved",
+                "reason": f"Shader object {shader_id} has no parsed name"}
+    shader = {"status": "resolved", "name": shader_name}
+    passes = []
+    light_modes = []
+    for subshader in parsed.get("m_SubShaders") or []:
+        for shader_pass in subshader.get("m_Passes") or []:
+            state = shader_pass.get("m_State") or {}
+            tags = {}
+            for entry in (state.get("m_Tags") or {}).get("tags") or []:
+                if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                    tags[str(entry[0])] = entry[1]
+                elif isinstance(entry, dict):
+                    tags[str(entry.get("first"))] = entry.get("second")
+            pass_name = shader_pass.get("m_Name") or shader_pass.get("m_PassName")
+            light_mode = tags.get("LIGHTMODE")
+            item = {"name": pass_name if pass_name else None,
+                    "lightMode": light_mode}
+            passes.append(item)
+            light_modes.append(light_mode)
+    if passes:
+        shader["shaderPasses"] = passes
+        shader["lightModes"] = light_modes
+    return shader
+
+
+def _material_index(glb, record, path_id, cache, tex_cache, store):
     """Add a material to *glb* and return its glTF ``materials`` index."""
-    if path_id in cache:
-        return cache[path_id]
+    key = (id(record), path_id)
+    if key in cache:
+        return cache[key]
     obj = record.objects.get(path_id)
     if obj is None:
         raise ValueError(MATERIAL_UNRESOLVED)
@@ -255,14 +307,21 @@ def _material_index(glb, record, path_id, cache, tex_cache):
                 "index": _texture_index(glb, record, tex_path, tex_cache)}
         except ValueError:
             pass
+    shader = _shader_value(store, record, tt)
     extras = {"sourceMaterial": name,
               "cullMode": _float_prop(tt, "_Cull"),
               "alphaClip": _float_prop(tt, "_AlphaClip"),
-              "fixtureShaderUsage": _float_prop(tt, "_FixtureShaderUsage")}
-    material["extras"] = extras if any(v is not None for v in extras.values()) else {}
+              "fixtureShaderUsage": _float_prop(tt, "_FixtureShaderUsage"),
+              "shader": shader["name"] if shader["status"] == "resolved" else shader}
+    if shader["status"] == "resolved":
+        if "shaderPasses" in shader:
+            extras["shaderPasses"] = shader["shaderPasses"]
+        if "lightModes" in shader:
+            extras["lightModes"] = shader["lightModes"]
+    material["extras"] = extras
     glb.g["materials"].append(material)
     index = len(glb.g["materials"]) - 1
-    cache[path_id] = index
+    cache[key] = index
     return index
 
 
@@ -355,7 +414,7 @@ def _walk(glb, record, store, tpid, parent, ctx):
             try:
                 materials[sub_index] = _material_index(
                     glb, mat_record, mat_id, ctx["material_cache"],
-                    ctx["tex_cache"])
+                    ctx["tex_cache"], store)
             except ValueError:
                 ctx["report"]["anomalies"].append(
                     {"type": "material-unresolved", "node": name})
@@ -439,6 +498,16 @@ def _export_package(store, name, out_dir):
         return {"name": name, "status": "no-mesh", "reason": MISSING_BUNDLE,
                 "variants": [], "meshCount": 0, "vertexCount": 0,
                 "nodeNames": [], "anomalies": []}
+    # Load what this package declares it depends on, before any pointer is
+    # followed.  A cross-file pointer resolves through the archive table, and
+    # that table only holds archives of packages already loaded -- so without
+    # this every external pointer comes back unresolved and the run reads as
+    # "the dependency is not on disk" when in fact nobody opened it.  Measured
+    # on one package: its two material shader pointers resolve to
+    # ``Mysekai/Fixture/Basic`` and ``Mysekai/Fixture/ShadowMesh`` once
+    # ``mysekai/shader`` is loaded, and to nothing at all before.
+    for dependency in package.dependencies:
+        store.package(str(dependency).replace("/", "__"))
     glb = GLB(generator="moly-root fixture extractor")
     report = {"name": name, "nodeNames": set(), "vertexCount": 0,
               "meshCount": 0, "zeroVertexMeshes": 0, "hasGeometry": False,
@@ -461,6 +530,19 @@ def _export_package(store, name, out_dir):
                                                 roots, ctx, container)
         root_nodes += local_roots
         variants += local_variants
+
+    # Materials can be present in the package without a renderer slot.  Keep
+    # those source objects in the exported material table as well.
+    for record in package.files:
+        for material_id, kind in record.kinds.items():
+            if kind != "Material":
+                continue
+            try:
+                _material_index(glb, record, material_id,
+                                ctx["material_cache"], ctx["tex_cache"], store)
+            except ValueError:
+                report["anomalies"].append(
+                    {"type": "material-unresolved", "pathId": material_id})
 
     # One scene per variant; the default scene is the one carrying the FixtureView.
     if variants:

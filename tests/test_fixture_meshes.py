@@ -182,11 +182,14 @@ def _wire(meshes_module_ref, packages_ref, packages, monkeypatch):
                         lambda path: packages[os.path.basename(str(path))])
 
 
-def _run(tmp_path, monkeypatch, packages):
+def _run(tmp_path, monkeypatch, packages, bundle_root=None, source_names=None):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    source_names = list(source_names or packages)
     for name in packages:
         (tmp_path / name).touch()
     _wire(meshes_module, packages_module, packages, monkeypatch)
-    store = PackageStore([str(tmp_path / name) for name in packages])
+    source_paths = [str(tmp_path / name) for name in source_names]
+    store = PackageStore(source_paths, root=str(bundle_root) if bundle_root else None)
     out = tmp_path / "out"
     extract_from_store(store, str(out))
     index = json.loads((out / "index.json").read_text(encoding="utf-8"))
@@ -207,6 +210,155 @@ def test_mesh_vertices_are_exported(tmp_path, monkeypatch):
     assert meta["status"] == "exported"
     assert meta["meshCount"] == 1
     assert meta["vertexCount"] == 3
+
+
+def test_material_extras_record_shader_object_name(tmp_path, monkeypatch):
+    """Every exported material must carry the source Shader object name."""
+    pkg = _Package("mysekai__fixture__mdl_shader")
+    goid, _ = pkg.node("furniture")
+    mesh_id = pkg.mesh([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2])
+    mat = pkg.material(name="shader-mat")
+    shader_id = pkg.add("Shader", {"m_ParsedForm": {"m_Name": "Synthetic/Fixture"}})
+    pkg.objects[-2]._tree["m_Shader"] = {"m_FileID": 0, "m_PathID": shader_id}
+    pkg.renderer(goid, mesh_id, [mat])
+    _run(tmp_path, monkeypatch, {pkg.name: pkg.finish()})
+    gltf = _glb(tmp_path / "out" / f"{pkg.name}.glb")
+    material = gltf["materials"][0]
+    assert "shader" in material["extras"]
+    assert material["extras"]["shader"] == "Synthetic/Fixture"
+
+
+def test_unreferenced_materials_are_exported_with_shader_evidence(tmp_path,
+                                                                  monkeypatch):
+    """Material census entries remain visible even when no renderer uses them."""
+    pkg = _Package("mysekai__fixture__mdl_shader_orphan")
+    goid, _ = pkg.node("furniture")
+    mesh_id = pkg.mesh([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2])
+    used = pkg.material(path_id=6001, name="used-mat")
+    orphan = pkg.material(path_id=6002, name="orphan-mat")
+    used_shader = pkg.add(
+        "Shader", {"m_ParsedForm": {"m_Name": "Synthetic/Used"}},
+        path_id=7001)
+    orphan_shader = pkg.add(
+        "Shader", {"m_ParsedForm": {"m_Name": "Synthetic/Orphan"}},
+        path_id=7002)
+    for material_id, shader_id in ((used, used_shader), (orphan, orphan_shader)):
+        material_obj = next(obj for obj in pkg.objects
+                            if obj.path_id == material_id)
+        material_obj._tree["m_Shader"] = {
+            "m_FileID": 0, "m_PathID": shader_id,
+        }
+    pkg.renderer(goid, mesh_id, [used])
+    _run(tmp_path, monkeypatch, {pkg.name: pkg.finish()})
+    materials = _glb(tmp_path / "out" / f"{pkg.name}.glb")["materials"]
+    by_name = {item["extras"]["sourceMaterial"]: item for item in materials}
+    assert by_name["orphan-mat"]["extras"]["shader"] == "Synthetic/Orphan"
+    assert by_name["used-mat"]["extras"]["shader"] == "Synthetic/Used"
+
+
+def test_material_extras_record_shader_passes_and_light_modes(tmp_path,
+                                                              monkeypatch):
+    """Pass names and serialized LIGHTMODE tags are retained when present."""
+    pkg = _Package("mysekai__fixture__mdl_shader_passes")
+    goid, _ = pkg.node("furniture")
+    mesh_id = pkg.mesh([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2])
+    mat = pkg.material(name="shader-pass-mat")
+    shader_id = pkg.add("Shader", {"m_ParsedForm": {
+        "m_Name": "Synthetic/Passes",
+        "m_SubShaders": [{"m_Passes": [
+            {"m_Name": "Forward",
+             "m_State": {"m_Tags": {"tags": [["LIGHTMODE", "ForwardBase"]]}}},
+            {"m_Name": "ShadowCaster",
+             "m_State": {"m_Tags": {"tags": []}}},
+        ]}],
+    }})
+    pkg.objects[-2]._tree["m_Shader"] = {
+        "m_FileID": 0, "m_PathID": shader_id,
+    }
+    pkg.renderer(goid, mesh_id, [mat])
+    _run(tmp_path, monkeypatch, {pkg.name: pkg.finish()})
+    material = _glb(tmp_path / "out" / f"{pkg.name}.glb")["materials"][0]
+    assert material["extras"]["shaderPasses"] == [
+        {"name": "Forward", "lightMode": "ForwardBase"},
+        {"name": "ShadowCaster", "lightMode": None},
+    ]
+    assert material["extras"]["lightModes"] == ["ForwardBase", None]
+
+
+def test_cross_package_shader_pointer_resolves_from_bundle_root(tmp_path,
+                                                                monkeypatch):
+    """A Shader in a dependency package is resolved through the store root."""
+    pkg = _Package("mysekai__fixture__mdl_shader_dep_client")
+    dep = _Package("mysekai__fixture__shader_dependency")
+    goid, _ = pkg.node("furniture")
+    mesh_id = pkg.mesh([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2])
+    mat = pkg.material(name="dependency-mat")
+    shader_id = dep.add(
+        "Shader", {"m_ParsedForm": {"m_Name": "Synthetic/Dependency"}},
+        path_id=7001)
+    mat_obj = next(obj for obj in pkg.objects if obj.path_id == mat)
+    mat_obj._tree["m_Shader"] = {"m_FileID": 1, "m_PathID": shader_id}
+    pkg.archive.externals = [SimpleNamespace(name=dep.name)]
+    pkg.renderer(goid, mesh_id, [mat])
+
+    bundle_root = tmp_path / "bundles"
+    bundle_root.mkdir()
+    (bundle_root / dep.name).touch()
+    _run(tmp_path, monkeypatch,
+         {pkg.name: pkg.finish(), dep.name: dep.finish()},
+         bundle_root=bundle_root, source_names=[pkg.name])
+    material = _glb(tmp_path / "out" / f"{pkg.name}.glb")["materials"][0]
+    assert material["extras"]["shader"] == "Synthetic/Dependency"
+
+
+def test_empty_bundle_root_names_each_unresolved_dependency_shader(tmp_path,
+                                                                    monkeypatch):
+    """Removing dependency data produces named unresolved records for each slot."""
+    pkg = _Package("mysekai__fixture__mdl_shader_negative")
+    dep = _Package("mysekai__fixture__shader_negative_dependency")
+    goid, _ = pkg.node("furniture")
+    mesh_id = pkg.mesh([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2])
+    materials = [pkg.material(path_id=6001, name="dependency-mat-a"),
+                 pkg.material(path_id=6002, name="dependency-mat-b")]
+    shader_id = dep.add(
+        "Shader", {"m_ParsedForm": {"m_Name": "Synthetic/Dependency"}},
+        path_id=7001)
+    for mat in materials:
+        mat_obj = next(obj for obj in pkg.objects if obj.path_id == mat)
+        mat_obj._tree["m_Shader"] = {"m_FileID": 1, "m_PathID": shader_id}
+    pkg.archive.externals = [SimpleNamespace(name=dep.name)]
+    pkg.renderer(goid, mesh_id, materials)
+    packages = {pkg.name: pkg.finish(), dep.name: dep.finish()}
+
+    available_root = tmp_path / "available"
+    available_root.mkdir()
+    (available_root / dep.name).touch()
+    _run(tmp_path / "available-run", monkeypatch, packages,
+         bundle_root=available_root, source_names=[pkg.name])
+    resolved = _glb((tmp_path / "available-run" / "out" /
+                     f"{pkg.name}.glb"))["materials"]
+    available_unresolved_count = sum(
+        isinstance(item["extras"].get("shader"), dict)
+        and item["extras"]["shader"].get("status") == "unresolved"
+        for item in resolved
+    )
+    assert all(isinstance(item["extras"]["shader"], str) for item in resolved)
+
+    empty_root = tmp_path / "empty"
+    empty_root.mkdir()
+    _run(tmp_path / "empty-run", monkeypatch, packages,
+         bundle_root=empty_root, source_names=[pkg.name])
+    unresolved = _glb((tmp_path / "empty-run" / "out" /
+                       f"{pkg.name}.glb"))["materials"]
+    records = [item["extras"]["shader"] for item in unresolved]
+    empty_unresolved_count = sum(
+        record.get("status") == "unresolved" for record in records
+    )
+    assert empty_unresolved_count == 2
+    assert empty_unresolved_count > available_unresolved_count
+    assert {item["extras"]["sourceMaterial"] for item in unresolved} == {
+        "dependency-mat-a", "dependency-mat-b"}
+    assert all(dep.name in record["reason"] for record in records)
 
 
 def test_skinned_meshes_are_not_exported_empty(tmp_path, monkeypatch):
