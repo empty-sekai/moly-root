@@ -14,17 +14,27 @@
 //
 // Drawable:
 //   object        THREE.Object3D added to the parent
-//   material      per-particle material (colour, opacity, map live on it)
+//   material      the emitter's shared shader material — NOT one per particle
+//   state         this particle's own values (colour, opacity, rotation, map,
+//                 sheet frame, the two per-particle vectors); pushed into the
+//                 shared material just before this object is drawn
 //   setScale(sx, sy)
 //   setRotation(rad)          // billboard: about the view axis; mesh: own axis
 //   orient(camera, vel)       // per-frame orientation law; no-op when unneeded
 //   clampExempt   boolean     // whether the screen-size clamp skips this mode
 //   dispose()
 //
+// One material per emitter, not per particle. Everything on the fragment chain
+// except colour, alpha, spin, sheet frame and the two per-particle vectors is a
+// material constant, so a material per particle bought nothing and cost a
+// material object for every grain of rain. `ctx.shading` owns that one shared
+// material; the drawable takes a per-particle state record from it and binds
+// that record to the object it builds.
+//
 // `ctx` carries { THREE, num, textureFor, camera, emitter, material, state,
-// applyZOffset, map, color, alpha, rotation, sortingOrder }, where `material`
-// is the decoded material record and `state` the blend/depth state already
-// resolved from the shader family.
+// shading, applyZOffset, map, color, alpha, rotation, sortingOrder }, where
+// `material` is the decoded material record and `state` the blend/depth state
+// already resolved from the shader family.
 
 const PROVIDERS = [];
 
@@ -67,31 +77,32 @@ export function drawableRejection(renderer, num) {
  */
 function billboard(renderer, ctx) {
   const THREE = ctx.THREE;
-  const st = ctx.state;
-  const material = ctx.applyZOffset(new THREE.SpriteMaterial({
-    map: ctx.map || null,
-    color: ctx.color,
-    opacity: ctx.alpha,
-    transparent: true,
-    blending: st.blending,
-    blendSrc: st.blendSrc,
-    blendDst: st.blendDst,
-    blendEquation: st.blendEquation,
-    premultipliedAlpha: st.premultipliedAlpha,
-    depthWrite: st.depthWrite,
-    depthTest: st.depthTest,
-  }), st.zOffset);
+  const shading = ctx.shading;
+  if (!shading) return null;
+  const material = shading.material;
+  // A sprite is still the right object for this mode — it is the one three.js
+  // shape whose quad is assembled in view space — but the shader on it is the
+  // emitter's, not the built-in sprite one: the built-in draws "one texture
+  // times one colour", and that is not what this shader family does.
   const sprite = new THREE.Sprite(material);
   sprite.renderOrder = ctx.num(renderer && renderer.sortingOrder, 0);
-  material.rotation = ctx.num(ctx.rotation, 0);
+  const state = shading.makeState();
+  state.color.copy(ctx.color);
+  state.opacity = ctx.num(ctx.alpha, 1);
+  state.rotation = ctx.num(ctx.rotation, 0);
+  state.map = ctx.map || null;
+  shading.bind(sprite, state);
   return {
     object: sprite,
     material,
+    state,
     setScale(sx, sy) { sprite.scale.set(sx, sy, 1); },
-    setRotation(rad) { material.rotation = rad; },
+    setRotation(rad) { state.rotation = rad; },
     orient() {},                    // a sprite already faces the camera
     clampExempt: false,
-    dispose() { material.dispose(); },
+    // The material belongs to the emitter and outlives this particle; the
+    // sprite geometry is three.js's own shared quad. Neither is ours to release.
+    dispose() {},
   };
 }
 

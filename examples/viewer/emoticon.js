@@ -8,6 +8,7 @@ import * as THREE from './three.module.min.js';
 import { GLTFLoader } from './GLTFLoader.js';
 import { makeHooks, registeredModules } from './fx/hooks.js';
 import { makeDrawable, drawableModes, drawableRejection } from './fx/drawable.js';
+import { createParticleShading, coordSource } from './fx/particle-shader.js';
 // 绘制件的实现文件在这里注册。没被注册的绘制模式一律整条不画并计数。
 import * as drawMesh from './fx/draw-mesh.js';
 import * as drawHorizontal from './fx/draw-horizontal.js';
@@ -147,16 +148,6 @@ const BASE_MAP_KEY = {
   'Particles/Standard Unlit': '_MainTex',
 };
 const DEFAULT_BASE_MAP_KEY = '_BaseMap';
-const TINT_AREA_ALL = 1;
-// 打包的逐粒子选择器:**个位**选哪一个向量(0 是零流、1 是 custom1、2 是 custom2),
-// **十位**选哪一个分量。反过来读会整条绑错。
-const PROGRESS_VECTORS = { 1: 'custom1', 2: 'custom2' };
-function progressCoordSource(coord) {
-  const value = Math.round(num(coord, 0));
-  const vector = PROGRESS_VECTORS[value % 10];
-  if (!vector) return null;
-  return { vector, component: 'xyzw'[Math.floor(value / 10)] || 'x' };
-}
 
 /** 从材质读出渲染状态。材质缺失、跨包、或着色器不认识时退化成中性状态。 */
 function renderState(material) {
@@ -702,41 +693,21 @@ class Emitter {
    * 这里没有可取的分量 —— 取不到就是取不到,返回 0 并数出来,不拿别的量顶替。
    */
   /**
-   * 这个发射器的材质染色乘数,或者 null(没开、或者这一种区域模式还没律)。
+   * 一个逐粒子向量在归一化年龄 `u` 处的四个分量,写进 `out`。
+   *
+   * 材质里的打包选择器指着这两个向量取逐粒子量,所以整条着色链要的不是某一个分量,
+   * 而是**整个向量**。没有声明的分量取 0 —— 这与选择器指向零流是同一个结果,
+   * 但两件事不一样:后者是材质自己说「不要逐粒子量」,前者是材质要而数据没给。
+   * 后一种在装配时逐个数出来(见 `coordUnsourced`),不在这里静默。
    */
-  _tintMultiplier() {
-    const material = this.renderer.material;
-    if (!material || material.external) return null;
-    const keywords = new Set(material.keywords || []);
-    if (!keywords.has('_TINT_COLOR_ENABLED')) return null;
-    const floats = material.floats || {};
-    const area = Math.round(num(floats._TintAreaMode, 0));
-    if (area !== TINT_AREA_ALL) { this.tintRefused = (this.tintRefused || 0) + 1; return null; }
-    if (keywords.has('_TINT_MAP_ENABLED')) {
-      // 染色贴图逐像素给出乘数,拿它的常量部分冒充等于画错。
-      this.tintRefused = (this.tintRefused || 0) + 1;
-      return null;
+  _customVector(name, u, rand, out) {
+    const data = (this.system.customData || {})[name];
+    const list = data && data.mode === 'vector' ? (data.components || []) : null;
+    for (let i = 0; i < 4; i++) {
+      const spec = list ? list[i] : null;
+      out[i] = spec ? num(sampleValue(spec, u, rand), 0) : 0;
     }
-    const colour = (material.colors || {})._TintColor;
-    if (!Array.isArray(colour)) { this.tintRefused = (this.tintRefused || 0) + 1; return null; }
-    const source = progressCoordSource(floats._TintBlendRateCoord);
-    const vertex = source
-      ? this._customValue(source.vector, source.component, 0, 0.5) : 0;
-    const rate = Math.min(1, Math.max(0, vertex + num(floats._TintBlendRate, 0)));
-    const mul = [0, 1, 2].map((i) => 1 + rate * (num(colour[i], 1) - 1));
-    // 有些染色是高动态的:乘数可以到几十甚至几百,原版靠色调映射与泛光把它收回可显示
-    // 范围,亮而不糊。这个示例是刻意的 gamma 直通管线,**没有那一步**,乘上去的结果只会
-    // 在帧缓冲里削平成纯白 —— 流星就是这样从一道光变成一块白方片的。
-    //
-    // 所以这一档**不画染色**并数出来。理由不是「算术不对」,算术是对的;是这条管线表示
-    // 不了它的结果,硬乘出来的画面比不乘更远离原版,而且看着像有东西。缺的是色调映射
-    // 那条律,记在它头上;真要还原这一档,得先有那条律,不是在这里塞一个补偿系数。
-    if (mul.some((v) => v > 1)) {
-      this.tintHdrUnrepresented = (this.tintHdrUnrepresented || 0) + 1;
-      return null;
-    }
-    this.tintApplied = (this.tintApplied || 0) + 1;
-    return new THREE.Color(mul[0], mul[1], mul[2]);
+    return out;
   }
 
   _customValue(vector, component, u, rand) {
@@ -845,14 +816,6 @@ class Emitter {
     //
     // 两处是推断,标出来:环的模数按未翻倍的容量取,游标每顶替一颗加一。这两个是彼此
     // 独立的未知,真源里都还没定死,别拿其中一条去推另一条。
-    // 材质染色:采样出来的基础色要乘上一个乘数,乘数是 1 加上混合率乘以(染色 - 1),
-    // 混合率是逐粒子流值加材质常量再夹到 [0,1]。整张图统一乘同一个数,所以这里在
-    // 逐粒子材质的颜色上乘一次即可,与逐像素乘等价。
-    //
-    // 只做**全域**那一种。边缘染色要按边缘权重逐像素给,第三种区域模式的律还没取得
-    // —— 两者都不画成全域,那会把「只在边上淡淡一层」画成整片变色,看着像有效果而
-    // 其实是错的。不做就数出来。
-    this.tint = this._tintMultiplier();
     this.ringMode = Math.round(num(this.system.ringBufferMode, 0));
     this.ringSize = Math.max(1, Math.round(num(this.system.maxParticles, 1)));
     this.ring = [];
@@ -946,6 +909,33 @@ class Emitter {
     this.uvScaleOffset = st
       ? [num(st[0], 1), num(st[1], 1), num(st[2], 0), num(st[3], 0)] : [1, 1, 0, 0];
     this.uvSlot = stKey;
+
+    // 这个发射器的片元链。**一个发射器一份材质**,不是一颗粒子一份 —— 这条链上除了
+    // 颜色、alpha、旋转、贴图帧与两个逐粒子向量以外全是材质常量。
+    this.shading = createParticleShading(THREE, {
+      record: material, state: this.state, baseST: this.uvScaleOffset,
+      mode: (this.renderer && this.renderer.renderMode) || 'Billboard',
+      applyZOffset,
+    });
+    this.shading.setSlotTextures(textureFor);
+    // 材质用打包选择器指着某个逐粒子分量,而系统的自定义数据没有声明那一条曲线 ——
+    // 这不是「材质说不要」(那会写成零流),是要而取不到。逐个数出来。
+    this.coordUnsourced = 0;
+    for (const c of this.shading.coords) {
+      const data = (this.system.customData || {})[c.vector];
+      const list = data && data.mode === 'vector' ? (data.components || []) : null;
+      const index = 'xyzw'.indexOf(c.component);
+      if (!list || index < 0 || !list[index]) this.coordUnsourced += 1;
+    }
+    // 诊断读数,**不参与绘制**(绘制一律走着色器):整片同一个常量的那一档染色乘数。
+    this.tint = this.shading.constantTint
+      ? new THREE.Color(this.shading.constantTint[0], this.shading.constantTint[1],
+                        this.shading.constantTint[2])
+      : null;
+    this.tintApplied = this.shading.counts.tintApplied;
+    this.tintRefused = this.shading.counts.tintRefused;
+    this.tintHdrUnrepresented = this.shading.counts.tintHdrUnrepresented;
+
     const sheet = this.system.textureSheet;
     this.tiles = sheet && (num(sheet.tilesX, 1) > 1 || num(sheet.tilesY, 1) > 1)
       ? { x: num(sheet.tilesX, 1), y: num(sheet.tilesY, 1), spec: sheet } : null;
@@ -972,18 +962,19 @@ class Emitter {
   }
 
   /**
-   * 贴图坐标的合成。片表动画先把四边形的 uv 映进某一格,`_ST` 再作用在映过的 uv 上:
-   *   最终 = (uv / 格数 + 格偏移) * ST.xy + ST.zw
-   * three.js 的 `repeat`/`offset` 算的是 `uv * repeat + offset`,所以
-   *   repeat = ST.xy / 格数     offset = 格偏移 * ST.xy + ST.zw
-   * 两者写成一处,免得片表推进时把 `_ST` 覆盖掉。
+   * 片表动画改写的是这颗粒子的 uv0:先把四边形的 uv 映进某一格,
+   *   uv0 = uv / 格数 + 格偏移
+   * 然后**每一张图**(基础图、过渡图、染色图、flow 图)都从这个 uv0 出发套自己那一槽
+   * 的缩放偏移 —— 所以格位不能写进某一张贴图对象的平铺/偏移里,它是整条链的输入。
+   * 这里只算出 `[1/格数x, 1/格数y, 格偏移x, 格偏移y]` 写进这颗粒子的可变量。
    */
-  _applyUv(map, tileOffsetX = 0, tileOffsetY = 0) {
-    if (!map) return;
-    const [sx, sy, ox, oy] = this.uvScaleOffset;
+  _applySheet(state, tileOffsetX = 0, tileOffsetY = 0) {
+    if (!state) return;
     const tx = this.tiles ? this.tiles.x : 1, ty = this.tiles ? this.tiles.y : 1;
-    map.repeat.set(sx / tx, sy / ty);
-    map.offset.set(tileOffsetX * sx + ox, tileOffsetY * sy + oy);
+    state.sheet[0] = 1 / tx;
+    state.sheet[1] = 1 / ty;
+    state.sheet[2] = tileOffsetX;
+    state.sheet[3] = tileOffsetY;
   }
 
   _emptyBirth() {
@@ -1141,25 +1132,15 @@ class Emitter {
     const sizeX = sampleValue(start.size, 0, r);
     const sizeY = start.size3D ? sampleValue(start.sizeY, 0, r) : sizeX;
     const sizeZ = start.size3D && start.sizeZ ? sampleValue(start.sizeZ, 0, r) : sizeX;
+    // 出生色就是顶点色。染色不再在这里乘 —— 它是片元链上的一环,乘的是**采样出来的
+    // 那一像素**,而且乘 alpha,与「先乘进顶点色」不等价。
     const first = sampleColor(start.color, 0, r);
-    if (this.tint) first.color.multiply(this.tint);
-    // 每粒子独立材质:颜色、透明度、旋转、贴图帧都是逐粒子量。
-    // 贴图对象要在两种情形下各自复制一份:片表动画逐粒子推进帧;`_ST` 非恒等时
-    // 平铺/偏移是**这个材质**的,共享贴图对象会把它按到同一张图的所有使用者头上。
-    const identityUv = this.uvScaleOffset[0] === 1 && this.uvScaleOffset[1] === 1
-      && this.uvScaleOffset[2] === 0 && this.uvScaleOffset[3] === 0;
+    // 逐粒子量(颜色、透明度、旋转、贴图帧、两个逐粒子向量)进 uniform,材质是整条
+    // 发射器共用的一份 —— 所以**贴图对象不再需要逐粒子复制**:缩放偏移与片表格位
+    // 都是着色器里的量,不再写进贴图对象的平铺/偏移。
     // 数组贴图:出生时选层。层由 custom data 定,而粒子对象要到下面才建 —— 所以
     // 这里把随机因子直接传进去,**不要引用还不存在的粒子对象**。
-    const base = this.arraySlices ? this._arrayLayer(r) : this.map;
-    const map = base && (this.tiles || !identityUv) ? base.clone() : base;
-    // **这张贴图是不是这颗粒子自己的**,下面建粒子时记进 `ownsMap`。原先靠
-    // `p.map !== this.map` 反推,而数组发射器的 `this.map` 是 null ⇒ 共享的那一层
-    // 会被当成克隆体 dispose 掉,下一颗粒子再用它就炸在渲染循环里(UI 能动、画面卡死)。
-    const ownsMap = !!(map && map !== base);
-    if (map && map !== base) {
-      map.needsUpdate = true;
-      this._applyUv(map);
-    }
+    const map = this.arraySlices ? this._arrayLayer(r) : this.map;
     const st = this.state;
     const spin0 = sampleValue(start.rotation, 0, r);
     // 绘制件按渲染器的绘制模式分派(朝相机的 billboard 是内建的那一支)。
@@ -1167,7 +1148,7 @@ class Emitter {
     // 材质/贴图这一侧出了问题 —— 那就不发这一颗,并数出来。
     const draw = makeDrawable(this.renderer, {
       THREE, num, textureFor: this.textureFor, camera: this.camera, emitter: this,
-      material: this.renderer.material, state: st, applyZOffset,
+      material: this.renderer.material, state: st, applyZOffset, shading: this.shading,
       map: map || null, color: first.color, alpha: first.alpha, rotation: spin0,
       sortingOrder: num(this.renderer.sortingOrder),
       // 这颗粒子出生时抽的随机因子。Mesh 模式最多挂 4 个网格、**逐粒子随机选一个**,
@@ -1183,7 +1164,7 @@ class Emitter {
     sprite.position.copy(pos);
     this.parent.add(sprite);
     const p = {
-      sprite, draw, map, ownsMap, r, life, age: 0, sizeX, sizeY, sizeZ,
+      sprite, draw, map, r, life, age: 0, sizeX, sizeY, sizeZ,
       pos: pos.clone(),
       vel: dir.multiplyScalar(sampleValue(start.speed, 0, r)),
       spin: spin0,
@@ -1347,21 +1328,28 @@ class Emitter {
 
       if (s.colorOverLifetime) {
         const c = sampleColor(s.colorOverLifetime, u, p.r);
-        p.draw.material.color.copy(c.color);
-        if (this.tint) p.draw.material.color.multiply(this.tint);
-        p.draw.material.opacity = c.alpha;
+        p.draw.state.color.copy(c.color);
+        p.draw.state.opacity = c.alpha;
       }
       if (s.rotationOverLifetime) {                    // 弧度每秒
         p.spin += sampleValue(s.rotationOverLifetime.curve, u, p.r) * dt;
         p.draw.setRotation(p.spin);
       }
-      if (this.tiles && p.map && this._inlineOwns('textureSheet')) {
+      if (this.tiles && this._inlineOwns('textureSheet')) {
         const sheet = this.tiles.spec;
         const total = this.tiles.x * this.tiles.y;
         const frame = Math.min(total - 1, Math.max(0,
           Math.floor(sampleValue(sheet.frameOverTime, u, p.r) * total)));
-        this._applyUv(p.map, (frame % this.tiles.x) / this.tiles.x,
-                      1 - 1 / this.tiles.y - Math.floor(frame / this.tiles.x) / this.tiles.y);
+        this._applySheet(p.draw.state, (frame % this.tiles.x) / this.tiles.x,
+                         1 - 1 / this.tiles.y - Math.floor(frame / this.tiles.x) / this.tiles.y);
+      }
+      // 两个逐粒子向量。材质里的打包选择器指着它们取逐粒子量,而每个分量都是一条
+      // 按归一化年龄取值的曲线 —— 所以这是**逐帧**量,不是出生时定死的量。
+      // 没有任何选择器指向它们时整段免掉(绝大多数发射器如此)。
+      if (this.shading.needsCustom) {
+        this._customVector('custom1', u, p.r, p.draw.state.custom1);
+        this._customVector('custom2', u, p.r, p.draw.state.custom2);
+        this.customStreamReads = (this.customStreamReads || 0) + 1;
       }
       alive.push(p);
     }
@@ -1377,8 +1365,9 @@ class Emitter {
     // 所以释放资源必须挂在这里,挂在 onDeath 上会在 reset 时漏掉。
     for (const h of this.hooks) h.onDrop?.(p);
     p.sprite.removeFromParent();
-    p.draw.dispose();                          // 材质由绘制件自己销毁(Mesh 件还有几何)
-    if (p.map && p.ownsMap) p.map.dispose();   // 只销毁自己克隆的那份,共享贴图不动
+    // 绘制件不再拥有材质或贴图:材质是整条发射器共用的一份(发射器销毁时才收),
+    // 贴图是取用器缓存里共享的那一张。一颗粒子手上没有任何独占资源可以释放。
+    p.draw.dispose();
   }
 
   /**
@@ -1467,7 +1456,11 @@ class Emitter {
     this.birth = this._emptyBirth();     // 判据读的是这一轮的出生点,不是上一轮的
   }
 
-  dispose() { this.reset(); }
+  dispose() {
+    this.reset();
+    // 材质是这条发射器的,不是任何一颗粒子的 —— 所以它在这里收,不在 `_drop` 里收。
+    this.shading?.dispose();
+  }
 }
 
 // ---- 件 -----------------------------------------------------------------
@@ -1768,10 +1761,18 @@ export class EmoticonView {
       ringRetired: this.emitters.reduce((n, e) => n + (e.ringRetired || 0), 0),
       customReads: this.emitters.reduce((n, e) => n + (e.customReads || 0), 0),
       customMisses: this.emitters.reduce((n, e) => n + (e.customMisses || 0), 0),
-      tintApplied: this.emitters.reduce((n, e) => n + (e.tintApplied || 0), 0),
-      tintRefused: this.emitters.reduce((n, e) => n + (e.tintRefused || 0), 0),
-      tintHdrUnrepresented: this.emitters.reduce(
-        (n, e) => n + (e.tintHdrUnrepresented || 0), 0),
+      // 材质对象数。**一个发射器一份**,不是一颗粒子一份 —— 两个数放在一起才看得出
+      // 这件事真的成立(`materials` 应当等于 `emitters`,与 `live` 无关)。
+      materials: this.emitters.filter((e) => e.shading).length,
+      // 片元链逐段的账。前一半是**做到了**的段,后一半是**声明了而这一版没做**的段;
+      // 合成一个数就分不出「没声明」和「没实现」。
+      shading: this.emitters.reduce((acc, e) => {
+        for (const [k, v] of Object.entries((e.shading && e.shading.counts) || {})) {
+          acc[k] = (acc[k] || 0) + v;
+        }
+        acc.coordUnsourced = (acc.coordUnsourced || 0) + (e.coordUnsourced || 0);
+        return acc;
+      }, {}),
       drawFaults: this.emitters.reduce((n, e) => n + (e.drawFaults || 0), 0),
       // 模块自己报的数,按模块名归并到一处。判据要读的就是这里 —— 没有它,
       // 模块跑没跑、跑出什么数,外面一个字也看不到,「绿」就无从谈起。

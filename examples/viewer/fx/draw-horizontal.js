@@ -88,29 +88,22 @@ export function makeDrawable(renderer, ctx) {
   const THREE = ctx.THREE;
   if (rejects(renderer, ctx.num)) return null;
 
-  const st = ctx.state;
   // The camera-facing billboard is a sprite, and a sprite is oriented by the
   // renderer rather than by its own transform — there is no world orientation
-  // to give it. A quad that must hold one is a plane mesh instead, with the
-  // unlit material; every other field below is the billboard's, unchanged.
-  const material = ctx.applyZOffset(new THREE.MeshBasicMaterial({
-    map: ctx.map || null,
-    color: ctx.color,
-    opacity: ctx.alpha,
-    transparent: true,
-    blending: st.blending,
-    blendSrc: st.blendSrc,
-    blendDst: st.blendDst,
-    blendEquation: st.blendEquation,
-    premultipliedAlpha: st.premultipliedAlpha,
-    depthWrite: st.depthWrite,
-    depthTest: st.depthTest,
-    // A ground sheet is seen from above, and from below wherever the viewer
-    // gets under it. Culling one of the two faces makes it disappear there.
-    side: THREE.DoubleSide,
-  }), st.zOffset);
+  // to give it. A quad that must hold one is a plane mesh instead. The shading
+  // is the emitter's shared one, the same fragment chain the camera-facing
+  // billboard runs; only the orientation differs between the two modes.
+  const shading = ctx.shading;
+  if (!shading) return null;
+  const material = shading.material;
+  const state = shading.makeState();
+  state.color.copy(ctx.color);
+  state.opacity = ctx.num(ctx.alpha, 1);
+  state.rotation = ctx.num(ctx.rotation, 0);
+  state.map = ctx.map || null;
 
   const object = new THREE.Mesh(quadGeometry(THREE), material);
+  shading.bind(object, state);
   object.renderOrder = ctx.num(renderer && renderer.sortingOrder, 0);
   object.frustumCulled = false;      // particles move; the unit quad's own bounds do not
 
@@ -140,6 +133,7 @@ export function makeDrawable(renderer, ctx) {
   return {
     object,
     material,
+    state,
     // Diagnostic readout of the orientation actually applied, in world space:
     // the fixed basis with this particle's spin on it. Kept in world space so a
     // probe can compare it against the camera and against world +Y.
@@ -160,9 +154,9 @@ export function makeDrawable(renderer, ctx) {
     // so it is not exempt.
     clampExempt: false,
     dispose() {
-      material.dispose();
-      // The geometry is the shared unit quad. Disposing it here would take it
-      // away from every other particle still drawing with it.
+      // The geometry is the shared unit quad and the material is the emitter's.
+      // Disposing either here would take it away from every other particle
+      // still drawing with it.
     },
   };
 }

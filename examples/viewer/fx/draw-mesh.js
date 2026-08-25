@@ -63,23 +63,19 @@ export function makeDrawable(renderer, ctx) {
   const source = ctx.meshFor(chosen.file, chosen.node);
   if (!source) return null;                 // not preloaded, or the node is absent
 
-  const st = ctx.state;
   // Unlit: these particles carry their colour in the material and the vertex
-  // stream, and the scene's lights are not part of that.
-  const material = ctx.applyZOffset(new THREE.MeshBasicMaterial({
-    map: ctx.map || null,
-    color: ctx.color,
-    opacity: ctx.alpha,
-    transparent: true,
-    blending: st.blending,
-    blendSrc: st.blendSrc,
-    blendDst: st.blendDst,
-    blendEquation: st.blendEquation,
-    premultipliedAlpha: st.premultipliedAlpha,
-    depthWrite: st.depthWrite,
-    depthTest: st.depthTest,
-    side: THREE.DoubleSide,
-  }), st.zOffset);
+  // stream, and the scene's lights are not part of that. The shading is the
+  // emitter's shared one — the same fragment chain the two billboard modes run.
+  // A mesh is the one draw mode with authored normals, so it is also the one
+  // where the rim terms on that chain see a real surface.
+  const shading = ctx.shading;
+  if (!shading) return null;
+  const material = shading.material;
+  const state = shading.makeState();
+  state.color.copy(ctx.color);
+  state.opacity = ctx.num(ctx.alpha, 1);
+  state.rotation = ctx.num(ctx.rotation, 0);
+  state.map = ctx.map || null;
 
   // One instance per particle. The cached node is the shared original and must
   // never be added to the scene itself - it is the source every particle clones.
@@ -87,12 +83,15 @@ export function makeDrawable(renderer, ctx) {
   const owned = [];
   object.traverse((o) => {
     if (!o.isMesh) return;
-    o.material = material;                  // the per-particle material, shared within this instance
+    o.material = material;                  // the emitter's shared material
     o.renderOrder = ctx.num(renderer.sortingOrder, 0);
     o.frustumCulled = false;                // particles move; culling by the source bounds drops them
+    // The clone's root is a group, and a group is never drawn — so the push has
+    // to hang off each drawn mesh inside it, not off the root.
+    shading.bind(o, state);
     owned.push(o);
   });
-  if (!owned.length) { material.dispose(); return null; }   // the node carried no geometry
+  if (!owned.length) return null;           // the node carried no geometry
 
   let spin = ctx.num(ctx.rotation, 0);
   const authoredQ = object.quaternion.clone();
@@ -110,6 +109,7 @@ export function makeDrawable(renderer, ctx) {
   return {
     object,
     material,
+    state,
     // Diagnostic readout of the basis actually applied to this View particle.
     // It is kept in world space so it can be compared with the camera rotation.
     viewBasisWorldQ,
@@ -145,11 +145,10 @@ export function makeDrawable(renderer, ctx) {
     // the viewport. A mesh has real extent in the world and is not clamped.
     clampExempt: true,
     dispose() {
-      material.dispose();
-      // Geometry is cloned per particle by `clone(true)` only when the source
-      // node owns it; three.js shares geometry across clones, so disposing it
-      // here would destroy the cached original every other particle still needs.
-      // The material is ours alone and is the only thing to release.
+      // Nothing here is this particle's to release. three.js shares geometry
+      // across clones, so disposing it would destroy the cached original every
+      // other particle still needs; the material belongs to the emitter and
+      // outlives every particle drawn with it.
     },
   };
 }
