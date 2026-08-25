@@ -14,13 +14,17 @@
 //
 // 本示例是 gamma 直通管线(renderer.outputColorSpace = LinearSRGBColorSpace,
 // toneMapping = NoToneMapping),所以场景缓冲里存的就是屏幕上看到的 sRGB 编码值。
-// 扩散 / 粒子泛光 / 屏幕耀斑这三支的合成一律按下面的次序做:
+// 而 URP 的调色是**线性域**的算术:曝光是线性倍数,颜色滤镜取 Color.linear,
+// 白平衡的 LMS 矩阵吃线性 RGB,饱和度的 Rec.709 亮度权重也只在线性域成立。
+// 所以除标准泛光外的六支一律在同一段线性域里按序求值:
 //
 //     linear = sRGBToLinear(min(scene, 100))
-//     linear = 扩散 → 粒子泛光 → 屏幕耀斑
+//     linear = 扩散 → 粒子泛光 → 屏幕耀斑 → 白平衡 → 颜色调整 → 分离色调
 //     scene' = linearToSRGB(linear)
 //
-// 三支全关时整段旁路,输出与不接这条链时逐位相同。
+// 六支全关时整段旁路,输出与不接这条链时逐位相同。
+// 唯一留在 gamma 域的是分离色调内部的那一次 pow(±2.2):真源的注释写明它就是要在
+// gamma 空间上做 soft light,所以那一段自己转过去、算完再转回来。
 //
 // 近似与未定项一律出现在 status():本文件不假装读懂了没读懂的参数。
 
@@ -285,8 +289,8 @@ void main() {
 }
 `;
 
-// 合成。前三支(扩散 / 粒子泛光 / 屏幕耀斑)在线性空间里按序求值,
-// 其余(标准泛光 / 白平衡 / 颜色调整 / 分离色调)保持本示例原有的 gamma 域行为。
+// 合成。六支(扩散 / 粒子泛光 / 屏幕耀斑 / 白平衡 / 颜色调整 / 分离色调)在同一段
+// 线性空间里按序求值;只有标准泛光保持本示例原有的 gamma 域加算。
 const COMPOSITE_FRAG = /* glsl */`
 uniform sampler2D tScene;
 uniform sampler2D tBloom;
@@ -313,7 +317,7 @@ uniform float uStBalance;
 varying vec2 vUv;
 
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
-const float MIDGRAY = 0.4135884;    // 与 URP 对比度的中灰常量同值
+const float MIDGRAY = 0.4135884;    // ACEScc 中灰:URP 的对比度枢轴,在**对数域**上取
 const float DIFF_PIVOT = 0.217637643;   // pow(0.5, 2.2):扩散对比度的枢轴
 
 vec3 sRGBToLinear(vec3 c) {
@@ -353,81 +357,107 @@ vec3 hsv2rgb(vec3 c) {
 }
 vec3 pow3(vec3 v, float e) { return pow(max(v, vec3(0.0)), vec3(e)); }
 
+// LogC(EI800)对数曲线。URP 的对比度不在线性域也不在 gamma 域上做:它先把线性值
+// 送进这条对数曲线,绕 ACEScc 中灰(MIDGRAY)缩放,再折回线性。未接色调映射组件时
+// 走的就是这一支(接了 ACES 的那一支是 ACEScc,本示例的档案里没有该组件)。
+const float LOGC_A = 5.555556, LOGC_B = 0.047996, LOGC_C = 0.244161, LOGC_D = 0.386036;
+const float LOG10 = 0.4342944819;   // 1 / ln(10):GLSL 只有自然对数
+vec3 linearToLogC(vec3 x) {
+  return LOGC_C * (log(LOGC_A * max(x, vec3(0.0)) + LOGC_B) * LOG10) + LOGC_D;
+}
+vec3 logCToLinear(vec3 x) {
+  return (pow(vec3(10.0), (x - LOGC_D) / LOGC_C) - LOGC_B) / LOGC_A;
+}
+
 void main() {
   vec3 c = texture2D(tScene, vUv).rgb;
 
   // 标准泛光:保持本示例原有的 gamma 域加算
   c += texture2D(tBloom, vUv).rgb * uBloomTint * uBloomIntensity * uBloomOn;
 
-  if (uLinearOn > 0.5) {
+  // 六支共用同一段线性域:调色的算术(线性倍数 / LMS 矩阵 / 亮度权重)只在这里成立。
+  // 全关时整段旁路,输出与不接这条链时逐位相同。
+  if (max(max(uLinearOn, uWbOn), max(uCaOn, uStOn)) > 0.5) {
     vec3 b = sRGBToLinear(min(c, vec3(100.0)));
 
-    // 1) 扩散:整幅模糊层提对比后按混合模式并入,强度即混合权重
-    if (uDiffOn > 0.5) {
-      vec3 d = texture2D(tDiff, vUv).rgb;
-      d = clamp((d - DIFF_PIVOT) * uDiffContrast + DIFF_PIVOT, 0.0, 1.0);
-      vec3 s = b;
-      if (uDiffBlendMode < 8.0)       s = hardLight(b, d);        // 6
-      else if (uDiffBlendMode < 12.0) s = b + d;                  // 10 线性减淡
-      else if (uDiffBlendMode < 16.0) s = overlay(b, d);          // 15
-      else if (uDiffBlendMode < 20.0) s = softLightBlend(b, d);   // 18
-      b = mix(b, s, uDiffIntensity);
+    if (uLinearOn > 0.5) {
+      // 1) 扩散:整幅模糊层提对比后按混合模式并入,强度即混合权重
+      if (uDiffOn > 0.5) {
+        vec3 d = texture2D(tDiff, vUv).rgb;
+        d = clamp((d - DIFF_PIVOT) * uDiffContrast + DIFF_PIVOT, 0.0, 1.0);
+        vec3 s = b;
+        if (uDiffBlendMode < 8.0)       s = hardLight(b, d);        // 6
+        else if (uDiffBlendMode < 12.0) s = b + d;                  // 10 线性减淡
+        else if (uDiffBlendMode < 16.0) s = overlay(b, d);          // 15
+        else if (uDiffBlendMode < 20.0) s = softLightBlend(b, d);   // 18
+        b = mix(b, s, uDiffIntensity);
+      }
+
+      // 2) 粒子泛光:金字塔来自「只有粒子」的缓冲,平方解码后按 tint/强度加算;
+      //    叠加层是同一份泛光先加进去再做 overlay,权重为 overlayStrength。
+      if (uPBloomOn > 0.5) {
+        vec3 t = texture2D(tPBloom, vUv).rgb;
+        vec3 tinted = (t * t) * uPBloomIntensity * uPBloomTint;
+        vec3 ov = overlay(b, b + tinted);
+        b = max(b + uPBloomOverlay * (ov - b), vec3(0.0));
+        b = b + tinted;
+      }
+
+      // 3) 屏幕耀斑:沿 uFlareScreenAxis 的两条反向线性渐变,各自 hardLight 混一层色
+      if (uFlareScreenOn > 0.5) {
+        float t = dot(vUv - 0.5, uFlareScreenAxis);
+        float e = uFlareScreenExp;
+        float w1 = powSafe(clamp(t - uFlareScreenO1, 0.0, 1.0), e) * uFlareScreenC1.a * uFlareScreenI;
+        float w2 = powSafe(clamp((1.0 - t) - uFlareScreenO2, 0.0, 1.0), e) * uFlareScreenC2.a * uFlareScreenI;
+        b = mix(b, hardLight(b, uFlareScreenC1.rgb), w1);
+        b = mix(b, hardLight(b, uFlareScreenC2.rgb), w2);
+      }
     }
 
-    // 2) 粒子泛光:金字塔来自「只有粒子」的缓冲,平方解码后按 tint/强度加算;
-    //    叠加层是同一份泛光先加进去再做 overlay,权重为 overlayStrength。
-    if (uPBloomOn > 0.5) {
-      vec3 t = texture2D(tPBloom, vUv).rgb;
-      vec3 tinted = (t * t) * uPBloomIntensity * uPBloomTint;
-      vec3 ov = overlay(b, b + tinted);
-      b = max(b + uPBloomOverlay * (ov - b), vec3(0.0));
-      b = b + tinted;
+    // 4) 白平衡:LMS 空间逐通道缩放(系数在 JS 侧按公开的 URP 公式算好)。
+    //    那两个矩阵的入口是**线性** RGB。
+    if (uWbOn > 0.5) {
+      mat3 toLms = mat3(3.90405e-1, 7.08416e-2, 2.31082e-2,
+                        5.49941e-1, 9.63172e-1, 1.28021e-1,
+                        8.92632e-3, 1.35775e-3, 9.36245e-1);
+      mat3 fromLms = mat3(2.85847e+0, -2.10182e-1, -4.18120e-2,
+                          -1.62879e+0, 1.15820e+0, -1.18169e-1,
+                          -2.48910e-2, 3.24281e-4, 1.06867e+0);
+      b = fromLms * ((toLms * b) * uWbCoeffs);
     }
-
-    // 3) 屏幕耀斑:沿 uFlareScreenAxis 的两条反向线性渐变,各自 hardLight 混一层色
-    if (uFlareScreenOn > 0.5) {
-      float t = dot(vUv - 0.5, uFlareScreenAxis);
-      float e = uFlareScreenExp;
-      float w1 = powSafe(clamp(t - uFlareScreenO1, 0.0, 1.0), e) * uFlareScreenC1.a * uFlareScreenI;
-      float w2 = powSafe(clamp((1.0 - t) - uFlareScreenO2, 0.0, 1.0), e) * uFlareScreenC2.a * uFlareScreenI;
-      b = mix(b, hardLight(b, uFlareScreenC1.rgb), w1);
-      b = mix(b, hardLight(b, uFlareScreenC2.rgb), w2);
+    // 5) 颜色调整:曝光 → 对比度(对数域,绕中灰)→ 颜色滤镜 → 色相 → 饱和度。
+    //    曝光是 2^EV 的**线性**倍数,颜色滤镜是 Color.linear,两者都在这里相乘;
+    //    对比度在 LogC 上绕 MIDGRAY 缩放,不是在线性值上减中灰。
+    if (uCaOn > 0.5) {
+      b *= uExposure;
+      if (abs(uContrast - 1.0) > 1e-6) {
+        vec3 lg = linearToLogC(b);
+        lg = (lg - MIDGRAY) * uContrast + MIDGRAY;
+        b = logCToLinear(lg);
+      }
+      b *= uColorFilter;
+      b = max(b, vec3(0.0));       // 后面几步不接受负值
+      if (abs(uHueShift) > 1e-6) {
+        vec3 hsv = rgb2hsv(b);
+        hsv.x = fract(hsv.x + uHueShift);
+        b = hsv2rgb(hsv);
+      }
+      float l = dot(max(b, vec3(0.0)), LUMA);
+      b = l + (b - l) * uSaturation;
+    }
+    // 6) 分离色调:亮部/暗部各自 soft light,balance 移动分界。
+    //    这一支**故意**转到 gamma 域再算(真源如此),算完转回线性。
+    if (uStOn > 0.5) {
+      vec3 g = pow3(max(b, vec3(0.0)), 1.0 / 2.2);
+      float l = clamp(dot(clamp(g, 0.0, 1.0), LUMA) + uStBalance, 0.0, 1.0);
+      g = softLightBlend(g, mix(vec3(0.5), uStShadows, 1.0 - l));
+      g = softLightBlend(g, mix(vec3(0.5), uStHighlights, l));
+      b = pow3(g, 2.2);
     }
 
     c = linearToSRGB(max(b, vec3(0.0)));
   }
 
-  // 白平衡:LMS 空间逐通道缩放(系数在 JS 侧按公开的 URP 公式算好)
-  if (uWbOn > 0.5) {
-    mat3 toLms = mat3(3.90405e-1, 7.08416e-2, 2.31082e-2,
-                      5.49941e-1, 9.63172e-1, 1.28021e-1,
-                      8.92632e-3, 1.35775e-3, 9.36245e-1);
-    mat3 fromLms = mat3(2.85847e+0, -2.10182e-1, -4.18120e-2,
-                        -1.62879e+0, 1.15820e+0, -1.18169e-1,
-                        -2.48910e-2, 3.24281e-4, 1.06867e+0);
-    c = fromLms * ((toLms * c) * uWbCoeffs);
-  }
-  // 颜色调整:曝光 → 对比度(中灰枢轴)→ 颜色滤镜 → 色相 → 饱和度
-  if (uCaOn > 0.5) {
-    c *= uExposure;
-    c = (c - MIDGRAY) * uContrast + MIDGRAY;
-    c *= uColorFilter;
-    if (abs(uHueShift) > 1e-6) {
-      vec3 hsv = rgb2hsv(max(c, vec3(0.0)));
-      hsv.x = fract(hsv.x + uHueShift);
-      c = hsv2rgb(hsv);
-    }
-    float l = dot(max(c, vec3(0.0)), LUMA);
-    c = l + (c - l) * uSaturation;
-  }
-  // 分离色调:亮部/暗部各自 soft light,balance 移动分界
-  if (uStOn > 0.5) {
-    vec3 g = pow3(max(c, vec3(0.0)), 1.0 / 2.2);
-    float l = clamp(dot(clamp(g, 0.0, 1.0), LUMA) + uStBalance, 0.0, 1.0);
-    g = softLightBlend(g, mix(vec3(0.5), uStShadows, 1.0 - l));
-    g = softLightBlend(g, mix(vec3(0.5), uStHighlights, l));
-    c = pow3(g, 2.2);
-  }
   gl_FragColor = vec4(max(c, vec3(0.0)), 1.0);
 }
 `;
@@ -805,12 +835,20 @@ export class PostChain {
     if (caOn) {
       const w = ca.weight;
       // 档案里的取值域与 URP 一致:对比度/饱和度是百分数,色相是度数。
+      // postExposure 是 EV,2^EV 是**线性域**的倍数(着色器里那一段因此必须是线性域)。
       u.uExposure.value = 1 + (Math.pow(2, num(ca.params.postExposure)) - 1) * w;
       u.uContrast.value = 1 + (num(ca.params.contrast) / 100) * w;
       u.uHueShift.value = (num(ca.params.hueShift) / 360) * w;
       u.uSaturation.value = 1 + (num(ca.params.saturation) / 100) * w;
+      // colorFilter 在档案里是一个 **Color**,而 URP 喂给着色器的是它的 `.linear`。
+      // 按权重与中性白混合是 Color 之间的事,所以先混合、再逐通道 gamma→linear。
+      // 这条换算对 x >= 1 恰好是 x^2.2 —— 档案里那些大于 1 的取值不是「已经线性」,
+      // 是 HDR Color 的原始通道值,少了这一步曝光与滤镜就不在同一个域里相乘。
       const f = col(ca.params.colorFilter, [1, 1, 1, 1]);
-      u.uColorFilter.value.set(1 + (f[0] - 1) * w, 1 + (f[1] - 1) * w, 1 + (f[2] - 1) * w);
+      u.uColorFilter.value.set(
+        gammaToLinear(1 + (f[0] - 1) * w),
+        gammaToLinear(1 + (f[1] - 1) * w),
+        gammaToLinear(1 + (f[2] - 1) * w));
     }
     const stOn = on(st);
     u.uStOn.value = stOn ? 1 : 0;
