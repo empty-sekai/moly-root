@@ -333,7 +333,7 @@ const DEG = Math.PI / 180;
  * 导出它是为了让消费方在**装载时**数出未建模形状的发射器数,而不是等运行时的控制台警告。
  */
 export const EMIT_SHAPES = new Set(['Sphere', 'Circle', 'Cone', 'SingleSidedEdge', 'BoxEdge',
-  'Hemisphere', 'ConeVolume', 'Donut']);
+  'Hemisphere', 'ConeVolume', 'Donut', 'Mesh']);
 
 /**
  * 形状模块的三态。**「没有形状模块」与「形状没建模」是两件不同的事**:
@@ -350,7 +350,28 @@ export const EMIT_SHAPES = new Set(['Sphere', 'Circle', 'Cone', 'SingleSidedEdge
 export function shapeSupport(shape) {
   const type = shape && shape.type;
   if (!type) return 'none';
-  return EMIT_SHAPES.has(type) ? 'ok' : 'unimplemented';
+  if (!EMIT_SHAPES.has(type)) return 'unimplemented';
+  // Mesh 是有条件的:形状在表里,但数据可能声明了这条律覆盖不到的用法(见 meshShapeGap)。
+  return (type === 'Mesh' && meshShapeGap(shape)) ? 'unimplemented' : 'ok';
+}
+
+/**
+ * 「从网格表面发射」这条律**覆盖不到**这个形状的理由,覆盖得到时返回 null。
+ * 三种都对应数据里明写的东西,不是保险丝:
+ *
+ *   'noMeshRef'     —— 声明了从网格发射,但一个网格都没解出来(产物里 29 个里有 3 个是
+ *                      这样)。不拿别的网格顶替,整条停发并计数。
+ *   'placement'     —— 放置模式不是三角。三种模式是顶点/边/三角(依次记 0/1/2),只有
+ *                      三角这一种在数据里出现,也只有它建了模。字段缺席不当成三角。
+ *   'materialIndex' —— 声明了只从某一个材质槽的三角发射。产物里一份网格是一整块几何,
+ *                      没有分槽信息,做不到就不做(数据里没有一个用它)。
+ */
+export function meshShapeGap(shape) {
+  const list = shape && shape.meshes;
+  if (!Array.isArray(list) || !list.length || !list[0] || !list[0].file) return 'noMeshRef';
+  if (Math.round(num(shape.meshPlacement, -1)) !== 2) return 'placement';
+  if (shape.meshMaterialIndex != null) return 'materialIndex';
+  return null;
 }
 
 /**
@@ -373,6 +394,144 @@ function sampleShapeRadius(radius, thickness, power) {
   return radius * Math.pow(inner + (1 - inner) * Math.random(), 1 / power);
 }
 
+// ---- 从网格表面发射 ------------------------------------------------------
+//
+// 三角放置模式(数据里 29 个发射器全是它)的三条律:
+//
+// 1) 选哪个三角 —— **按面积加权**,不是按三角序号均匀取。抽一个 [0,1) 的数,乘以整张
+//    网格的三角面积总和,再在三角面积的前缀和上取反函数:第一个使累计面积达到这个目标
+//    的三角就是它。引擎为这一步另建了一张按面积总和均分的桶表(每档记下当时的累计面积
+//    与三角序号)当起点、再前后线性走到位,那只是加速 —— 结果与直接在前缀和上二分完全
+//    相同,所以这里直接二分。
+//    两种做法在三角大小不均的网格上分布明显不同(地面导航网格恰恰不均:同一张网格里
+//    最大与最小的三角能差上百倍),按序号均匀取会让小三角那一片密得多。
+//
+// 2) 三角内取哪一点 —— 两个独立的 [0,1) 随机数 u、v,若 u+v>1 就折成 (1-u, 1-v),
+//    出生点 = u·P0 + v·P1 + (1-u-v)·P2。折叠这一步是必需的:不折就是在平行四边形里
+//    取点,一半的点会落到三角外面去。
+//
+// 3) 发射方向 —— **用同一组重心权重插值三个顶点的法线**,不是三角的面法线。
+//    `meshNormalOffset` 沿这条插值出来的法线把出生点推开(数据里 29 个全是 0)。
+//
+// 形状自身的 position/rotation/scale 照常在后面那道公共尾巴上作用,与别的形状一样。
+
+const _meshSamplers = new WeakMap();
+
+/**
+ * 把一个网格节点整理成可按面积采样的三角表(只建一次,按节点缓存)。
+ *
+ * 产物里的网格顶点已经做过一次左右手转换(x 取反、绕序翻转),而出生点在 `spawn` 里
+ * 还要再过一次同样的转换 —— 所以这里先把 x 转回去,免得转两次。转两次不会报错,
+ * 表现是整片粒子沿 x 轴镜像:落在地面网格的镜像位置上,看着「铺开了」却铺错了地方。
+ * 绕序翻转不必还原:重心权重在三个角上是可交换的,换两个角的次序不改变分布。
+ */
+function buildMeshSampler(root) {
+  const geoms = [];
+  const walk = (o, mat) => {
+    o.updateMatrix();
+    const m = (o === root) ? new THREE.Matrix4() : mat.clone().multiply(o.matrix);
+    if (o.isMesh && o.geometry) geoms.push([o.geometry, m]);
+    for (const c of o.children) walk(c, m);
+  };
+  walk(root, new THREE.Matrix4());
+  const P = [], N = [], A = [];
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), cr = new THREE.Vector3();
+  const n0 = new THREE.Vector3(), nm = new THREE.Matrix3();
+  for (const [geo, mat] of geoms) {
+    const pos = geo.getAttribute && geo.getAttribute('position');
+    if (!pos) continue;
+    const nor = geo.getAttribute('normal') || null;
+    const idx = geo.index;
+    const count = idx ? idx.count : pos.count;
+    nm.getNormalMatrix(mat);
+    for (let t = 0; t + 2 < count; t += 3) {
+      const corners = [idx ? idx.getX(t) : t, idx ? idx.getX(t + 1) : t + 1,
+                       idx ? idx.getX(t + 2) : t + 2];
+      const p3 = [a, b, c];
+      for (let k = 0; k < 3; k++) {
+        p3[k].fromBufferAttribute(pos, corners[k]).applyMatrix4(mat);
+        p3[k].x = -p3[k].x;
+      }
+      e1.subVectors(b, a); e2.subVectors(c, a);
+      const area = cr.crossVectors(e1, e2).length() * 0.5;
+      for (let k = 0; k < 3; k++) P.push(p3[k].x, p3[k].y, p3[k].z);
+      if (nor) {
+        for (let k = 0; k < 3; k++) {
+          n0.fromBufferAttribute(nor, corners[k]).applyMatrix3(nm);
+          n0.x = -n0.x;
+          if (n0.lengthSq() > 1e-30) n0.normalize();
+          N.push(n0.x, n0.y, n0.z);
+        }
+      } else {
+        // 网格没带法线时只剩面法线可用。产物里的网格都带法线,这一支没有被数据走到。
+        cr.normalize();
+        for (let k = 0; k < 3; k++) N.push(cr.x, cr.y, cr.z);
+      }
+      A.push(area);
+    }
+  }
+  if (!A.length) return null;
+  const cum = new Float64Array(A.length + 1);
+  for (let i = 0; i < A.length; i++) cum[i + 1] = cum[i] + A[i];
+  const total = cum[A.length];
+  if (!(total > 0)) return null;           // 整张网格面积为零:按面积加权采不出东西
+  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < P.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      min[k] = Math.min(min[k], P[i + k]);
+      max[k] = Math.max(max[k], P[i + k]);
+    }
+  }
+  return { count: A.length, P: Float32Array.from(P), N: Float32Array.from(N),
+           cum, total, min, max };
+}
+
+/** 按节点缓存的三角表。整张网格只整理一次,多个发射器共用同一张。 */
+export function meshSamplerFor(root) {
+  if (!root) return null;
+  if (_meshSamplers.has(root)) return _meshSamplers.get(root);
+  let s = null;
+  try { s = buildMeshSampler(root); } catch (e) { s = null; }
+  _meshSamplers.set(root, s);
+  return s;
+}
+
+/** 在三角表上采一点与一条法线(律见本节开头的三条)。 */
+function sampleMeshSurface(s, pos, dir) {
+  // 面积加权:目标是「累计面积」轴上的一个均匀点,取第一个够到它的三角。
+  const target = Math.random() * s.total;
+  let lo = 0, hi = s.count - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (s.cum[mid + 1] >= target) hi = mid; else lo = mid + 1;
+  }
+  let u = Math.random(), v = Math.random();
+  if (u + v > 1) { u = 1 - u; v = 1 - v; }
+  const w = 1 - u - v, k = lo * 9;
+  const P = s.P, N = s.N;
+  pos.set(u * P[k] + v * P[k + 3] + w * P[k + 6],
+          u * P[k + 1] + v * P[k + 4] + w * P[k + 7],
+          u * P[k + 2] + v * P[k + 5] + w * P[k + 8]);
+  dir.set(u * N[k] + v * N[k + 3] + w * N[k + 6],
+          u * N[k + 1] + v * N[k + 4] + w * N[k + 7],
+          u * N[k + 2] + v * N[k + 5] + w * N[k + 8]);
+}
+
+/** 形状自身的变换:pos' = R·(S·p) + t、dir' = R·(S·n)。缩放先于旋转,Euler 合成序 Z-X-Y。 */
+function applyShapeTransform(shape, pos, dir) {
+  if (shape?.scale) {
+    const s = vec3(shape.scale);
+    pos.multiply(s); if (dir) dir.multiply(s);
+  }
+  if (shape?.rotation) {
+    const e = new THREE.Euler(num(shape.rotation[0]) * DEG, num(shape.rotation[1]) * DEG,
+                              num(shape.rotation[2]) * DEG, 'YXZ');
+    pos.applyEuler(e); if (dir) dir.applyEuler(e);
+  }
+  if (shape?.position) pos.add(vec3(shape.position));
+}
+
 /**
  * Sample a position and direction in shape-local space, then apply the
  * shape's own transform:
@@ -382,13 +541,18 @@ function sampleShapeRadius(radius, thickness, power) {
  * conventions.
  *
  * 返回 null = 这个形状没有发射公式(见 `shapeSupport`),调用方**不要**代它编一个点。
+ *
+ * `mesh` 是「从网格表面发射」用的三角表,由发射器在装配时从**已经预载好的**网格备好
+ * (见 `meshSamplerFor`)。发射是同步的而网格是异步读的,所以这里只用现成的,不去取;
+ * 该有而没有就整条不发(返回 null),由调用方计数。
  */
-export function emitFrom(shape) {
+export function emitFrom(shape, mesh = null) {
   if (shapeSupport(shape) === 'unimplemented' && !EMIT_FAULT.pointEmit) {
     warnOnce(`shape:${shape.type}`,
       `发射形状 ${shape.type} 没有发射公式,该发射器停发(不退化成点发射:那会把粒子堆在节点原点)`);
     return null;
   }
+  if (shape?.type === 'Mesh' && !mesh && !EMIT_FAULT.pointEmit) return null;
   const pos = new THREE.Vector3(), dir = new THREE.Vector3(0, 0, 1);
   const radius = num(shape?.radius), arc = num(shape?.arc, 360) * DEG;
   switch (shape?.type) {
@@ -476,6 +640,14 @@ export function emitFrom(shape) {
       pos.set((Math.random() * 2 - 1) * radius, 0, 0);
       dir.set(0, 1, 0);
       break;
+    case 'Mesh': {
+      // 面积加权选三角 → 三角内均匀取点 → 重心插值顶点法线当方向 → 沿法线推开
+      // `meshNormalOffset`。三条律见本节开头。
+      sampleMeshSurface(mesh, pos, dir);
+      const off = num(shape.meshNormalOffset);
+      if (off) pos.addScaledVector(dir, off);
+      break;
+    }
     case 'BoxEdge': {
       // The 12 edges of the unit cube [-0.5, 0.5]^3: pick one axis to vary
       // continuously, snap the other two to the edge ends. Actual size comes
@@ -491,16 +663,7 @@ export function emitFrom(shape) {
       // 按点发射放了进来。两者都不喊 —— 前者不是错,后者是判据自己要红的那一路。
       break;
   }
-  if (shape?.scale) {
-    const s = vec3(shape.scale);
-    pos.multiply(s); dir.multiply(s);
-  }
-  if (shape?.rotation) {
-    const e = new THREE.Euler(num(shape.rotation[0]) * DEG, num(shape.rotation[1]) * DEG,
-                              num(shape.rotation[2]) * DEG, 'YXZ');
-    pos.applyEuler(e); dir.applyEuler(e);
-  }
-  if (shape?.position) pos.add(vec3(shape.position));
+  applyShapeTransform(shape, pos, dir);
   // A zero scale axis can collapse the direction to a zero vector. The engine's
   // normalize has one fallback for that case and it is local +Z, not "no
   // velocity" — reached by real data (shapes whose scale.z is 0).
@@ -560,13 +723,19 @@ class Emitter {
     const vertex = source
       ? this._customValue(source.vector, source.component, 0, 0.5) : 0;
     const rate = Math.min(1, Math.max(0, vertex + num(floats._TintBlendRate, 0)));
-    this.tintApplied = (this.tintApplied || 0) + 1;
     const mul = [0, 1, 2].map((i) => 1 + rate * (num(colour[i], 1) - 1));
-    // 有些染色是高动态的:乘数远大于 1,原版靠色调映射与泛光把它收回可显示范围。
-    // 这个示例是刻意的 gamma 直通管线,没有那一步,所以乘积超过 1 的部分会被削平。
-    // 算术照原样做 —— 削平是**缺色调映射**那条律的后果,记在它头上并数出来,不在
-    // 这里拿一个补偿系数去掩盖:那会让两条律都变得说不清。
-    if (mul.some((v) => v > 1)) this.tintClipped = (this.tintClipped || 0) + 1;
+    // 有些染色是高动态的:乘数可以到几十甚至几百,原版靠色调映射与泛光把它收回可显示
+    // 范围,亮而不糊。这个示例是刻意的 gamma 直通管线,**没有那一步**,乘上去的结果只会
+    // 在帧缓冲里削平成纯白 —— 流星就是这样从一道光变成一块白方片的。
+    //
+    // 所以这一档**不画染色**并数出来。理由不是「算术不对」,算术是对的;是这条管线表示
+    // 不了它的结果,硬乘出来的画面比不乘更远离原版,而且看着像有东西。缺的是色调映射
+    // 那条律,记在它头上;真要还原这一档,得先有那条律,不是在这里塞一个补偿系数。
+    if (mul.some((v) => v > 1)) {
+      this.tintHdrUnrepresented = (this.tintHdrUnrepresented || 0) + 1;
+      return null;
+    }
+    this.tintApplied = (this.tintApplied || 0) + 1;
     return new THREE.Color(mul[0], mul[1], mul[2]);
   }
 
@@ -693,13 +862,26 @@ class Emitter {
     this.theoretical = emissionPlan(this.system);
     this.shapeType = (this.system.shape && this.system.shape.type) || null;
     this.shapeSupport = shapeSupport(this.system.shape);
+    this.shapeGap = this.shapeType === 'Mesh' ? meshShapeGap(this.system.shape) : null;
+    // 「从网格表面发射」要的三角表。**同步**从已经预载好的网格建 —— glb 是异步读的,
+    // 而发射器是同步装配的,所以预载必须在挂载之前做完(见环境层的 loadPhenomenon)。
+    // 建不出来就整条停发并计数:不拿别的网格顶替,也不退化成点发射。
+    this.meshShape = null;
+    if (this.shapeSupport === 'ok' && this.shapeType === 'Mesh') {
+      const ref = this.system.shape.meshes[0];
+      const src = this.meshFor(ref.file, ref.node);
+      this.meshShape = meshSamplerFor(src);
+      if (!this.meshShape) this.shapeGap = src ? 'meshEmpty' : 'meshMissing';
+    }
     // 形状没建模 = 这一条**整个不发射**(理由见 shapeSupport)。不是静默的:
     // `placement()` 与消费方的面板/自检逐个把它数出来。
-    this.suppressed = this.shapeSupport === 'unimplemented' && !EMIT_FAULT.pointEmit;
+    this.suppressed = (this.shapeSupport === 'unimplemented'
+      || (this.shapeType === 'Mesh' && !this.meshShape)) && !EMIT_FAULT.pointEmit;
     if (this.suppressed) {
       // 停发的发射器不会再走到 spawn,所以警告在这里喊(每种形状一次);计数在 placement()。
-      warnOnce(`shape:${this.shapeType}`,
-        `发射形状 ${this.shapeType} 没有发射公式,用它的发射器停发(不退化成点发射:那会把粒子堆在节点原点)`);
+      warnOnce(`shape:${this.shapeType}:${this.shapeGap || ''}`,
+        `发射形状 ${this.shapeType}${this.shapeGap ? `(${this.shapeGap})` : ''} 没有发射公式,`
+        + '用它的发射器停发(不退化成点发射:那会把粒子堆在节点原点)');
     }
     // 形状自身的原点在**节点局部空间**里的位置(= shape.position,再按 spawn 的同一条
     // x 换手镜一次)。判据的参照点是它,不是节点原点:`shape.position` 是数据明写的偏移
@@ -805,7 +987,8 @@ class Emitter {
   }
 
   _emptyBirth() {
-    return { n: 0, radialMax: 0, horizMax: 0, radialSum: 0, yMin: Infinity, yMax: -Infinity, ySum: 0 };
+    return { n: 0, radialMax: 0, horizMax: 0, radialSum: 0, yMin: Infinity, yMax: -Infinity, ySum: 0,
+             xMin: Infinity, xMax: -Infinity, zMin: Infinity, zMax: -Infinity };
   }
 
   /**
@@ -827,6 +1010,10 @@ class Emitter {
     b.radialMax = Math.max(b.radialMax, radial);
     b.radialSum += radial;
     b.horizMax = Math.max(b.horizMax, Math.hypot(dx, dz));
+    // 水平两轴各自的**区间**(相对形状原点)。只有最大半径分不开「铺满一片」与
+    // 「绕着边缘一圈」,更分不开「铺对了地方」与「沿 x 镜像铺在对面」—— 区间能。
+    b.xMin = Math.min(b.xMin, dx); b.xMax = Math.max(b.xMax, dx);
+    b.zMin = Math.min(b.zMin, dz); b.zMax = Math.max(b.zMax, dz);
     b.yMin = Math.min(b.yMin, _birthP.y);
     b.yMax = Math.max(b.yMax, _birthP.y);
     b.ySum += _birthP.y;
@@ -877,6 +1064,41 @@ class Emitter {
       } : null,
       nodeY,
       centerY,          // 形状原点的世界高度(= 节点世界变换作用在 shape.position 上)
+      shapeGap: this.shapeGap || null,
+      // 出生点水平两轴的区间(米,相对形状原点)。判据拿它与 `meshSpan` 比。
+      birthSpan: b.n ? {
+        x: [+b.xMin.toFixed(4), +b.xMax.toFixed(4)],
+        z: [+b.zMin.toFixed(4), +b.zMax.toFixed(4)],
+      } : null,
+      // 从网格表面发射时,这张网格自己的水平包围盒 —— 同一条变换链算出来,同一个参照点。
+      meshSpan: this._meshSpan(),
+    };
+  }
+
+  /**
+   * 「从网格表面发射」那张网格的包围盒,**走与出生点同一条变换链**(形状自身变换 →
+   * x 换手 → 节点世界变换),再减掉形状原点的世界位置 —— 与 `_recordBirth` 的 dx/dz
+   * 同一个参照。改 `spawn` 里那条链就要一起改这里。
+   * 出生点铺没铺在网格上,比的就是这两个区间。
+   */
+  _meshSpan() {
+    const s = this.meshShape;
+    if (!s || !this.node) return null;
+    this.node.updateWorldMatrix(true, false);
+    const c = new THREE.Vector3().copy(this.shapeCenter).applyMatrix4(this.node.matrixWorld);
+    const p = new THREE.Vector3();
+    let xMin = Infinity, xMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+    for (let i = 0; i < 8; i++) {
+      p.set(i & 1 ? s.max[0] : s.min[0], i & 2 ? s.max[1] : s.min[1], i & 4 ? s.max[2] : s.min[2]);
+      applyShapeTransform(this.system.shape, p, null);
+      p.x = -p.x;
+      p.applyMatrix4(this.node.matrixWorld);
+      xMin = Math.min(xMin, p.x - c.x); xMax = Math.max(xMax, p.x - c.x);
+      zMin = Math.min(zMin, p.z - c.z); zMax = Math.max(zMax, p.z - c.z);
+    }
+    return {
+      x: [+xMin.toFixed(4), +xMax.toFixed(4)], z: [+zMin.toFixed(4), +zMax.toFixed(4)],
+      triangles: s.count, area: +s.total.toFixed(3),
     };
   }
 
@@ -889,7 +1111,7 @@ class Emitter {
   spawn(origin = null) {
     const s = this.system, start = s.start || {};
     const r = Math.random();
-    const sampled = emitFrom(s.shape);
+    const sampled = emitFrom(s.shape, this.meshShape);
     if (!sampled) return;                // 形状没建模:这一发不发(计数见 this.suppressed)
     const { pos, dir } = sampled;
     pos.x = -pos.x; dir.x = -dir.x;      // 同一节点内容的 M 换手(节点链共轭之外的另一半)
@@ -1548,7 +1770,8 @@ export class EmoticonView {
       customMisses: this.emitters.reduce((n, e) => n + (e.customMisses || 0), 0),
       tintApplied: this.emitters.reduce((n, e) => n + (e.tintApplied || 0), 0),
       tintRefused: this.emitters.reduce((n, e) => n + (e.tintRefused || 0), 0),
-      tintClipped: this.emitters.reduce((n, e) => n + (e.tintClipped || 0), 0),
+      tintHdrUnrepresented: this.emitters.reduce(
+        (n, e) => n + (e.tintHdrUnrepresented || 0), 0),
       drawFaults: this.emitters.reduce((n, e) => n + (e.drawFaults || 0), 0),
       // 模块自己报的数,按模块名归并到一处。判据要读的就是这里 —— 没有它,
       // 模块跑没跑、跑出什么数,外面一个字也看不到,「绿」就无从谈起。

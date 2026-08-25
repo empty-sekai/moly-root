@@ -20,12 +20,13 @@
 
 import * as THREE from './three.module.min.js';
 import * as Shading from './shading.js';
-import { createParticleEffect, makeSharedTextureLoader, makeSharedMeshLoader, EMIT_SHAPES } from './emoticon.js';
+import { createParticleEffect, makeSharedTextureLoader, makeSharedMeshLoader, shapeSupport } from './emoticon.js';
 import {
   ENV_GLOBALS, ENV_GLOBAL_META, ENV_FOG_CHUNK, ENV_WHITE_TEX, ENV_BLACK_TEX,
   withEnvGlobals, envSet, envConsumers,
 } from './envglobals.js';
 import { PostChain, flattenProfile, blendProfiles } from './envpost.js';
+import { GLTFLoader } from './GLTFLoader.js';
 
 export const CROSS_FADE_SECONDS = 0.25;   // 交叉淡化时长(截图式瞬切传 0)
 export const RAMP_WIDTH = 32;             // 渐变纹理宽度(契约:32x1)
@@ -100,15 +101,15 @@ export function blendLight(a, b, t) {
 // 九项在本示例里各自接到哪里。`wired` 为假的项**没有消费方**,面板与 status() 照实列出。
 // 这张表是接线的唯一出处:改了接法就改这里,不要在两处各写一份。
 export const LIGHT_WIRING = [
-  { key: 'dir', label: '方向光向量', wired: true, to: 'toon 着色 lightDir + 天空/地面/落影' },
+  { key: 'dir', label: '方向光向量', wired: true, to: 'toon 着色 lightDir + 天空/站点法线直射/落影' },
   { key: 'charLightColor', label: '角色方向光色', wired: true, to: 'toon 着色 lightColor' },
   { key: 'charSkinShade', label: '角色皮肤影色', wired: true, to: 'toon 着色 skinShade' },
   { key: 'charBodyShade', label: '角色身体影色', wired: true, to: 'toon 着色 bodyShade' },
-  { key: 'phenLightColor', label: '现象方向光色', wired: true, to: '地面着色的直射项' },
-  { key: 'phenShadeColor', label: '现象影色', wired: true, to: '地面着色的暗部项' },
-  { key: 'dropShadowColor1', label: '落影色 1', wired: true, to: '地面落影(角色投影盘)' },
-  { key: 'dropShadowColor2', label: '落影色 2', wired: true, to: '地面落影(角色投影盘)' },
-  { key: 'dropShadowEdgeSmoothness', label: '落影边缘平滑', wired: true, to: '地面落影的边缘过渡' },
+  { key: 'phenLightColor', label: '现象方向光色', wired: true, to: '站点材质的直射项' },
+  { key: 'phenShadeColor', label: '现象影色', wired: true, to: '站点材质的暗部项' },
+  { key: 'dropShadowColor1', label: '落影色 1', wired: true, to: '站点表面的落影(角色投影盘)' },
+  { key: 'dropShadowColor2', label: '落影色 2', wired: true, to: '站点表面的落影(角色投影盘)' },
+  { key: 'dropShadowEdgeSmoothness', label: '落影边缘平滑', wired: true, to: '站点表面落影的边缘过渡' },
 ];
 
 // ---- 天空 -----------------------------------------------------------------
@@ -321,26 +322,84 @@ class SkyDome {
   }
 }
 
-// ---- 地面 -----------------------------------------------------------------
+// ---- 站点 -----------------------------------------------------------------
 //
-// 地面是本示例自己加的一块承影面(真站点地形不在本包里)。它的存在是为了让四组现象量**真的有
-// 消费方**:现象方向光色与现象影色、云影四件套、落影三项、以及雾。写着色器时逐项对号,
-// 没有对号的量不在这里假装被用到。
+// 承影面是**真站点**:几何从站点产物装载(`site/index.json` → 场景包的 glb),本示例不再自造
+// 平面。四组现象量因此落在真地形上,逐项对号见 `SITE_FRAG`;没有对号的量不在这里假装被用到。
+//
+// 一、装什么
+//   `site/index.json` 里 `scenes.<键>.geometry` 是场景包的 glb(清单里所有路径都相对清单自己)。
+//   一个 glb 里一个 prefab 一个 glTF scene,**`defaultScene` 才是游戏摆出来的那个**
+//   (`semantics.geometry` 原话),所以只取 glTF 自己的默认场景,不遍历全部 scene ——
+//   遍历会把同一份网格摆好几遍。场景文档的 `inactiveNodes` / `disabledRenderers` 是**原版
+//   根本不画**的节点,照它隐藏:`semantics.inactiveNodes` 说列出来就是为了让消费方
+//   「not draw what the game never shows」。隐藏≠删除,它们照样在几何计数里。
+//
+// 二、室内/室外怎么判(不按名字猜)
+//   主判据 —— 场景文档里 `env` 槽自带的角色原话:"environment volume anchor; empty in every
+//   outdoor package and holding the room volume indoors"。槽里有节点或碰撞体 = 室内。
+//   清单级判据 —— 建面板下拉框时用,不必读逐场景文档(最大的一份 6 MB):`families.kit` 只有
+//   一个包,那就是室内套件;场景记录的 `declaredDependencies` 点名它的就是房间站点。产物自己
+//   的话见 `semantics.indoor`("the three room sites have no scene geometry: their rooms are
+//   assembled at runtime from the kit")与 `indoor.assembly`。依赖名是路径式样、包名是下划线
+//   式样,规范化到同一形状再比。
+//   两条在当前内容里同解(室内 = first_floor / my_room,其余六个室外)。不一致时**以主判据
+//   为准**,分歧记进 `status().site.indoorDisagree`,不静默取一条。
+//
+// 三、室内装什么
+//   房间站点的场景包里**没有墙也没有地板**(`indoor.assembly` 原话),房间是「套件的网格由某
+//   一级扩张模块摆出来 + 该级的可走面」。所以室内在场景包之外再挂一份
+//   `indoor.levels.<级>.module`,按 `module.prefabs[].root` **点名**取那几个 glTF scene
+//   (不是「把 glb 里的 scene 全挂上」)。站点等级是 master 表的字段,本仓没有 master ——
+//   `sites.json` 的 `missing` 写明「no master directory supplied」,所以取产物里最高的一级
+//   (`semantics.levels`:房间站点到 5 级封顶),并如实标注这是**假定**而不是读出来的。
+//
+// 四、站点世界位置
+//   `sitePosition` 同样只在 master 表里(`placement` 指到的 `sites.json` 里 `sites` 是空数组),
+//   所以本示例把当前站点摆在原点。一次只看一个站点,这不改变站点内部的相对关系。
 
-const GROUND_VERT = /* glsl */`
+// Unity 侧混合因子枚举 → three 的因子。材质 extras 里 `blendFactors` 就是这两个整数
+// (当前内容只出现两对:5/10 = 常规 alpha,5/1 = 叠加),按枚举翻译而不是按 `blendMode`
+// 的字符串猜 —— 字符串是给人看的,数对才是律。
+const UNITY_BLEND_FACTOR = {
+  0: THREE.ZeroFactor, 1: THREE.OneFactor, 2: THREE.DstColorFactor, 3: THREE.SrcColorFactor,
+  4: THREE.OneMinusDstColorFactor, 5: THREE.SrcAlphaFactor, 6: THREE.OneMinusSrcColorFactor,
+  7: THREE.DstAlphaFactor, 8: THREE.OneMinusDstAlphaFactor, 9: THREE.SrcAlphaSaturateFactor,
+  10: THREE.OneMinusSrcAlphaFactor,
+};
+
+/** 依赖名(`a/b/c`)与包名(`a__b__c`)化到同一形状再比。 */
+function pkgKey(s) { return String(s || '').replace(/[/_]+/g, '/').toLowerCase(); }
+
+// 落影投射体:所有站点材质**共享同一个 uniform 对象**(与 envglobals 同一条规矩),
+// 写一次就等于推给了全部站点材质。
+const SITE_SUBJECT = {
+  envSubjectPos: { value: new THREE.Vector3(0, 0.6, 0) },
+  envSubjectRadius: { value: 0.55 },
+};
+
+const SITE_VERT = /* glsl */`
+uniform mat3 siteUvTransform;
 varying vec3 vWorldPos;
+varying vec3 vWorldNormal;
+varying vec2 vSiteUv;
 varying float vFogRamp;
 ${ENV_FOG_CHUNK}
 void main() {
   vec4 wp = modelMatrix * vec4(position, 1.0);
   vWorldPos = wp.xyz;
+  // 世界法线。非均匀缩放下这不是严格的法线矩阵(GLSL ES 1.0 没有 inverse()),
+  // 站点节点的缩放基本是均匀的,所以这条按近似记着,不假装它精确。
+  vWorldNormal = mat3(modelMatrix) * normal;
+  // KHR_texture_transform 的 UV 变换在自定义着色器里不会被自动施加,手动乘。
+  vSiteUv = (siteUvTransform * vec3(uv, 1.0)).xy;
   // 与角色着色器同一条:雾的能见度斜坡逐顶点算,片元只吃插值结果。
   vFogRamp = envFogRamp(-(viewMatrix * wp).z);
   gl_Position = projectionMatrix * viewMatrix * wp;
 }
 `;
 
-const GROUND_FRAG = /* glsl */`
+const SITE_FRAG = /* glsl */`
 uniform vec3 envLightDir;
 uniform vec4 envPhenLightColor;
 uniform vec4 envPhenShadeColor;
@@ -356,14 +415,26 @@ uniform float envDropShadowEdgeSmoothness;
 uniform float envTime;
 uniform vec3 envSubjectPos;      // 角色位置(本示例的落影投射体)
 uniform float envSubjectRadius;
-uniform vec3 envBaseColor;
+uniform sampler2D siteMap;       // 站点材质的基色贴图(glTF baseColorTexture)
+uniform float siteHasMap;
+uniform vec4 siteBaseColor;      // glTF baseColorFactor
+uniform float siteAlphaCutoff;   // glTF MASK 的阈值;BLEND/OPAQUE 是 0
 varying vec3 vWorldPos;
+varying vec3 vWorldNormal;
+varying vec2 vSiteUv;
 varying float vFogRamp;
 ${ENV_FOG_CHUNK}
 void main() {
-  // 直射项:平面法线恒为 +Y,所以直射强度就是光向的高度分量。
-  float ndl = clamp(envLightDir.y, 0.0, 1.0);
-  vec3 lit = envBaseColor * mix(envPhenShadeColor.rgb, envPhenLightColor.rgb, ndl);
+  vec4 base = siteBaseColor;
+  if (siteHasMap > 0.5) base *= texture2D(siteMap, vSiteUv);
+  // MASK:自定义着色器没有内建的 alphaTest,阈值在这里自己丢弃。
+  if (siteAlphaCutoff > 0.0 && base.a < siteAlphaCutoff) discard;
+
+  // 直射项:自制平面时法线恒为 +Y,所以那里只取光向的高度分量;真站点有真法线,
+  // 这里就是法线与光向的夹角。
+  vec3 N = normalize(vWorldNormal);
+  float ndl = clamp(dot(N, normalize(envLightDir)), 0.0, 1.0);
+  vec3 lit = base.rgb * mix(envPhenShadeColor.rgb, envPhenLightColor.rgb, ndl);
 
   // 云影:两张贴图同时在位(交叉淡化),采样用**尺寸的倒数**,滚动是速度向量乘标量。
   vec2 uv = vWorldPos.xz * envCloudShadowScale + envCloudScrollSpeed * envTime;
@@ -372,46 +443,354 @@ void main() {
   float cloud = mix(ca, cb, clamp(envCloudFade, 0.0, 1.0));
   lit *= mix(1.0, cloud, clamp(envCloudShadowOpacity, 0.0, 1.0));
 
-  // 落影:两色 + 边缘平滑。角色沿光向投到地面,近似成一个椭圆盘。
+  // 落影:两色 + 边缘平滑。角色沿光向投到**本片元所在高度**的水平面(自制平面时那是 y=0)。
+  // 两个权重是本示例的近似,不是产物里的律:朝上分量(不加它,墙面与树叶上也会糊一块影子)
+  // 与「只投在角色下方」。
+  float dy = envSubjectPos.y - vWorldPos.y;
   vec2 off = envLightDir.y > 1e-3
-    ? envSubjectPos.xz - envLightDir.xz * (envSubjectPos.y / max(envLightDir.y, 1e-3))
+    ? envSubjectPos.xz - envLightDir.xz * (dy / max(envLightDir.y, 1e-3))
     : envSubjectPos.xz;
   float d = length(vWorldPos.xz - off) / max(envSubjectRadius, 1e-3);
   float edge = clamp(envDropShadowEdgeSmoothness, 0.02, 4.0);
   float core = 1.0 - smoothstep(1.0 - edge, 1.0, clamp(d, 0.0, 1.0));
   vec3 shadowCol = mix(envDropShadowColor1.rgb, envDropShadowColor2.rgb, clamp(d, 0.0, 1.0));
-  float shadowA = mix(envDropShadowColor1.a, envDropShadowColor2.a, clamp(d, 0.0, 1.0)) * core;
+  float shadowA = mix(envDropShadowColor1.a, envDropShadowColor2.a, clamp(d, 0.0, 1.0))
+                * core * clamp(N.y, 0.0, 1.0) * step(0.0, dy);
   lit = mix(lit, shadowCol, clamp(shadowA, 0.0, 1.0));
 
-  gl_FragColor = vec4(envApplyFogRamp(lit, vFogRamp, vWorldPos.y), 1.0);
+  gl_FragColor = vec4(envApplyFogRamp(lit, vFogRamp, vWorldPos.y), base.a);
 }
 `;
 
-class Ground {
-  constructor() {
-    this.material = new THREE.ShaderMaterial({
-      name: 'env-ground',
-      uniforms: withEnvGlobals({
-        envSubjectPos: { value: new THREE.Vector3(0, 0.6, 0) },
-        envSubjectRadius: { value: 0.55 },
-        envBaseColor: { value: new THREE.Vector3(0.62, 0.66, 0.6) },
-      }),
-      vertexShader: GROUND_VERT,
-      fragmentShader: GROUND_FRAG,
-      side: THREE.FrontSide,
-    });
-    const g = new THREE.PlaneGeometry(120, 120, 1, 1);
-    g.rotateX(-Math.PI / 2);
-    this.mesh = new THREE.Mesh(g, this.material);
-    this.mesh.name = 'env_ground';
-    this.mesh.position.y = -0.002;     // 让 viewer 自带的地格网仍画在上面,不与地面 z-fight
-    this.mesh.renderOrder = -900;
-    this.mesh.frustumCulled = false;
+/**
+ * 站点几何 + 现象着色。装载的 glTF 材质在这里换成上面那份着色器,**透明度照原样带过来**:
+ * 混合模式来自材质 extras 的 `blendFactors`(Unity 枚举),遮罩阈值来自 glTF 的 alphaCutoff,
+ * 双面来自 glTF 的 doubleSided。贴图按本示例的 gamma 直通规矩置 `NoColorSpace`
+ * (与角色贴图同一条),不走 sRGB 解码。
+ */
+class SiteView {
+  /** @param opts `{base}` —— `base` 是 `site/` 的父目录 */
+  constructor(opts) {
+    this.base = String(opts.base || '.').replace(/\/+$/, '');
+    this.root = `${this.base}/site`;
+    this.index = null;
+    this.loader = new GLTFLoader();
+    this.group = new THREE.Group();
+    this.group.name = 'env_site';
+    this.key = null;              // 当前挂着的场景键
+    this.mounted = null;          // 当前挂载的读数(status 直接报它)
+    this.mounting = null;         // 正在进行的挂载 Promise(判据可以等它)
+    this.materials = [];
+    this.errors = [];
   }
+
+  async load(fetchJson) {
+    const idx = await fetchJson(`${this.root}/index.json`);
+    if (!idx || !idx.scenes) { this.errors.push('site/index.json 读不到或没有 scenes 段'); return false; }
+    this.index = idx;
+    return true;
+  }
+
+  /** 室内套件的包名(`families.kit`)。产物里只有一个,没有就是判据缺了输入。 */
+  get kitPackage() {
+    const kit = ((this.index || {}).families || {}).kit || [];
+    return kit.length ? kit[0].package : null;
+  }
+
+  /**
+   * 清单级的室内判据:场景的 `declaredDependencies` 点名了室内套件包。
+   * 返回 `{indoor, by}`;套件包读不到时 `by` 说明输入缺失,而不是默认判成室外。
+   */
+  indoorFromIndex(key) {
+    const rec = ((this.index || {}).scenes || {})[key];
+    const kit = this.kitPackage;
+    if (!rec || !kit) return { indoor: false, by: '室内套件包或场景记录读不到:判据无输入' };
+    const want = pkgKey(kit);
+    const hit = (rec.declaredDependencies || []).some((d) => pkgKey(d) === want);
+    // 佐证:`semantics.footsteps` 说带 `_footse` 的碰撞面属于 "each outdoor site",
+    // 所以没有 footstepSurface 这一角色的场景不是室外站点。
+    const noFootstep = !(rec.collision || []).some((c) => c && c.role === 'footstepSurface');
+    return {
+      indoor: hit,
+      footstepAgrees: noFootstep === hit,
+      by: hit ? `declaredDependencies 点名室内套件 ${kit}` : '未点名室内套件',
+    };
+  }
+
+  /** 面板下拉框的名单:键、包、室内与否,全部从清单读出来。 */
+  scenes() {
+    const all = (this.index || {}).scenes || {};
+    return Object.keys(all).sort().map((key) => {
+      const f = this.indoorFromIndex(key);
+      return {
+        key, indoor: f.indoor, indoorBy: f.by, footstepAgrees: f.footstepAgrees,
+        package: all[key].package, declaredTriangles: all[key].triangles,
+      };
+    });
+  }
+
+  /**
+   * 一个场景要装哪几份 glb、每份取哪几个 glTF scene。`scenes` 为 null = 用 glTF 自己的
+   * 默认场景(那是游戏摆出来的那个);给了名单就按名字点名取。
+   */
+  _plan(key, indoor) {
+    const rec = ((this.index || {}).scenes || {})[key];
+    const out = [];
+    if (!rec) return out;
+    if (rec.geometry) out.push({ file: rec.geometry, scenes: null, why: '场景包的默认场景' });
+    if (!indoor) return out;
+    const levels = ((this.index || {}).indoor || {}).levels || {};
+    const lv = Object.keys(levels).sort().pop();
+    const mod = lv ? (levels[lv] || {}).module : null;
+    const fam = ((this.index || {}).families || {}).roomModule || [];
+    const hit = mod ? fam.find((f) => f.package === mod.package) : null;
+    if (!hit || !hit.geometry) {
+      this.errors.push(`${key}: 室内扩张模块的几何取不到(级 ${lv || '?'})`);
+      return out;
+    }
+    out.push({
+      file: hit.geometry,
+      scenes: (mod.prefabs || []).map((p) => p.root).filter(Boolean),
+      why: `室内扩张模块 lv_${lv}(等级来自 master 表,本仓没有 master:取产物里最高的一级)`,
+      level: lv,
+    });
+    return out;
+  }
+
+  /** 场景文档(逐场景一份,最大的一份 6 MB,所以只在挂载当前场景时读)。 */
+  async _document(key, fetchJson) {
+    const rec = ((this.index || {}).scenes || {})[key];
+    if (!rec || !rec.document) return null;
+    return fetchJson(`${this.root}/${rec.document}`);
+  }
+
+  /** 挂一个场景。同一个键重复挂不做事;换键先卸再挂。 */
+  async mount(key, fetchJson) {
+    if (this.key === key && this.mounted) return this.mounted;
+    this.mounting = this._mount(key, fetchJson);
+    try { return await this.mounting; } finally { this.mounting = null; }
+  }
+
+  async _mount(key, fetchJson) {
+    this.unmount();
+    const rec = ((this.index || {}).scenes || {})[key];
+    if (!rec) { this.errors.push(`site/index.json 里没有场景 ${key}`); return null; }
+    const fromIndex = this.indoorFromIndex(key);
+    const doc = await this._document(key, fetchJson);
+    // 主判据:场景文档里 `env` 槽的角色原话说「室外空、室内装着房间体积」。
+    const envSlot = doc ? (doc.slots || []).find((s) => s && s.name === 'env') : null;
+    const fromSlot = envSlot ? (num(envSlot.nodes) > 1 || num(envSlot.colliders) > 0 || num(envSlot.renderers) > 0) : null;
+    const indoor = fromSlot === null ? fromIndex.indoor : fromSlot;
+    const primary = doc ? (doc.roots || []).find((r) => r && r.primary) : null;
+
+    const plan = this._plan(key, indoor);
+    const inactive = doc ? doc.inactiveNodes || [] : [];
+    const disabled = doc ? doc.disabledRenderers || [] : [];
+    const files = [];
+    let meshes = 0, triangles = 0, hiddenMeshes = 0, unresolvedHides = 0;
+    for (const step of plan) {
+      let gltf = null;
+      try {
+        gltf = await this.loader.loadAsync(`${this.root}/${step.file}`);
+      } catch (e) {
+        this.errors.push(`${step.file} → ${String(e).slice(0, 90)}`);
+        files.push({ file: step.file, why: step.why, ok: false, meshes: 0, triangles: 0 });
+        continue;
+      }
+      const picked = step.scenes
+        ? step.scenes.map((n) => (gltf.scenes || []).find((s) => s.name === n)).filter(Boolean)
+        : [gltf.scene].filter(Boolean);
+      if (step.scenes && picked.length !== step.scenes.length) {
+        this.errors.push(`${step.file}: 点名的 ${step.scenes.length} 个 scene 只取到 ${picked.length} 个`);
+      }
+      let m = 0, t = 0, h = 0;
+      for (const root of picked) {
+        // `inactiveNodes` 的路径相对**主根节点**,而 glTF scene 的孩子才是那个根节点。
+        if (!step.scenes) unresolvedHides += this._hide(root, inactive, disabled);
+        const c = this._convert(root);
+        m += c.meshes; t += c.triangles; h += c.hidden;
+        this.group.add(root);
+      }
+      meshes += m; triangles += t; hiddenMeshes += h;
+      files.push({ file: step.file, why: step.why, ok: true, scenes: picked.map((s) => s.name), meshes: m, triangles: t });
+    }
+
+    this.key = key;
+    this.mounted = {
+      key,
+      indoor,
+      indoorBy: fromSlot === null
+        ? `场景文档读不到,落到清单级判据(${fromIndex.by})`
+        : `场景文档 env 槽${fromSlot ? '有' : '空'}内容 —— 槽角色原话:室外空、室内装房间体积`,
+      indoorFromIndex: fromIndex.indoor,
+      indoorDisagree: fromSlot !== null && fromSlot !== fromIndex.indoor,
+      footstepAgrees: fromIndex.footstepAgrees,
+      level: (plan.find((p) => p.level) || {}).level || null,
+      files,
+      meshes,
+      triangles,
+      hiddenMeshes,
+      // 文档说不画、但路径指不到节点的条数。这一项不为零 = 画面上多画了这么多处。
+      unresolvedHides,
+      declaredHides: inactive.length + disabled.length,
+      materials: this.materials.length,
+      blend: this.blendCounts,
+      declared: primary
+        ? { root: primary.name, renderers: primary.renderers, vertices: primary.vertices, triangles: primary.triangles }
+        : null,
+      documentRead: !!doc,
+    };
+    return this.mounted;
+  }
+
+  /**
+   * 原版不画的东西照文档关掉。两张表**语义不同**,分开处理:
+   *   `inactiveNodes`     —— 节点自己关着,整条支路都不画;
+   *   `disabledRenderers` —— 只有那个节点上的绘制件关着,子节点照画。three 的 `visible`
+   *                          是沿层级传的,所以只有「本身是网格且没有子节点」的那种关得干净;
+   *                          带子节点的那种关不掉**只关自己**,如实计一笔而不是连子树一起关。
+   * 空路径(当前内容里出现过一条)在文档里指不到任何节点:**不猜**,记一笔跳过 ——
+   * 把它当成主根节点会把整个站点一起关掉。
+   */
+  _hide(root, inactive, disabled) {
+    // glTF scene 的孩子才是那一个主根节点,文档里的路径从主根节点的孩子算起。
+    const base = root.children.length === 1 ? root.children[0] : root;
+    // 装载器把节点名**规范化**过(空白换下划线、几个保留字符删掉),文档里的路径是原名。
+    // 不按同一条规范化去找,带空格的那一层就永远指不到 —— 当前内容里「decoration (1)」
+    // 这一支就是这样,不处理就有一整支该隐藏的节点照画。
+    const norm = (s) => THREE.PropertyBinding.sanitizeNodeName(String(s));
+    const find = (path) => {
+      let node = base;
+      // 路径分隔符是 `/`,而规范化会把 `/` 删掉,所以**先切段再逐段规范化**。
+      for (const seg of String(path).split('/')) {
+        const want = norm(seg);
+        const kids = node.children || [];
+        let hit = kids.filter((c) => c.name === seg || c.name === want);
+        if (!hit.length) {
+          // 装载器还要保证节点名在整份文件里唯一,重名的第二个起被加上 `_N` 后缀。
+          // 先按原名找,找不到才认这个后缀式样 —— 反过来会把真叫 `x_2` 的节点当成 `x`。
+          const re = new RegExp(`^${want.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_\\d+$`);
+          hit = kids.filter((c) => re.test(c.name));
+        }
+        // 同名兄弟节点是有的(装载器给它们加了后缀,原名一样)。取**第一个** —— 与运行时
+        // 按路径查子节点的取法一致:路径本身在这种情况下也只指得到第一个。
+        if (!hit.length) return null;
+        node = hit[0];
+      }
+      return node;
+    };
+    let skipped = 0;
+    for (const path of inactive || []) {
+      if (path === '') { skipped += 1; continue; }
+      const node = find(path);
+      if (node) node.visible = false;
+      else skipped += 1;
+    }
+    for (const path of disabled || []) {
+      if (path === '') { skipped += 1; continue; }
+      const node = find(path);
+      if (node && node.isMesh && !(node.children || []).length) node.visible = false;
+      else skipped += 1;
+    }
+    if (skipped) {
+      this.errors.push(`${root.name || '场景'}: 原版不画的路径有 ${skipped} 条指不到节点,照实跳过`);
+    }
+    return skipped;
+  }
+
+  /** 逐网格换材质并计数。隐藏的网格照样计数 —— 它在场景里,只是不画。 */
+  _convert(root) {
+    let meshes = 0, triangles = 0, hidden = 0;
+    const cache = new Map();
+    root.updateMatrixWorld(true);
+    root.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      meshes += 1;
+      const idx = o.geometry.getIndex();
+      const pos = o.geometry.getAttribute('position');
+      triangles += idx ? idx.count / 3 : (pos ? Math.floor(pos.count / 3) : 0);
+      // 可见性沿祖先链算:整条支路被关掉时,这一格也是不画的。
+      let vis = true;
+      for (let p = o; p; p = p.parent) if (!p.visible) { vis = false; break; }
+      if (!vis) hidden += 1;
+      if (!o.geometry.getAttribute('normal')) o.geometry.computeVertexNormals();
+      const src = Array.isArray(o.material) ? o.material[0] : o.material;
+      if (!cache.has(src)) cache.set(src, this._materialFor(src));
+      o.material = cache.get(src);
+    });
+    return { meshes, triangles, hidden };
+  }
+
+  _materialFor(src) {
+    const map = src && src.map ? src.map : null;
+    if (map) {
+      // gamma 直通:与角色贴图同一条规矩,采样不做 sRGB 解码。
+      map.colorSpace = THREE.NoColorSpace;
+      map.updateMatrix();
+    }
+    const c = src && src.color ? src.color : { r: 1, g: 1, b: 1 };
+    const ud = (src && src.userData) || {};
+    const bf = ud.blendFactors || null;
+    const mat = new THREE.ShaderMaterial({
+      name: `env-site:${(src && src.name) || 'unnamed'}`,
+      uniforms: withEnvGlobals({
+        ...SITE_SUBJECT,
+        siteMap: { value: map || ENV_WHITE_TEX },
+        siteHasMap: { value: map ? 1 : 0 },
+        siteBaseColor: { value: new THREE.Vector4(c.r, c.g, c.b, src ? src.opacity : 1) },
+        siteAlphaCutoff: { value: src ? num(src.alphaTest) : 0 },
+        siteUvTransform: { value: map ? map.matrix : new THREE.Matrix3() },
+      }),
+      vertexShader: SITE_VERT,
+      fragmentShader: SITE_FRAG,
+      side: src ? src.side : THREE.FrontSide,
+      transparent: !!(src && src.transparent),
+      depthWrite: src ? src.depthWrite : true,
+    });
+    if (bf && UNITY_BLEND_FACTOR[bf.src] !== undefined && UNITY_BLEND_FACTOR[bf.dst] !== undefined) {
+      // 混合因子照 extras 给的那一对写,不按 `blendMode` 的字符串猜。
+      mat.blending = THREE.CustomBlending;
+      mat.blendSrc = UNITY_BLEND_FACTOR[bf.src];
+      mat.blendDst = UNITY_BLEND_FACTOR[bf.dst];
+      mat.transparent = true;
+      // 叠加(dst = One)不写深度,否则后面的东西被它挡掉。
+      if (bf.dst === 1) mat.depthWrite = false;
+      this._countBlend(ud.blendMode || `${bf.src}/${bf.dst}`);
+    } else if (bf) {
+      this._countBlend('未知因子对');
+      this.errors.push(`材质 ${(src && src.name) || '?'}: blendFactors ${JSON.stringify(bf)} 不在枚举里`);
+    } else {
+      this._countBlend(mat.transparent ? '混合(无 extras)' : '不透明');
+    }
+    this.materials.push(mat);
+    return mat;
+  }
+
+  _countBlend(kind) {
+    if (!this.blendCounts) this.blendCounts = {};
+    this.blendCounts[kind] = (this.blendCounts[kind] || 0) + 1;
+  }
+
+  unmount() {
+    for (const child of [...this.group.children]) {
+      child.traverse((o) => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
+      this.group.remove(child);
+    }
+    for (const m of this.materials) m.dispose();
+    this.materials = [];
+    this.blendCounts = {};
+    this.key = null;
+    this.mounted = null;
+  }
+
+  setSubject(v3, radius) {
+    SITE_SUBJECT.envSubjectPos.value.copy(v3);
+    if (radius) SITE_SUBJECT.envSubjectRadius.value = radius;
+  }
+
   dispose() {
-    this.mesh.geometry.dispose();
-    this.material.dispose();
-    this.mesh.removeFromParent();
+    this.unmount();
+    this.group.removeFromParent();
   }
 }
 
@@ -426,7 +805,7 @@ class Ground {
 //   `other`  → 名字不符合上面三族的命名式样,**它的挂法不由名字说明**;本示例按站点粒子挂世界,
 //              并在 status().effects 里标出来,不假装它有确定归属。
 //
-// 未建模的发射形状(Donut / Hemisphere / ConeVolume / Mesh / Box 等)在发射器引擎里**整条停发**
+// 未建模的发射形状(Box 等,以及网格没解出来的那几个「从网格表面发射」)在发射器引擎里**整条停发**
 // (不退化成点发射:那会把粒子全堆在发射节点原点上,画面上就是「粒子堆在角色身上」)。
 // 本模块两处都数:装载时按文档数出来(`particles.unmodelledShapes`),挂上之后按活发射器数出来
 // (`particles.suppressed` / `suppressedShapes`,只算当前站点真的挂着的那些)。
@@ -491,30 +870,40 @@ class EffectSet {
 }
 
 /**
- * 一份效果文档里 Mesh 绘制模式引用到的 glb 文件名(去重)。
- * 渲染器上的 `meshes` 是个数组:Mesh 模式最多挂 4 个网格,逐粒子随机选一个。
+ * 一份效果文档里用到网格的两处引用到的 glb 文件名(去重)。**两处都要收**:
+ *   - 渲染器上的 `meshes`:Mesh 绘制模式最多挂 4 个网格,逐粒子随机选一个;
+ *   - 形状上的 `meshes`:从网格表面发射,发射公式要读它的三角。
+ * 漏掉后一处的表现是那些发射器整条停发(取不到网格),而不是报错。
  */
 function meshFilesOf(doc) {
   const out = new Set();
   for (const e of Object.values((doc && doc.effects) || {})) {
     for (const p of e.particles || []) {
-      for (const m of ((p.renderer || {}).meshes) || []) {
-        if (m && m.file) out.add(m.file);
+      const lists = [((p.renderer || {}).meshes) || [],
+                     (((p.system || {}).shape || {}).meshes) || []];
+      for (const list of lists) {
+        for (const m of list) if (m && m.file) out.add(m.file);
       }
     }
   }
   return [...out];
 }
 
-/** 数一份效果文档里用到但发射器引擎没建模的形状。 */export function unmodelledShapes(doc) {
+/**
+ * 数一份效果文档里用到但发射器引擎没建模的形状。判定走发射器引擎的 `shapeSupport`,
+ * **不是**只看形状名在不在表里:有的形状是有条件的(从网格表面发射,网格没解出来的
+ * 那几个照样停发),两处若用不同的判据,装载时数出来的与挂上之后数出来的就对不上。
+ */
+export function unmodelledShapes(doc) {
   const counts = {};
   let noShape = 0, total = 0;
   for (const e of Object.values((doc && doc.effects) || {})) {
     for (const p of e.particles || []) {
       total++;
-      const t = ((p.system || {}).shape || {}).type;
+      const shape = (p.system || {}).shape;
+      const t = (shape || {}).type;
       if (!t) { noShape++; continue; }
-      if (!EMIT_SHAPES.has(t)) counts[t] = (counts[t] || 0) + 1;
+      if (shapeSupport(shape) === 'unimplemented') counts[t] = (counts[t] || 0) + 1;
     }
   }
   return { counts, noShape, total };
@@ -546,21 +935,24 @@ export class Environment {
     this.loaded = new Map();    // 资产名 → { config, ramp, profile, fx, overrides }
     this.enabled = false;
     this.particlesOn = true;
-    this.indoor = false;        // 「室内覆盖」= 用带覆盖的那个站点
-    this.site = 'grasslands';   // 站点粒子挂哪一站
+    this.indoor = false;        // 「室内覆盖」= 用带覆盖的那个站点(现象两级查找的第一级)
+    this.site = 'grasslands';   // 当前站点(几何挂哪一站 + 站点粒子挂哪一站)
     this.overrideSite = null;   // 带覆盖的站点名(从 index 读出,不写死)
+    // 当前站点**是不是室内**。这一项由站点产物判出来(见 SiteView 顶上的注释),
+    // 与上面那个手动开关是两回事:开关选的是「用谁的现象配置」,这一项是「站在哪里」。
+    this.siteIndoor = false;
 
     this.sky = new SkyDome();
-    this.ground = new Ground();
+    this.siteView = new SiteView({ base: this.base });
     this.skyVisible = true;
-    this.groundVisible = true;
+    this.siteVisible = true;
     this.group = new THREE.Group();
     this.group.name = 'env_root';
     this.fxWorld = new THREE.Group();
     this.fxWorld.name = 'env_fx_world';
     this.fxCamera = new THREE.Group();
     this.fxCamera.name = 'env_fx_camera';
-    this.group.add(this.sky.mesh, this.ground.mesh, this.fxWorld);
+    this.group.add(this.sky.mesh, this.siteView.group, this.fxWorld);
     this.camera.add(this.fxCamera);
 
     this.post = new PostChain(this.renderer, { blackTexture: ENV_BLACK_TEX });
@@ -599,8 +991,30 @@ export class Environment {
     }
     this.overrideSite = [...sites].sort()[0] || null;
     this.overrideSites = [...sites].sort();
+    // 站点清单:面板的站点名单与室内判据都从这里来(几何要到 attach / 换站点时才装)。
+    await this.siteView.load((url) => this._json(url));
+    const keys = this.siteView.scenes().map((s) => s.key);
+    // 默认站点必须在产物名单里 —— 写死的名字一旦不在名单里,面板会显示一个装不上的站点。
+    if (keys.length && !keys.includes(this.site)) this.site = keys[0];
+    this.siteIndoor = this.siteView.indoorFromIndex(this.site).indoor;
     await this._loadSky(idx);
     return true;
+  }
+
+  /** 站点名单(面板下拉框直接用):键 + 室内与否 + 判据出处。 */
+  siteScenes() { return this.siteView.scenes(); }
+
+  /**
+   * 把当前站点的几何挂上。**站点没装好之前不挂粒子也不画天空** —— 室内/室外要按产物判,
+   * 判据的输入就在场景文档里,抢在它到位之前挂等于按上一站的答案挂。
+   */
+  async ensureSite() {
+    if (!this.siteView.index) return null;
+    if (this.siteView.key === this.site && this.siteView.mounted) return this.siteView.mounted;
+    const rec = await this.siteView.mount(this.site, (url) => this._json(url));
+    if (rec) this.siteIndoor = !!rec.indoor;
+    this.refreshSite();
+    return rec;
   }
 
   /**
@@ -810,6 +1224,8 @@ export class Environment {
     if (this.to) this.to.state = this._stateOf(this.to.rec);
     if (this.from) this.from.state = this._stateOf(this.from.rec);
     this._mountEffects();
+    // 天空的室内闸门与粒子同一处生效:换站点时立刻重算,不等下一次点开关。
+    this.sky.setVisible(this.skyVisible && !this.siteIndoor);
     this._applyBlend();
   }
 
@@ -919,6 +1335,14 @@ export class Environment {
   _mountEffects() {
     this._retireEffects();
     if (!this.particlesOn || !this.to || !this.to.rec.fx) return;
+    // 室内不挂现象粒子。这是**保守处置,不是从产物读出来的律**:产物里室内站点照样带着
+    // 逐现象的 `SiteEnvironmentConfig` 与 `VolumeProfile`(光照与后处理确实分室内一档),
+    // 但现象包给室内站点的覆盖**只有 config 与 postprocess 两份,从来没有一份效果清单**,
+    // 也没有任何字段说室内该挂哪些粒子。既然没有依据,就一件都不挂,并在这里标明是保守处置。
+    if (this.siteIndoor) {
+      this.effectNotes = [`${this.site}:室内站点,现象粒子与天空都不挂(保守处置,产物未给室内的粒子律)`];
+      return;
+    }
     const site = this.indoor ? this.overrideSite : this.site;
     const plan = this.to.rec.fx.plan(site);
     for (const item of plan) {
@@ -1017,24 +1441,35 @@ export class Environment {
     this.refreshSite();
   }
 
-  setSite(site) {
+  /** 换站点:几何重挂 + 两级查找重取 + 室内与否重判。返回挂载读数(判据可以等它)。 */
+  async setSite(site) {
     this.site = site;
+    // 先按清单级判据落一个答案,几何装好之后由场景文档的主判据覆盖它。
+    this.siteIndoor = this.siteView.indoorFromIndex(site).indoor;
     this.refreshSite();
+    return this.ensureSite();
   }
 
   setPost(on) { this.postOn = !!on; this.post.setEnabled(!!on); }
 
-  /** 返回**真的画不画**:网格或窗口没到位时它是假,与开关的意愿分开报。 */
+  /**
+   * 返回**真的画不画**:网格或窗口没到位时它是假,与开关的意愿分开报。
+   * 室内再多一道:室内不画天空(与不挂现象粒子同一条保守处置,见 `_mountEffects`)。
+   */
   setSkyVisible(on) {
     this.skyVisible = !!on;
-    return this.sky.setVisible(this.skyVisible);
+    return this.sky.setVisible(this.skyVisible && !this.siteIndoor);
   }
 
-  setGroundVisible(on) {
-    this.groundVisible = !!on;
-    this.ground.mesh.visible = this.groundVisible;
-    return this.groundVisible;
+  /** 站点几何的可见性(面板上那个开关原先管的是自制承影面)。 */
+  setSiteVisible(on) {
+    this.siteVisible = !!on;
+    this.siteView.group.visible = this.siteVisible;
+    return this.siteVisible;
   }
+
+  /** 旧名:面板与自检都按这个名字调,保留成别名,不在两处各写一份。 */
+  setGroundVisible(on) { return this.setSiteVisible(on); }
 
   /** 角色材质换了(换角色)就重新接线。 */
   setCharacterMaterials(mats) {
@@ -1044,8 +1479,7 @@ export class Environment {
 
   setSubject(v3, radius) {
     this.subject.copy(v3);
-    this.ground.material.uniforms.envSubjectPos.value.copy(v3);
-    if (radius) this.ground.material.uniforms.envSubjectRadius.value = radius;
+    this.siteView.setSubject(v3, radius);
   }
 
   // ---- 帧循环 ----
@@ -1053,6 +1487,8 @@ export class Environment {
   attach() {
     if (!this.group.parent) this.scene.add(this.group);
     this.enabled = true;
+    // 站点几何按需装:环境层没开过的会话不必为此拉一份十几兆的 glb。
+    this.ensureSite();
   }
 
   detach() {
@@ -1198,7 +1634,7 @@ export class Environment {
     const st = this.to ? this.to.state : null;
     const consumers = envConsumers({
       character: Shading.CHARACTER_FRAG,
-      ground: GROUND_FRAG,
+      site: SITE_FRAG,
       sky: SKY_FRAG,
     });
     const pushedNoConsumer = Object.keys(ENV_GLOBALS).filter((k) => !consumers[k].length);
@@ -1300,8 +1736,23 @@ export class Environment {
           '附加色的缩放因子来源未知,默认 1',
         ],
       },
-      ground: {
-        visible: this.groundVisible,
+      // 站点:真站点几何的读数。`meshes` / `triangles` 是**场景里真的挂着**的数量
+      // (含原版不画因而隐藏的那些 —— 它们在场景里,只是不画),`declared` 是场景文档里
+      // 主根节点声明的数量,两者对得上才说明挂进去的是产物本身。
+      site: {
+        visible: this.siteVisible,
+        key: this.site,
+        indoor: this.siteIndoor,
+        // 几何挂哪一站(`key`)与现象配置查哪一站(`configSite`)是两件事:
+        // 「室内覆盖」开着时后者是那个带覆盖的站点,前者不动。
+        configSite: st ? st.site : null,
+        usedOverride: st ? st.usedOverride : false,
+        // 室内不挂现象粒子、不画天空;这两项照实报出来,判据读它们。
+        indoorSuppressesWeather: this.siteIndoor,
+        mounting: !!this.siteView.mounting,
+        mounted: this.siteView.mounted,
+        available: this.siteView.scenes().map((x) => ({ key: x.key, indoor: x.indoor })),
+        errors: this.siteView.errors.slice(0, 8),
       },
       post: this.post.status(),
       notRestored: NOT_RESTORED,
@@ -1312,7 +1763,7 @@ export class Environment {
   dispose() {
     this._clearEffects();
     this.sky.dispose();
-    this.ground.dispose();
+    this.siteView.dispose();
     this.post.dispose();
     this.fxCamera.removeFromParent();
     this.group.removeFromParent();
@@ -1327,10 +1778,14 @@ export const NOT_RESTORED = [
   '天空材质的附加色:材质记录里那一项(以及它的 alpha)本示例不读,附加色 uniform 恒为零。当前这份材质里它本来就是零,所以画面上看不出差别 —— 但那是数据碰巧,不是接上了',
   '闪电时间轴:只有一个现象带时间轴资产,本示例不建模时间轴(它在产物里登记为未支持)',
   '粒子模块:**提取侧已全部建模**(自定义数据/子发射器/碰撞/受力/噪声/拖尾都在产物里),但本示例的发射器引擎只实现了出生与基本运动 —— 曲线型自定义数据、子发射器、碰撞与拖尾在画面上还未生效;未实现项与未建模的发射形状逐项计数见 particles.unmodelledShapes',
-  '发射形状 Mesh / Box 等没有发射公式:这些形状的发射器**整条停发**,不退化成点发射(点发射会把本该铺开的粒子全堆在发射节点原点上)。当前站点真的挂着几个、分别是什么形状,见 particles.suppressed / particles.suppressedShapes。renderMode=Mesh 是另一道渲染器能力缺口,单独见 particles.skipped.unsupported / unsupportedModes',
+  '发射形状 Box 等没有发射公式:这些形状的发射器**整条停发**,不退化成点发射(点发射会把本该铺开的粒子全堆在发射节点原点上)。「从网格表面发射」已按三角放置建模(面积加权选三角、三角内均匀取点、重心插值顶点法线当方向),但形状没解出网格的那几个照样停发。当前站点真的挂着几个、分别是什么形状,见 particles.suppressed / particles.suppressedShapes。renderMode=Mesh 是另一道渲染器能力缺口,单独见 particles.skipped.unsupported / unsupportedModes',
   '`renderer.maxParticleSize` / `minParticleSize` 是**视口比例**(默认 0.5 = 半个视口高),不是世界尺寸:本示例不按它截尺寸(拿视口比例去截米是单位错误,会把声明 100x60 米的云静默截成 0.5 米),而按视口比例截断的那条律本示例没有建模 —— 大件在近处会比运行时更大',
   '站点决定的那批全局着色量不在本包里,本示例按中性常量处理(它们随站点变而不随天气变)',
-  '地面与落影是本示例自己的承影面与投影盘,不是站点地形',
+  '站点的世界位置:`sitePosition` 与站点等级都只在 master 表里,产物里那张放置表是空的并写明「no master directory supplied」。所以本示例把当前站点摆在原点、室内取产物里最高的那一级 —— 前者不影响站点内部的相对关系,后者是**假定**,读数见 site.mounted.level',
+  '站点自己的着色器在另一个包里(场景包只带着材质名与属性块),所以本示例的站点材质是**近似**:基色贴图 + 现象量(直射/暗部/云影/落影/雾)。透明度按产物走(混合因子读材质 extras 的 Unity 枚举、遮罩阈值读 glTF 的 alphaCutoff、双面读 doubleSided),但法线贴图、顶点色、发光与风的顶点动画都没接',
+  '落影仍是一个投影盘(不是阴影贴图):它现在落在真站点的表面上,按片元所在高度沿光向反投。两个权重是本示例加的近似 —— 朝上分量与「只投在角色下方」,产物里没有这两条',
+  '站点的碰撞面、导航网格与足音颜色表照实装在产物里,本示例都不消费(它没有行走与足音)',
+  '家具、房间皮肤与散布道具包不挂:场景包里没有家具(`semantics.fixtures`),这几族要 master 表说明摆哪些,本仓没有 master',
 ];
 
 /** 原始数据里就没有的东西。**不是欠账**,写在这里免得被当成未实现。 */

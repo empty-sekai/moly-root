@@ -246,18 +246,15 @@ function buildEnvList() {
   if (badge) badge.textContent = environment.names.length || '';
   const sel = $('selEnvSite');
   if (sel) {
-    // 站点名单从数据里数出来(粒子的 site 字段),不写死。
-    const sites = new Set();
-    for (const p of Object.values(environment.index.phenomena || {})) {
-      for (const v of p.variants || []) {
-        const m = /^unique__(.+)$/.exec(v);
-        if (m) sites.add(m[1]);
-      }
-    }
-    const list = [...sites].sort();
-    sel.innerHTML = list.map((s) => `<option value="${s}">站点:${s}</option>`).join('');
-    if (list.includes(environment.site)) sel.value = environment.site;
-    else if (list.length) { environment.site = list[0]; sel.value = list[0]; }
+    // 站点名单从**站点产物**读出来(8 个场景包),室内/室外也是产物判的 —— 见 environment.js
+    // 里 SiteView 顶上那段。选一项 = 换真站点几何,不只是换粒子挂哪一站。
+    const list = environment.siteScenes();
+    sel.innerHTML = list
+      .map((s) => `<option value="${s.key}">站点:${s.key}${s.indoor ? '(室内)' : ''}</option>`)
+      .join('');
+    if (list.some((s) => s.key === environment.site)) sel.value = environment.site;
+    else if (list.length) sel.value = list[0].key;
+    if (!list.length) sel.innerHTML = '<option value="">站点产物读不到</option>';
   }
 }
 
@@ -273,9 +270,19 @@ function syncEnvUI() {
     else {
       const st = environment.status();
       const L = envLabel(st.phenomenon || '');
+      // 站点一行如实说三件事:挂着谁、是不是室内、几何真的挂上了多少。
+      const S = st.site;
+      const m = S.mounted;
+      const siteLine = S.mounting
+        ? `<span class="dim">站点 ${S.key} 装载中…</span>`
+        : (m
+          ? `<span class="${S.indoor ? 'warn' : 'ok'}">${S.key}${S.indoor ? '(室内:不挂天气)' : ''}</span>`
+            + `<span class="dim"> · ${m.meshes} 网格 / ${m.triangles} 三角`
+            + `${m.hiddenMeshes ? ` · 原版不画 ${m.hiddenMeshes}` : ''}</span>`
+          : `<span class="bad">站点 ${S.key} 没挂上</span>`);
       hint.innerHTML = `<span class="ok">${st.phenomenon || '—'}</span> <span class="dim">`
         + `${L.time || '时段未知'} · ${L.bright ? `亮度 ${L.bright}` : '亮度未知'}`
-        + `${st.usedOverride ? ' · 覆盖' : ''}${st.homeAngleUsed ? ' · 家园角' : ''}</span>`;
+        + `${st.usedOverride ? ' · 覆盖' : ''}${st.homeAngleUsed ? ' · 家园角' : ''}</span><br>${siteLine}`;
     }
   }
   const lh = $('lightHint');
@@ -308,7 +315,7 @@ function enableEnv(on) {
   if (envOn) {
     environment.attach();
     environment.setCharacterMaterials(current ? current.mats : []);
-    grid.visible = false;                  // 有地面了,诊断用的地格网让位
+    grid.visible = false;                  // 真站点接管承影面,诊断用的地格网让位
     scene.background = null;               // 天空网格接管背景
   } else {
     environment.detach();
@@ -1077,9 +1084,13 @@ $('bEnvGround').onclick = (e) => {
   if (!environment) return;
   const on = !e.target.classList.contains('on');
   e.target.classList.toggle('on', on);
-  environment.setGroundVisible(on);
+  environment.setSiteVisible(on);          // 真站点几何的可见性(原先管的是自制承影面)
 };
-$('selEnvSite').onchange = (e) => { if (environment) environment.setSite(e.target.value); };
+$('selEnvSite').onchange = async (e) => {
+  if (!environment) return;
+  await environment.setSite(e.target.value);   // 换站点 = 重挂几何 + 重判室内 + 重取两级查找
+  syncEnvUI();
+};
 $('scnFilter').oninput = (e) => applyFilter('scenarios', 'scnCount', e.target.value);
 $('selPerfMode').onchange = (e) => {
   perfMode = e.target.value;
@@ -1161,7 +1172,8 @@ function refreshHud(dt) {
       const skipped = sk && sk.total
         ? ` · <span class="dim">不画 ${sk.total}(渲染器关 ${sk.disabled} 节点关 ${sk.inactive})</span>` : '';
       return `<span class="ok">${st.phenomenon}</span> <span class="dim">`
-        + `${st.usedOverride ? '覆盖' : st.site}${st.fadingFrom ? ` 淡化 ${(st.fade * 100).toFixed(0)}%` : ''}`
+        + `${st.site.key}${st.site.indoor ? '(室内)' : ''}${st.usedOverride ? ' 覆盖' : ''}`
+        + `${st.fadingFrom ? ` 淡化 ${(st.fade * 100).toFixed(0)}%` : ''}`
         + ` · 雾 ${st.fog.enabled ? 'on' : 'off'} · 粒子 ${st.particles.live}/${st.particles.emitters} 发`
         + `${st.post.enabled ? ` · 后处理 ${st.post.passes.length} 趟` : ' · 后处理关'}</span>${skipped}${sup}`;
     })())
