@@ -422,6 +422,19 @@ function buildLanes(performance) {
       lane.nullTargets += 1;
     }
   });
+  // 一条轨上的 clip **按 start 排序**，序列化顺序不是求值顺序：引擎在编译期就
+  // 把它们按 start 升序重排过，之后才建运行时 clip 与区间树。
+  // 这不是理论风险——本语料 2865 条多 clip 轨里 **1100 条（38.4%）的 clip 不按
+  // start 排**，最坏一条 54 个 clip 里有 515 个逆序对。
+  // 轨本身**保持序列化序**（引擎侧全文无排序），所以只排 clip，不排轨。
+  // 本页的求值本来就是按时间窗判定的（与下标无关），排序修的是**依赖顺序的那些地方**：
+  // 「当前在放哪条」的取名、以及日后任何「下一条 clip」式的逻辑。
+  for (const lane of lanes.values()) {
+    lane.events.sort((a, b) => (a.start ?? 0) - (b.start ?? 0)
+      || (a.index ?? 0) - (b.index ?? 0));
+    lane.outOfOrder = lane.events.some((event, position, all) =>
+      position > 0 && (all[position - 1].index ?? 0) > (event.index ?? 0));
+  }
   return [...lanes.values()];
 }
 

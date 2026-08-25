@@ -287,8 +287,23 @@ def _shader_value(store, record, material_tree):
 
 
 def _material_index(glb, record, path_id, cache, tex_cache, store):
-    """Add a material to *glb* and return its glTF ``materials`` index."""
-    key = (id(record), path_id)
+    """Add a material to *glb* and return its glTF ``materials`` index.
+
+    The cache key is the serialized file's own archive name plus the path id,
+    not the identity of the record object.  A path id is unique only within its
+    file, so the file has to be part of the key; naming the file by its archive
+    keys on the file itself rather than on which instance of it we happen to be
+    holding, which is what ``id(record)`` keys on.
+
+    This is not why an export can hold more materials than its own bundle does.
+    A glb is self-contained, so a material a renderer reaches in a *dependency*
+    package is written into this package's glb too: ``road_bg1`` declares
+    ``road_brick1`` as a dependency and uses four of its materials alongside its
+    own four.  Counting materials over all the exported glbs therefore exceeds
+    counting Material objects per bundle -- 1862 against 1805 -- and those are
+    two different quantities, not a discrepancy.
+    """
+    key = (record.archive or record.bundle, path_id)
     if key in cache:
         return cache[key]
     obj = record.objects.get(path_id)
