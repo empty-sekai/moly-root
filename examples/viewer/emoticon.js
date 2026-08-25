@@ -814,8 +814,9 @@ class Emitter {
     // 顶替是**轮转**选的,不是挑最老的那颗;搬运是逐字段拷贝,新粒子用自己的年龄、
     // 位置与随机流,**不是接着上一颗往下跑**。
     //
-    // 两处是推断,标出来:环的模数按未翻倍的容量取,游标每顶替一颗加一。这两个是彼此
-    // 独立的未知,真源里都还没定死,别拿其中一条去推另一条。
+    // 游标的两条已经定死:每顶替一颗加一,并对**未翻倍**的容量取模。新粒子先照常
+    // 追加在数组尾部、在那里完成出生(拿走随机流的下一批取值),之后才被整颗搬进游标
+    // 指的那一位 —— 所以搬运不改变它的任何随机量,槽位号也不参与随机数计算。
     this.ringMode = Math.round(num(this.system.ringBufferMode, 0));
     this.ringSize = Math.max(1, Math.round(num(this.system.maxParticles, 1)));
     this.ring = [];
@@ -1260,6 +1261,14 @@ class Emitter {
     for (const p of this.particles) {
       p.age += dt * num(s.simulationSpeed, 1);
       if (p.age >= p.life) {
+        // 环形模式下,排在环内那几位的粒子**寿命到了也不回收**:它留在原地,等下一颗
+        // 新生的把它顶掉。所以一个容量 1 的环形系统在两次顶替之间画的是那颗已经过了
+        // 寿命的粒子,而不是空。按寿命回收会在这中间留下一段什么都没有的空档。
+        if (this.ringMode && this.ring.includes(p)) {
+          if (!p.ringPaused) { p.ringPaused = true; this.ringPaused = (this.ringPaused || 0) + 1; }
+          alive.push(p);
+          continue;
+        }
         // 死亡事件必须在回收**之前**送出:回收之后粒子的位置与速度已经不可读,
         // 而按死亡触发的子发射要在死亡那一点的位置上发射。
         for (const h of this.hooks) h.onDeath?.(p);
@@ -1759,6 +1768,7 @@ export class EmoticonView {
       ringEmitters: this.emitters.filter((e) => e.ringMode).length,
       ringEvicted: this.emitters.reduce((n, e) => n + (e.ringEvicted || 0), 0),
       ringRetired: this.emitters.reduce((n, e) => n + (e.ringRetired || 0), 0),
+      ringPaused: this.emitters.reduce((n, e) => n + (e.ringPaused || 0), 0),
       customReads: this.emitters.reduce((n, e) => n + (e.customReads || 0), 0),
       customMisses: this.emitters.reduce((n, e) => n + (e.customMisses || 0), 0),
       // 材质对象数。**一个发射器一份**,不是一颗粒子一份 —— 两个数放在一起才看得出
