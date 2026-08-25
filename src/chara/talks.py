@@ -8,7 +8,7 @@ source tokens instead of being guessed.
 import json
 import os
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 
 import UnityPy
 
@@ -28,6 +28,33 @@ ALL_CALL_OPS = (
 # callers cannot silently disagree about which calls are counted.
 CALL_OPS = ALL_CALL_OPS
 SPEED_ZERO_MEANS = 1.0
+
+# Where the constant tables live.  Not in the talk package: that one carries the
+# scripts and nothing else.  This package's ``defines.lua`` is a superset of the
+# copy the alone-action package ships — the same six tables, no key whose value
+# disagrees, plus the entries for the four egg fixtures.  Its other assets carry
+# call defaults and helper code rather than tables.
+LIB_PACKAGE = "mysekai__talk__scenario__lib"
+CONSTANT_ASSET = "defines.lua"
+
+# Tokens the constant source does not define, each with why, over both talk
+# batches -- the single-character one and the furniture-side one.  A residual
+# outside this set means the source was not read, or was read from the wrong
+# package.  Every entry was checked against the source by name: either the file
+# has no assignment for it at all, or the key exists only in a different table,
+# which is the script naming it against the wrong one.
+UNDEFINED_TOKENS = {
+    "Motions.w_cute_idl_02": "no assignment in the constant source",
+    "EyePresets.noraml": "misspelling of normal, no assignment either way",
+    "EyePresets.norm": "no assignment in the constant source",
+    "EyePresets.normal_kime": "no assignment in the constant source",
+    "EyePresets.smile01": (
+        "no entry in the EyePresets table; the key exists in LipSyncPresets, "
+        "so the script names it against the wrong table"),
+    "LipSyncPresets.normal": (
+        "no entry in the LipSyncPresets table; the key exists in EyePresets, "
+        "so the script names it against the wrong table"),
+}
 _CALL_NAMES = set(CALL_OPS)
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _NUMBER = re.compile(r"^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$")
@@ -283,8 +310,17 @@ def _assignment_value(item):
 
 
 def parse_constant_tables(text):
-    """Parse simple ``Name = { key = value }`` constant tables."""
-    text = (text or "").lstrip("﻿")
+    """Parse simple ``Name = { key = value }`` constant tables.
+
+    Comments are removed first.  The shipped tables annotate entries with a line
+    comment above them, and an entry's key is read as the text before its ``=``
+    after the block is split on commas — so a comment on the preceding line
+    lands at the head of the next item and makes the key stop being an
+    identifier, at which point the entry is skipped without a word.  The
+    stripper replaces a comment with spaces of equal length, so every offset
+    this function goes on to take stays valid.
+    """
+    text = _strip_comments((text or "").lstrip("﻿"))
     tables, cursor = {}, 0
     while True:
         match = _TABLE_HEAD.search(text, cursor)
@@ -298,6 +334,73 @@ def parse_constant_tables(text):
                 entries[key] = _literal(value)
         tables[match.group(1)] = entries
         cursor = close + 1
+
+
+def constant_census(scripts, tables):
+    """Count the constant tokens *scripts* name, resolved and unresolved.
+
+    A reference is a ``Table.key`` token whose *Table* is one of the constant
+    tables.  Counting is done over the script sources rather than over the
+    parsed steps, because a resolved token no longer looks like one — the step
+    carries the value — so a census of the output could only ever see the
+    failures and would report 0 references when everything resolved.
+
+    Comments are removed first: a token named only in a comment is not a
+    reference, and the tables themselves annotate entries with comments.
+
+    Returns ``{"referenced": {table: n}, "resolved": {table: n},
+    "unresolved": {table: {key: n}}}`` with occurrence counts, not distinct
+    counts; the distinct keys are the ``unresolved`` maps' own keys.
+    """
+    referenced, resolved = Counter(), Counter()
+    unresolved = defaultdict(Counter)
+    if not tables:
+        return {"referenced": {}, "resolved": {}, "unresolved": {}}
+    dotted = re.compile(
+        r"\b(" + "|".join(re.escape(name) for name in sorted(tables))
+        + r")\.([A-Za-z_]\w*)")
+    for text in scripts:
+        for table, key in dotted.findall(_strip_comments(text or "")):
+            referenced[table] += 1
+            if key in tables[table]:
+                resolved[table] += 1
+            else:
+                unresolved[table][key] += 1
+    return {"referenced": dict(referenced), "resolved": dict(resolved),
+            "unresolved": {table: dict(keys)
+                           for table, keys in sorted(unresolved.items())}}
+
+
+def read_constants(lib_bundle):
+    """The constant tables and scalars the talk scripts name.
+
+    *lib_bundle* is the decrypted :data:`LIB_PACKAGE`.  Returns ``(tables,
+    scalars, source)`` where *source* is the asset the tables came from, or
+    ``None`` when the caller handed in no package — in which case the tables are
+    empty and every ``Table.key`` token in every script stays a source token.
+    That is a state a document has to *state*, not one it may describe as
+    resolved, so the caller is told rather than left to infer it from empty
+    tables.
+
+    There is deliberately no search of the talk package as a fallback: that one
+    carries no ``defines.lua``, so the search would always come back empty and
+    the empty result would be indistinguishable from tables that say nothing.
+
+    Both talk extractors read through here.  Two readers of one file is how the
+    two lanes would come to disagree about what a step means — the same script,
+    one lane resolving a constant the other leaves as a token.
+    """
+    if not lib_bundle:
+        return {}, {}, None
+    assets = _text_assets(lib_bundle)
+    text = _asset_named(assets, CONSTANT_ASSET)
+    if text is None:
+        raise LookupError(
+            f"{CONSTANT_ASSET} is not in {lib_bundle}: "
+            f"the constant tables are expected in {LIB_PACKAGE}")
+    tables = parse_constant_tables(text)
+    scalars = parse_constant_scalars(text, tables)
+    return tables, scalars, CONSTANT_ASSET
 
 
 def parse_constant_scalars(text, tables):
@@ -499,7 +602,7 @@ def _tweet(row):
     }
 
 
-def _semantics(constant_assets, resolved):
+def _semantics(source):
     return {
         "selection": (
             "Only talks whose unit group has exactly one character and whose "
@@ -510,8 +613,17 @@ def _semantics(constant_assets, resolved):
         "voiceCues": "voice cue names occur in scripts; audio bytes are not in the talk bundle",
         "tweet": "tweet is the separate text, motion, eye, and mouth pairing from the master tables",
         "constants": {
-            "resolved": resolved,
-            "sourceAssets": list(constant_assets),
+            "source": (f"{LIB_PACKAGE}/{source}" if source else None),
+            "rule": (
+                "steps carry resolved values: a Table.key token in a script "
+                "argument is replaced by the entry that table holds, and the "
+                "source token is kept beside it as alias. The tables are read "
+                f"from {LIB_PACKAGE}, not from the talk package, which carries "
+                "no constant tables at all. With no source supplied, source is "
+                "null and every token stays a source token -- read "
+                "summary.constants for how many, per table, rather than "
+                "assuming either state."
+            ),
             "unresolvedTokensPreserved": True,
         },
         "playbackSpeed": (
@@ -521,26 +633,24 @@ def _semantics(constant_assets, resolved):
     }
 
 
-def extract_talks(master_source, talk_bundle, out_path, master_cache=None):
+def extract_talks(master_source, talk_bundle, out_path, master_cache=None,
+                  lib_bundle=None):
     """Write talks.json for single-character, non-furniture talks.
 
     *master_source* is a directory of master tables or a base URL to fetch them
-    from; *master_cache* is where fetched tables are kept.
+    from; *master_cache* is where fetched tables are kept.  *lib_bundle* is the
+    decrypted :data:`LIB_PACKAGE`, which carries the constant tables the scripts
+    name; it is read through the same :func:`read_constants` the furniture-side
+    extraction uses, so both lanes resolve one script the same way.
     """
     master = Master(master_source, cache_dir=master_cache)
     selected, filter_report = master.solo_talks()
     tweets = master.tweets()
     conditions = master.condition_types()
     assets = _text_assets(talk_bundle)
-    constant_assets = [
-        name for name in assets
-        if name in ("defines.lua", "lib.lua")
-        or name.endswith(("/defines.lua", "\\defines.lua", "/lib.lua", "\\lib.lua"))
-    ]
-    constant_text = "\n".join(assets[name] for name in constant_assets)
-    tables = parse_constant_tables(constant_text)
-    scalars = parse_constant_scalars(constant_text, tables)
+    tables, scalars, constant_source = read_constants(lib_bundle)
     units, operations, all_voices = {}, Counter(), []
+    selected_scripts = []
     total_steps = 0
     for item in selected:
         row, unit = item["talk"], item["unitId"]
@@ -551,6 +661,7 @@ def extract_talks(master_source, talk_bundle, out_path, master_cache=None):
             raise LookupError(
                 f"talk {row.get('id')}: script asset not found: {asset_name}"
             )
+        selected_scripts.append(script)
         parsed = parse_script(script, tables, scalars, script_name=asset_name)
         tweet_id = item.get("tweetId")
         if tweet_id is not None and tweet_id not in tweets:
@@ -571,6 +682,7 @@ def extract_talks(master_source, talk_bundle, out_path, master_cache=None):
         total_steps += len(parsed["steps"])
         operations.update(parsed["operations"])
         all_voices.extend(parsed["voices"])
+    census = constant_census(selected_scripts, tables)
     summary = {
         "talks": len(selected),
         "units": len(units),
@@ -578,10 +690,22 @@ def extract_talks(master_source, talk_bundle, out_path, master_cache=None):
         "voiceCues": len(all_voices),
         "uniqueVoiceCues": len(set(all_voices)),
         "operations": dict(operations),
+        "constants": {
+            "source": (f"{LIB_PACKAGE}/{constant_source}"
+                       if constant_source else None),
+            "tables": {name: len(entries)
+                       for name, entries in sorted(tables.items())},
+            "scalars": len(scalars),
+            "referenced": census["referenced"],
+            "resolved": census["resolved"],
+            "unresolved": census["unresolved"],
+            "unresolvedOccurrences": sum(
+                sum(keys.values()) for keys in census["unresolved"].values()),
+        },
     }
     doc = {
         "version": 1,
-        "semantics": _semantics(constant_assets, bool(constant_assets)),
+        "semantics": _semantics(constant_source),
         "units": units,
         "summary": summary,
     }
@@ -592,6 +716,6 @@ def extract_talks(master_source, talk_bundle, out_path, master_cache=None):
     return {
         **summary,
         "filter": filter_report,
-        "constantAssets": constant_assets,
+        "constantSource": constant_source,
         "constantTables": {key: len(value) for key, value in tables.items()},
     }

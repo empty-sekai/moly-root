@@ -18,6 +18,20 @@ Motions = { calm = "mov_calm" }
 Emoticons = { joy = "emo-joy" }
 """
 
+# A constant table whose entries carry line comments, the shape the shipped
+# tables are written in: a comment sits on its own line directly above the entry
+# it annotates, so after a comma split the comment leads the next entry.
+COMMENTED_DEFINES = """
+Motions = {
+    calm = "mov_calm",
+    -- turning around
+    turn45_r = "mov_turn45_r",
+    turn45_l = "mov_turn45_l",
+    -- added later
+    rotate01 = "mov_rotate001",
+}
+"""
+
 SCRIPT = '''
 label("Alpha")
 voice("talk", "cue.alpha", Characters.Alpha)
@@ -59,6 +73,37 @@ def master_dir(tmp_path):
     }])
     write("mysekaiCharacterTalkTweets", [])
     return tmp_path
+
+
+def test_a_table_entry_annotated_by_a_line_comment_is_still_parsed():
+    # A comment above an entry lands at the head of the next comma-separated
+    # item, so a reader that takes everything before the `=` as the key gets
+    # "-- turning around\n    turn45_r" and drops the entry -- silently, because
+    # a key that is not an identifier is skipped rather than reported.  Red when
+    # the comment is not removed before the key is read.
+    tables = talks.parse_constant_tables(COMMENTED_DEFINES)
+    assert tables["Motions"] == {
+        "calm": "mov_calm",
+        "turn45_r": "mov_turn45_r",
+        "turn45_l": "mov_turn45_l",
+        "rotate01": "mov_rotate001",
+    }
+
+
+def test_the_two_constant_table_parsers_read_the_same_entries():
+    # The two readers of the same file exist for two callers, so a disagreement
+    # between them means one caller resolves a constant the other leaves as a
+    # source token -- the same step, read two ways.  Symmetric difference is the
+    # gate; it is what exposed the comment case above.
+    from chara import alone_actions
+
+    for text in (DEFINES, COMMENTED_DEFINES):
+        mine = talks.parse_constant_tables(text)
+        theirs = alone_actions.parse_constant_tables(text)
+        assert set(mine) == set(theirs), (sorted(mine), sorted(theirs))
+        for name in mine:
+            assert mine[name] == theirs[name], (
+                name, sorted(set(mine[name]) ^ set(theirs[name])))
 
 
 def test_parse_script_resolves_constants_and_zero_speed():
