@@ -4,8 +4,9 @@ The fixtures are synthetic, deliberately small, and built to be readable.  They
 test the resolver, not game semantics: the wrong corpus is constructed to fire
 a specific red — an ``externals`` list shuffled against ``m_Dependencies``, a
 pointer to a CAB that was never opened, a ``m_PathID`` that names no clip in a
-loaded package, a null ``m_Clip`` pointer, a same-package clip.  No fixture is
-used to infer what the game means.
+loaded package, a null ``m_Clip`` pointer, a same-package clip, a target list
+handed to the pairer in a different order, a track whose class name is not the
+one a class whitelist keeps.  No fixture is used to infer what the game means.
 
 The package store is faked the same way the other domains fake it: objects
 answer ``type.name``, ``path_id``, ``assets_file`` and ``read_typetree()``, and
@@ -288,3 +289,83 @@ def test_a_path_id_missing_in_the_target_package_is_unresolved(tmp_path, monkeyp
                       "mysekai__cut_scene__synth")
     assert package["clips"] == 1
     assert package["unresolved"] == 1 and package["cross"] == 0
+
+
+# -- the pairing key, told apart from position and from track class ----------
+
+
+def _clip_document(*tracks):
+    """A consumer-side clip document from ``(class, path id, clip count)``.
+
+    Only the fields the pairer reads are filled in; a real track carries much
+    more.  Every track is given the same ``m_Name`` on purpose: names repeat
+    within a package, so the path id is the only thing that identifies a track.
+    """
+    return {"package": "synth",
+            "tracks": [{"class": kind, "name": "3", "pathId": str(path_id),
+                        "clips": [{} for _ in range(count)]}
+                       for kind, path_id, count in tracks]}
+
+
+def _target(name):
+    """One resolved target record, in the shape the producer writes."""
+    return {"targetPackage": "mysekai__character_motion", "clipName": name}
+
+
+def _target_document(*entries):
+    """A producer target document from ``(track path id, clip index, target)``.
+
+    ``keyedClips`` carries the key a consumer pairs on; ``clips`` is the same
+    records as a flat list in walk order, whose positions mean nothing outside
+    the reader that wrote them.
+    """
+    keyed = [{"trackPathId": str(path_id), "clipIndex": index, "target": target}
+             for path_id, index, target in entries]
+    return {"package": "synth",
+            "clips": [entry["target"] for entry in keyed],
+            "keyedClips": keyed}
+
+
+def test_pairing_by_key_is_independent_of_the_target_order():
+    """Red when the pairer reads the target list by position: the producer
+    emits its entries in walk order — the order the serialized file happens to
+    store its objects in — so a consumer that hands the *i*-th entry to the
+    *i*-th clip pairs different targets the moment that order changes.  The
+    same two documents are paired twice with ``keyedClips`` reversed, and one
+    entry is keyed at a clip index its track does not have, so a position
+    reader consumes a different set of entries and its tally moves while the
+    keyed tally cannot.  The documents are built to exercise the pairer; none
+    of it says what a package holds."""
+    clips = _clip_document(("AnimationTrack", 10, 2),
+                           ("FixtureIdleAnimationTrack", 20, 1))
+    targets = _target_document((10, 0, _target("a")),
+                               (10, 1, _target("b")),
+                               (20, 0, _target("c")),
+                               (10, 2, None))   # names a clip track 10 lacks
+    paired = clip_targets.pair_targets_by_key(clips, targets)
+    assert paired == {"produced": 3, "entries": 4, "matched": 3,
+                      "resolved": 3, "clips": 3, "duplicateKeys": 0}
+
+    shuffled = dict(targets, keyedClips=list(reversed(targets["keyedClips"])))
+    assert clip_targets.pair_targets_by_key(clips, shuffled) == paired
+
+
+def test_a_track_class_whitelist_loses_a_furniture_track_entirely():
+    """Red when the pairer selects tracks by class name: a package that puts
+    its animation on ``FixtureIdleAnimationTrack`` has every target produced
+    and then dropped by a consumer keeping only ``AnimationTrack``.  Both
+    readings agree the producer emitted them (``produced`` is 2 either way), so
+    the class-whitelist tally is a total loss and not a near miss: it matches
+    no clip at all while the keyed pairer resolves them.  The documents are
+    built to exercise the pairer; none of it says what a package holds."""
+    clips = _clip_document(("FixtureIdleAnimationTrack", 40, 2))
+    targets = _target_document((40, 0, _target("a")), (40, 1, _target("b")))
+
+    by_key = clip_targets.pair_targets_by_key(clips, targets)
+    by_class = clip_targets.pair_targets_by_track_class(clips, targets)
+
+    assert by_key["resolved"] > 0 and by_key["resolved"] == 2
+    assert by_key["matched"] == 2 and by_key["clips"] == 2
+    assert by_class["resolved"] == 0
+    assert by_class["matched"] == 0 and by_class["clips"] == 2
+    assert by_class["produced"] == by_key["produced"] == 2

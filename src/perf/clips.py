@@ -161,13 +161,22 @@ class _Walker:
         return exported
 
     def _read_track(self, record, path_id):
-        """One track: its class, name, clips, infinite clip, and marker class."""
+        """One track: its identity, class, name, clips, infinite clip, markers.
+
+        ``pathId`` is the track's serialized path id — the only thing that
+        identifies a track.  ``m_Name`` does not: most packages carry repeated
+        track names (several tracks named ``3``, several named ``13``), so a
+        consumer that pairs per-track data by name pairs it wrongly.  It is
+        exported as a decimal string because a path id is an ``int64`` and a
+        JSON consumer reading numbers as doubles cannot hold one exactly.
+        """
         tree = record.tree(path_id)
         clips = [self._read_clip(clip, path_id)
                  for clip in tree.get("m_Clips") or []]
         track = {
             "class": record.script_of(path_id),
             "name": tree.get("m_Name", ""),
+            "pathId": str(path_id),
             LEGACY_ANIMCLIP: tree.get(LEGACY_ANIMCLIP),
             INFINITE_CLIP: tree.get(INFINITE_CLIP),
             "clips": clips,

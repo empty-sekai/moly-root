@@ -19,7 +19,18 @@ The playable asset is told apart from the other clip assets (a VoiceClip, a
 ChangeEyePresetClip, a SkipNextClip) by ``MonoScript.m_ClassName``, never by an
 object name or by a name substring.  Only ``AnimationPlayableAsset`` assets are
 walked for a clip; the others carry no ``m_Clip`` and are not part of the
-count.
+count.  The track that carries such a clip is *not* selected on: an animation
+segment is one whose asset is an ``AnimationPlayableAsset``, on whatever track
+class the timeline puts it, and several packages carry their whole animation on
+a track class other than ``AnimationTrack``.
+
+Each package's report holds the same records twice.  ``clips`` is the flat list
+in walk order — the order the serialized file stores its objects in, which no
+consumer reproduces — and its positions mean nothing outside this reader.
+``keyedClips`` carries the same records with the key a consumer pairs on: the
+owning track's path id (``trackPathId``) and the clip's index within that
+track's ``m_Clips`` (``clipIndex``).  A playable asset shared by two clips is
+still reported once, keyed at the first clip that named it.
 """
 import os
 from pathlib import Path
@@ -32,6 +43,12 @@ from core.jsonio import write_json
 UnityPy.config.FALLBACK_UNITY_VERSION = "2022.3.62f3"
 
 PLAYABLE_CLASS = "AnimationPlayableAsset"
+
+# The one track class a class-whitelist consumer would keep.  Nothing in this
+# reader selects on it: an animation segment is one whose asset is an
+# AnimationPlayableAsset, whatever track carries it.  It exists only so
+# :func:`pair_targets_by_track_class` can reproduce the wrong reading.
+NAIVE_TRACK_CLASS = "AnimationTrack"
 
 
 def _is_track(tree):
@@ -64,6 +81,77 @@ def resolve_target_by_index(package, record, pointer):
     if index < 0 or index >= len(package.dependencies):
         return None
     return package.dependencies[index].replace("/", "__")
+
+
+def pair_targets_by_key(clip_document, target_document):
+    """Pair every timeline clip with its animation target by explicit key.
+
+    A target document lists one entry per resolved ``AnimationPlayableAsset``
+    in the order the package's objects happen to be walked, which is not the
+    order any consumer reads tracks in.  So a consumer must pair by the key the
+    two documents share — the owning track's ``pathId`` and the clip's index in
+    that track's ``m_Clips`` — never by position in the two lists and never by
+    track name (names repeat within a package).
+
+    Returns the tally for one package: how many targets the producer emitted
+    (``produced``, non-null only), how many clips found an entry (``matched``)
+    and how many of those carry a non-null target (``resolved``), how many
+    clips the consumer walked (``clips``), and how many keys the producer
+    emitted twice (``duplicateKeys``, which must be zero for the key to be a
+    key at all).
+    """
+    entries = (target_document or {}).get("keyedClips") or []
+    keyed, duplicates = {}, 0
+    for entry in entries:
+        key = (str(entry.get("trackPathId")), entry.get("clipIndex"))
+        if key in keyed:
+            duplicates += 1
+        keyed[key] = entry.get("target")
+    matched = resolved = clips = 0
+    for track in (clip_document or {}).get("tracks") or []:
+        for index in range(len(track.get("clips") or [])):
+            clips += 1
+            key = (str(track.get("pathId")), index)
+            if key not in keyed:
+                continue
+            matched += 1
+            if keyed[key]:
+                resolved += 1
+    return {"produced": sum(1 for entry in entries if entry.get("target")),
+            "entries": len(entries), "matched": matched, "resolved": resolved,
+            "clips": clips, "duplicateKeys": duplicates}
+
+
+def pair_targets_by_track_class(clip_document, target_document,
+                                track_class=NAIVE_TRACK_CLASS):
+    """The tally a class-whitelist, position-cursor consumer gets instead.
+
+    This is the deliberately-wrong pairer the criteria use as a counter-check,
+    the same way :func:`resolve_target_by_index` is the deliberately-wrong
+    resolver.  It keeps only tracks whose class name is *track_class* and hands
+    each of their clips the next entry of the flat target list.  Two things go
+    wrong at once: the flat list is not in track order, and an animation
+    carried by any other track class is not seen at all — a package whose
+    animation lives on a differently-named track scores zero here while every
+    one of its targets was in fact produced.
+
+    Returns the same tally shape as :func:`pair_targets_by_key`.
+    """
+    targets = (target_document or {}).get("clips") or []
+    cursor = matched = resolved = clips = 0
+    for track in (clip_document or {}).get("tracks") or []:
+        for _ in track.get("clips") or []:
+            clips += 1
+            if track.get("class") != track_class:
+                continue
+            target = targets[cursor] if cursor < len(targets) else None
+            cursor += 1
+            matched += 1
+            if target:
+                resolved += 1
+    return {"produced": sum(1 for target in targets if target),
+            "entries": len(targets), "matched": matched, "resolved": resolved,
+            "clips": clips, "duplicateKeys": 0}
 
 
 def _closure_provenance(store, roots):
@@ -142,7 +230,7 @@ def _walk_package(store, name, out, index_compare=False):
     package = store.package(name)
     if package is None:
         return {"package": name, "missing": True}
-    document = {"package": name, "clips": []}
+    document = {"package": name, "clips": [], "keyedClips": []}
     counts = {"package": name,
               "targetKinds": {}, "clips": 0, "null": 0,
               "unresolved": 0, "cross": 0, "same": 0,
@@ -156,7 +244,7 @@ def _walk_package(store, name, out, index_compare=False):
             tree = record.tree(path_id)
             if not _is_track(tree) or "m_Clips" not in tree:
                 continue
-            for clip in tree.get("m_Clips") or []:
+            for clip_index, clip in enumerate(tree.get("m_Clips") or []):
                 asset = clip.get("m_Asset") if isinstance(clip, dict) else None
                 target = _resolve(store, record, asset)
                 if target is None:
@@ -174,6 +262,9 @@ def _walk_package(store, name, out, index_compare=False):
                 record_ = _clip_record(store, record, playable_tree)
                 counts["clips"] += 1
                 document["clips"].append(record_)
+                document["keyedClips"].append({"trackPathId": str(path_id),
+                                               "clipIndex": clip_index,
+                                               "target": record_})
                 if record_ is None:
                     counts["null"] += 1
                 elif record_.get("unresolved"):
@@ -207,7 +298,9 @@ def read_clip_targets(bundles, out_dir, bundle_root=None, load_deps=True,
     package name.  *out_dir* receives one document per package: its ``clips``
     list, one entry per ``AnimationPlayableAsset.m_Clip``, each ``None`` for a
     null pointer, an ``unresolved`` record for a pointer the store cannot
-    follow, or ``{"targetPackage", "clipName"}`` for a resolved clip.
+    follow, or ``{"targetPackage", "clipName"}`` for a resolved clip; and its
+    ``keyedClips`` list, the same records in the same order but each carrying
+    the ``trackPathId`` / ``clipIndex`` key a consumer pairs on.
 
     Dependencies are loaded first, because a package's pointers reach other
     packages and the store only knows a CAB once the package that owns it has
