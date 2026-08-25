@@ -313,6 +313,21 @@ def decode_system(tree, resolve_node=None):
         "simulationSpace": SIMULATION_SPACES.get(tree.get("moveWithTransform"),
                                                  tree.get("moveWithTransform")),
         "randomSeed": tree.get("randomSeed"),
+        # A fixed seed is authored: the system replays the same random stream
+        # every time rather than drawing a fresh one at play.
+        "autoRandomSeed": bool(tree.get("autoRandomSeed", True)),
+        # Delay before the system starts emitting, on its own clock.
+        "startDelay": min_max_curve(tree.get("startDelay") or {}),
+        # Ring-buffer mode changes the lifecycle rather than the look: a system
+        # in one of these modes recycles its particles instead of retiring them
+        # at the end of their lifetime, and the loop range says which part of
+        # the lifetime it holds them in.
+        "ringBufferMode": tree.get("ringBufferMode"),
+        "ringBufferLoopRange": _vec(tree.get("ringBufferLoopRange") or {}, "xy"),
+        # How the emitter transform's scale reaches the particles.
+        "scalingMode": tree.get("scalingMode"),
+        # Which velocity of the emitter the particles inherit.
+        "emitterVelocityMode": tree.get("emitterVelocityMode"),
         "maxParticles": initial.get("maxNumParticles"),
         "start": {
             "lifetime": min_max_curve(initial.get("startLifetime", {})),
