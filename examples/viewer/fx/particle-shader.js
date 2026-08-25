@@ -30,6 +30,31 @@
 // (0 = 零流、1 = custom1、2 = custom2),十位选哪一个分量(0..3 = x/y/z/w)。
 // 选出来的逐粒子值与**同名的材质常量**之间是**加法**,不是乘法。
 //
+// ---- 寻址:一张图上到底取哪一块 ----------------------------------------------
+//
+// 每一槽的 uv 都是从同一条网格 uv0 出发的,各自套自己的缩放偏移,再加自己的逐粒子
+// 偏移。**只有基础槽有旋转**,而且旋转在缩放偏移**之前**:
+//
+//   基础  uvRot  = 绕轴心 p 旋转 turns 圈的 uv0,轴心 p = vec2(0.5) - _BaseMapRotationOffsets.xy
+//         turns  = sel(_BaseMapRotationCoord) + _BaseMapRotation      // 单位是「圈」
+//         uvBase = uvRot * _BaseMap_ST.xy + _BaseMap_ST.zw
+//                  + vec2( sel(_BaseMapOffsetXCoord), sel(_BaseMapOffsetYCoord) )
+//   过渡  uvTrans = uv0 * _AlphaTransitionMap_ST + 两个逐粒子偏移      // 无旋转
+//   flow  uvFlow  = uv0 * _FlowMap_ST            + 两个逐粒子偏移      // 无旋转
+//   染色  uvTint  = uv0 * _TintMap_ST                                 // 律里就没有偏移
+//
+// 片数(`_BaseMapSliceCount`)**只属于数组档**:二维档的算式里一次都不引用它,
+// 二维档的「取哪一片」全靠上面那个窗口加逐粒子偏移。数组档的片索引是
+//
+//   slice = fract(clamp(sel(_BaseMapProgressCoord) + _BaseMapProgress, 0, 0.999000013))
+//           * _BaseMapSliceCount - 0.5
+//
+// 这一段在顶点段,顶点段每帧都跑 —— 所以片索引是**逐帧**量。它换的是整张贴图对象,
+// 不是这条片元链上的量,所以由发射器一侧做(见 emoticon.js 的 `_arrayLayerIndex`)。
+//
+// 自发光槽也有一整套同样的寻址(两个逐粒子偏移、片数、进度),而整条发光链是另一个
+// pass,本文件不做 —— 于是这一槽的寻址**一项都没读**,单独记一笔(`addrEmissionUnread`)。
+//
 // ---- 本文件明确没有做的几段(各有独立计数器,见 `counts`) ----------------------
 //
 //   * 软粒子:要一张场景深度图,这条管线没有;
@@ -386,6 +411,13 @@ export function createParticleShading(THREE, ctx) {
     transitionDissolve: 0, transitionFade: 0, transitionNoMap: 0,
     rimTransparency: 0, luminance: 0, fakeLight: 0,
     flowToBase: 0, flowToTransition: 0,
+    // —— 逐槽的寻址账(见下面「寻址」一节) ——
+    // 做到了的
+    addrBaseOffset: 0, addrBaseRotation: 0, addrTransitionOffset: 0, addrFlowOffset: 0,
+    // 声明了而本文件没读的
+    addrEmissionUnread: 0, addrVertexDeformUnread: 0,
+    // 原版一个变体都没编译过的寻址项
+    addrUnshippedTransitionSlice: 0, addrUnshippedTintSlice: 0, addrUnshippedParallax: 0,
   };
 
   if (n(floats._SoftParticlesEnabled, 0) > 0.5 || keywords.has('_SOFT_PARTICLES_ENABLED')) {
@@ -404,6 +436,55 @@ export function createParticleShading(THREE, ctx) {
   if (n(floats._DepthFadeEnabled, 0) > 0.5) counts.unshippedDepthFade = 1;
   if (textures._AlphaTransitionMap2DArray || textures._AlphaTransitionMap3D) {
     counts.unshippedTransitionArray = 1;
+  }
+
+  // —— 逐槽的寻址账 ——
+  //
+  // 「寻址」= 一张图上到底取哪一块:那一槽自己的缩放偏移、两个逐粒子偏移、
+  // (只有基础槽有的)旋转,数组档再加一个片索引。
+  //
+  // 一个 `*Coord` 只有在个位是 1 或 2 时才真的动手(0 是零流,加的是 0)。所以
+  // 「材质里写着这个字段」不等于「这个字段起作用」—— 片数默认一律是 4,拿「声明了」
+  // 当口径会让每个材质都中一次,数出来的全是噪声。下面一律按**会不会动手**记:
+  // 选择器指到真流、或进度量非零、或数组/三维那一槽真的绑着图。
+  //
+  // 三类分开记,不许合并:做到了的、声明了而本文件没读的、原版一个变体都没编译过的。
+  const acts = (key) => !!coordSource(floats[key]);
+  const nz = (key) => Math.abs(n(floats[key], 0)) > 1e-6;
+
+  if (acts('_BaseMapOffsetXCoord') || acts('_BaseMapOffsetYCoord')) counts.addrBaseOffset = 1;
+  if (n(floats._BaseMapRotationEnabled, 0) > 0.5) counts.addrBaseRotation = 1;
+  // 基础槽的片数(`_BaseMapSliceCount` / `_BaseMapProgress(Coord)`)在律里**只在
+  // 数组档那一支出现**,二维档的 GLSL 里一次都不引用它。片索引由发射器一侧按层
+  // 逐帧算(见 emoticon.js 的 `_arrayLayerIndex`),不在这条片元链上,所以这里不记。
+
+  // 自发光槽。整条发光链是另一个 pass 的输出,本文件不做(`counts.emission`),
+  // 于是这一槽的寻址**一项都没读**:两个逐粒子偏移、片数、进度。单独记一笔,
+  // 否则「基础槽的寻址做对了」会被读成「寻址都做了」。
+  if (acts('_EmissionMapOffsetXCoord') || acts('_EmissionMapOffsetYCoord')
+      || acts('_EmissionMapProgressCoord') || nz('_EmissionMapProgress')
+      || keywords.has('_EMISSION_MAP_MODE_2D_ARRAY') || textures._EmissionMap2DArray) {
+    counts.addrEmissionUnread = 1;
+  }
+  // 顶点形变槽同理:改的是顶点位置,本文件不做,它那两个逐粒子偏移也就没读。
+  if (keywords.has('_VERTEX_DEFORMATION_ENABLED')
+      && (acts('_VertexDeformationMapOffsetXCoord') || acts('_VertexDeformationMapOffsetYCoord'))) {
+    counts.addrVertexDeformUnread = 1;
+  }
+  // 下面三项是**原版就没有实现**的寻址,不是我们的缺口:过渡图的数组/三维取样与
+  // 它的片数进度、染色图的片数与三维进度、整套视差。三份报告在两个平台的全部
+  // 已发货变体里数过,这些名字出现 0 次。
+  if (acts('_AlphaTransitionMapProgressCoord') || nz('_AlphaTransitionMapProgress')
+      || textures._AlphaTransitionMap2DArray || textures._AlphaTransitionMap3D) {
+    counts.addrUnshippedTransitionSlice = 1;
+  }
+  if (acts('_TintMap3DProgressCoord') || nz('_TintMap3DProgress') || textures._TintMap3D) {
+    counts.addrUnshippedTintSlice = 1;
+  }
+  if (acts('_ParallaxMapOffsetXCoord') || acts('_ParallaxMapOffsetYCoord')
+      || acts('_ParallaxMapProgressCoord') || nz('_ParallaxStrength')
+      || textures._ParallaxMap || textures._ParallaxMap2DArray || textures._ParallaxMap3D) {
+    counts.addrUnshippedParallax = 1;
   }
 
   // —— 染色档 ——
@@ -451,6 +532,16 @@ export function createParticleShading(THREE, ctx) {
     ? 1 : 0;
   counts.flowToBase = flowToBase;
   counts.flowToTransition = flowToTrans;
+  // 这两槽的逐粒子偏移**做到了**,但只有那一槽真的被采时才算数:没有过渡图就没有
+  // uvTrans 的消费点,没有 flow 图就没有 uvFlow 的消费点。
+  if (transMode && (acts('_AlphaTransitionMapOffsetXCoord')
+                    || acts('_AlphaTransitionMapOffsetYCoord'))) {
+    counts.addrTransitionOffset = 1;
+  }
+  if ((flowToBase || flowToTrans)
+      && (acts('_FlowMapOffsetXCoord') || acts('_FlowMapOffsetYCoord'))) {
+    counts.addrFlowOffset = 1;
+  }
 
   const rimOn = keywords.has('_TRANSPARENCY_BY_RIM') ? 1 : 0;
   counts.rimTransparency = rimOn;
@@ -680,17 +771,29 @@ export function createParticleShading(THREE, ctx) {
       geo.dispose();
       probeMat.dispose();
       const alpha = new Array(size * size);
-      for (let i = 0; i < size * size; i++) alpha[i] = float ? buf[i * 4 + 3] : buf[i * 4 + 3] / 255;
+      // 颜色也读回来。alpha 那一路在有些材质上是平的(基础图的取样窗整块都是纯白
+      // 实心,那正是这个族的常见写法),这时候寻址对不对在 alpha 上一个字也看不出来,
+      // 只在 RGB 上看得出来 —— 读回来才判得动。
+      const rgb = new Array(size * size * 3);
+      for (let i = 0; i < size * size; i++) {
+        alpha[i] = float ? buf[i * 4 + 3] : buf[i * 4 + 3] / 255;
+        for (let c = 0; c < 3; c++) {
+          rgb[i * 3 + c] = float ? buf[i * 4 + c] : buf[i * 4 + c] / 255;
+        }
+      }
       const at = (x, y) => alpha[y * size + x];
       const e = 0;
       return {
         size,
         float,
         alpha,
+        rgb,
         center: at((size - 1) >> 1, (size - 1) >> 1),
         corners: [at(e, e), at(size - 1 - e, e), at(e, size - 1 - e), at(size - 1 - e, size - 1 - e)],
         min: Math.min(...alpha),
         max: Math.max(...alpha),
+        rgbMin: Math.min(...rgb),
+        rgbMax: Math.max(...rgb),
       };
     },
 

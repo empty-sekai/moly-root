@@ -720,8 +720,20 @@ class Emitter {
     return num(sampleValue(spec, u, rand), 0);
   }
 
-  _arrayLayer(rand) {
-    if (!this.arraySlices) return null;
+  /**
+   * 数组档的片索引。`u` 是这一刻的归一化年龄。
+   *
+   * 律里这一段在**顶点段**,顶点段每帧都跑,所以片索引是一个**逐帧**量,不是出生时
+   * 定死的量。选择器指到的分量若是一条随生命期走的曲线,原版就每帧翻页;若是逐粒子
+   * 常量(语料里绝大多数如此),逐帧求值与出生时求值同值 —— 两种情形用同一条式子,
+   * 不给「常量」开特例。
+   *
+   *   slice = fract(clamp(sel(progressCoord) + progress, 0, 0.999000013)) * sliceCount - 0.5
+   *
+   * 取样时按最近层取整,`floor(slice + 0.5)` = `floor(fract(...) * sliceCount)`,
+   * 就是下面这一行;再夹到实际层数内(片数与层数不一定相等)。
+   */
+  _arrayLayerIndex(rand, u) {
     const s = this.arraySampling || {};
     const layers = this.arraySlices.length;
     const slices = num(s.sliceCount, layers) || layers;
@@ -730,16 +742,17 @@ class Emitter {
     let source = 0;
     const src = s.progressSource || {};
     if (!src.constant && src.vector != null && src.component != null) {
-      // 选择器指向 custom1/custom2 的某个分量,而那个分量是自定义数据模块按曲线
-      // 定出来的,不是一个通用随机数 —— 拿粒子的随机因子顶替它,只有在那个分量
-      // 恰好声明成 0 到 1 的均匀随机时才碰巧相同,别的声明(常量、曲线、两条曲线
-      // 之间取随机)一律取错层。层在出生时定死,所以按出生那一刻求值。
-      source = this._customValue(src.vector, src.component, 0, rand);
+      source = this._customValue(src.vector, src.component, u, rand);
     }
     let v = source + progress;
     v = Math.min(Math.max(v, 0), clampTo);
     v = v - Math.floor(v);                       // fract
-    const layer = Math.min(layers - 1, Math.max(0, Math.floor(v * slices)));
+    return Math.min(layers - 1, Math.max(0, Math.floor(v * slices)));
+  }
+
+  _arrayLayer(rand, u) {
+    if (!this.arraySlices) return null;
+    const layer = this._arrayLayerIndex(rand, u || 0);
     return this.arraySlices[layer] || this.arraySlices[0] || null;
   }
 
@@ -1139,9 +1152,10 @@ class Emitter {
     // 逐粒子量(颜色、透明度、旋转、贴图帧、两个逐粒子向量)进 uniform,材质是整条
     // 发射器共用的一份 —— 所以**贴图对象不再需要逐粒子复制**:缩放偏移与片表格位
     // 都是着色器里的量,不再写进贴图对象的平铺/偏移。
-    // 数组贴图:出生时选层。层由 custom data 定,而粒子对象要到下面才建 —— 所以
-    // 这里把随机因子直接传进去,**不要引用还不存在的粒子对象**。
-    const map = this.arraySlices ? this._arrayLayer(r) : this.map;
+    // 数组贴图:出生这一刻的层。层由 custom data 定,而粒子对象要到下面才建 ——
+    // 所以这里把随机因子直接传进去,**不要引用还不存在的粒子对象**。
+    // 层不是终生不变的,后面每帧按当时的年龄重算(见 `_update` 里的翻页那一段)。
+    const map = this.arraySlices ? this._arrayLayer(r, 0) : this.map;
     const st = this.state;
     const spin0 = sampleValue(start.rotation, 0, r);
     // 绘制件按渲染器的绘制模式分派(朝相机的 billboard 是内建的那一支)。
@@ -1166,6 +1180,8 @@ class Emitter {
     this.parent.add(sprite);
     const p = {
       sprite, draw, map, r, life, age: 0, sizeX, sizeY, sizeZ,
+      // 数组档这一刻的层号。逐帧重算,变了才换贴图(见 `_update`)。
+      layer: this.arraySlices ? this._arrayLayerIndex(r, 0) : -1,
       pos: pos.clone(),
       vel: dir.multiplyScalar(sampleValue(start.speed, 0, r)),
       spin: spin0,
@@ -1359,6 +1375,18 @@ class Emitter {
         this._customVector('custom1', u, p.r, p.draw.state.custom1);
         this._customVector('custom2', u, p.r, p.draw.state.custom2);
         this.customStreamReads = (this.customStreamReads || 0) + 1;
+      }
+      // 数组档翻页。片索引是顶点段每帧算的量(见 `_arrayLayerIndex`),不是出生时
+      // 定死的 —— 选择器指到一条随生命期走的曲线时,原版就是在这里翻页的。
+      // 层没变就什么都不做:换贴图对象会让共用材质每次绘制重传取样器。
+      if (this.arraySlices) {
+        const layer = this._arrayLayerIndex(p.r, u);
+        if (layer !== p.layer) {
+          p.layer = layer;
+          p.map = this.arraySlices[layer] || this.arraySlices[0] || null;
+          p.draw.state.map = p.map;
+          this.arrayPageTurns = (this.arrayPageTurns || 0) + 1;
+        }
       }
       alive.push(p);
     }
@@ -1765,6 +1793,11 @@ export class EmoticonView {
       arrayModeOff: this.emitters.reduce((n, e) => n + (e.arrayModeOff || 0), 0),
       arraySampled: this.emitters.reduce((n, e) => n + (e.arraySlices ? 1 : 0), 0),
       arrayUnread: this.emitters.reduce((n, e) => n + (e.arrayUnread || 0), 0),
+      // 数组档翻页次数。片索引是逐帧量,选择器指到一条随生命期走的曲线时会翻;
+      // 指到逐粒子常量时**恒为 0**,那不是缺陷 —— 是那个材质本来就不翻页。
+      arrayPageTurns: this.emitters.reduce((n, e) => n + (e.arrayPageTurns || 0), 0),
+      // 数组档实际挂着的层数之和。翻页次数只有对着它才读得懂:一层的数组翻不了页。
+      arrayLayers: this.emitters.reduce((n, e) => n + (e.arraySlices ? e.arraySlices.length : 0), 0),
       ringEmitters: this.emitters.filter((e) => e.ringMode).length,
       ringEvicted: this.emitters.reduce((n, e) => n + (e.ringEvicted || 0), 0),
       ringRetired: this.emitters.reduce((n, e) => n + (e.ringRetired || 0), 0),
