@@ -38,6 +38,14 @@ function warnOnce(key, message) {
 }
 
 const num = (v, d = 0) => (Number.isFinite(+v) ? +v : d);
+// 有些量的「无限」是**有意义的取值**,不是坏数据:一个重发间隔为无穷的 burst 的意思
+// 是「不重发」。`num` 会把无穷当成坏数据退回默认值,于是无穷大的间隔变成默认的一
+// 百分之一秒 —— 那条 burst 就从发一次变成每秒发一百轮。这里保住无穷。
+const spanNum = (v, d = 0) => {
+  const n = +v;
+  if (Number.isFinite(n)) return n;
+  return (n === Infinity || v === 'Infinity') ? Infinity : d;
+};
 const vec3 = (a, d = [0, 0, 0]) => new THREE.Vector3(num(a?.[0], d[0]), num(a?.[1], d[1]), num(a?.[2], d[2]));
 const quat = (a) => new THREE.Quaternion(num(a?.[0]), num(a?.[1]), num(a?.[2]), num(a?.[3], 1));
 
@@ -251,7 +259,7 @@ function emissionPlan(system) {
     // 按它判「发够了没有」的判据都会跟着变弱。单周期里的诚实值是能塞进 duration
     // 的重发次数。
     const declared = Math.round(num(item.cycleCount, 1));
-    const interval = Math.max(num(item.repeatInterval, 0.01), 0.01);
+    const interval = Math.max(spanNum(item.repeatInterval, 0.01), 0.01);
     const cycles = declared === 0
       ? Math.max(1, Math.floor((duration - num(item.time)) / interval) + 1)
       : Math.max(1, declared);
@@ -597,6 +605,22 @@ class Emitter {
     // 起始延迟进的是出生触发那道归一化闸,取常量那一支就够:全部系统里只有一个
     // 声明了非零延迟。
     this.startDelaySeconds = num(sampleValue(this.system.startDelay, 0, 0.5), 0);
+    // 环形复用:系统不再让粒子活到寿命尽头就退场,而是拿新生的那颗**顶掉**环里的一位。
+    // 随之改变的是发射能不能被「满了」挡住:声明的容量不再是发射的闸,缓冲翻倍后的
+    // 大小才是。没有这一条,一个容量 1、循环、只靠一发 burst 的系统在我们这里发出第
+    // 一颗之后就再也发不出第二颗,而原版是每轮都发、每轮顶掉一位。
+    //
+    // 顶替是**轮转**选的,不是挑最老的那颗;搬运是逐字段拷贝,新粒子用自己的年龄、
+    // 位置与随机流,**不是接着上一颗往下跑**。
+    //
+    // 两处是推断,标出来:环的模数按未翻倍的容量取,游标每顶替一颗加一。这两个是彼此
+    // 独立的未知,真源里都还没定死,别拿其中一条去推另一条。
+    this.ringMode = Math.round(num(this.system.ringBufferMode, 0));
+    this.ringSize = Math.max(1, Math.round(num(this.system.maxParticles, 1)));
+    this.ring = [];
+    this.ringCursor = 0;
+    this.ringEvicted = 0;
+    this.ringRetired = 0;
     this.theoretical = emissionPlan(this.system);
     this.shapeType = (this.system.shape && this.system.shape.type) || null;
     this.shapeSupport = shapeSupport(this.system.shape);
@@ -866,7 +890,34 @@ class Emitter {
       gravity: sampleValue(start.gravityModifier, 0, r),
     };
     this.particles.push(p);
+    if (this.ringMode) this._ringPlace(p);
     for (const h of this.hooks) h.onSpawn?.(p);
+  }
+
+  /**
+   * 把新生的这颗放进环里的下一位,并处置被它顶掉的那一颗。
+   *
+   * 模式 1:被顶掉的那颗**真的死了**,走的是和寿命到点一样的死亡路径,所以它的死亡
+   * 子发射器会照放。模式 2:被顶掉的那颗**不死**,只是被换到环外,之后按自己的寿命
+   * 正常老死,通常比被顶那一刻晚一帧以上。
+   */
+  _ringPlace(p) {
+    const lane = this.ringCursor % this.ringSize;
+    this.ringCursor += 1;
+    const victim = this.ring[lane];
+    this.ring[lane] = p;
+    if (!victim || victim === p || victim.retired) return;
+    if (this.ringMode === 1) {
+      victim.retired = true;
+      this.ringEvicted += 1;
+      for (const h of this.hooks) h.onDeath?.(victim);
+      this._drop(victim);
+      const at = this.particles.indexOf(victim);
+      if (at >= 0) this.particles.splice(at, 1);
+    } else {
+      // 换到环外:不动它的年龄、位置与随机流,它继续跑自己的一生。
+      this.ringRetired += 1;
+    }
   }
 
   /**
@@ -885,7 +936,9 @@ class Emitter {
     dt = Math.min(dt, 0.1);
     const s = this.system, em = this.suppressed ? null : s.emission;
     this.age += dt * num(s.simulationSpeed, 1);
-    const cap = num(s.maxParticles, 1000);
+    // 环形模式下容量翻倍。翻倍是发射侧的上限,不是环的模数 —— 模式 2 顶出来的那些
+    // 粒子不死,要有地方待到自己老死,翻出来的那一半就是给它们的。
+    const cap = num(s.maxParticles, 1000) * (this.ringMode ? 2 : 1);
     // 子发射的目标系统**不自行播放**:它的发射完全由父粒子触发,而「触发」的意思是
     // 把这个系统搬到触发点、从它自己的 0 时刻**跑一遍它整套发射**(速率 + 全部 burst),
     // 不是只放 time=0 的那一发 —— 靠速率发射的目标一发都不会有 burst@0。
@@ -1049,7 +1102,7 @@ class Emitter {
       // cycleCount 0 = 无限循环(每 repeatInterval 重发一轮),非 0 = 固定轮数。
       const declared = num(burst.cycleCount, 1);
       const cycles = declared === 0 ? Infinity : Math.max(1, declared);
-      const interval = Math.max(num(burst.repeatInterval, 0.01), 0.01);
+      const interval = Math.max(spanNum(burst.repeatInterval, 0.01), 0.01);
       let c = state.cursors[bi] || 0;
       while (c < cycles && age >= num(burst.time) + c * interval) {
         c += 1;
@@ -1406,6 +1459,9 @@ export class EmoticonView {
       arrayModeOff: this.emitters.reduce((n, e) => n + (e.arrayModeOff || 0), 0),
       arraySampled: this.emitters.reduce((n, e) => n + (e.arraySlices ? 1 : 0), 0),
       arrayUnread: this.emitters.reduce((n, e) => n + (e.arrayUnread || 0), 0),
+      ringEmitters: this.emitters.filter((e) => e.ringMode).length,
+      ringEvicted: this.emitters.reduce((n, e) => n + (e.ringEvicted || 0), 0),
+      ringRetired: this.emitters.reduce((n, e) => n + (e.ringRetired || 0), 0),
       drawFaults: this.emitters.reduce((n, e) => n + (e.drawFaults || 0), 0),
       // 模块自己报的数,按模块名归并到一处。判据要读的就是这里 —— 没有它,
       // 模块跑没跑、跑出什么数,外面一个字也看不到,「绿」就无从谈起。
