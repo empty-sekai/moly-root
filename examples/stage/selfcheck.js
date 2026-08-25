@@ -38,7 +38,12 @@ const CHECK_ASSETS = [
   ['fixture-models/', 'directory'],
   ['camera/', 'directory'],
   ['perf-animations/', 'directory'],
-  ['ui/talk.json', 'expected-not-ready'],
+  // 已知缺口台账。`known-gap` 是**第三种状态**，不是一条通过的检查——
+  // 原来这一支把查到的结果只用来改措辞、`status` 写死 `pass`，于是它永远不会红：
+  // 产物没生成，判据却报通过。判别式要问的是「**变的是判定还是描述**」。
+  // 每条必须带具名理由：光有状态没理由，等于换个地方写恒真。
+  ['ui/talk.json', 'known-gap',
+   '需要调用方传 APK player data；它不是可下发的包，没有任何包名能路由到它'],
 ];
 
 function url(relativePath) {
@@ -121,16 +126,23 @@ export class CheckPanel {
     this.render();
   }
   render() {
-    const glyph = { pass: '✓', fail: '✗', pending: '…' };
-    const cls = { pass: 'check-pass', fail: 'check-fail', pending: 'check-pending' };
+    const glyph = { pass: '✓', fail: '✗', gap: '△', pending: '…' };
+    const cls = { pass: 'check-pass', fail: 'check-fail', gap: 'check-gap',
+                  pending: 'check-pending' };
     let pass = 0;
     let fail = 0;
+    let gap = 0;
     for (const item of this.items.values()) {
       if (item.status === 'pass') pass += 1;
       if (item.status === 'fail') fail += 1;
+      if (item.status === 'gap') gap += 1;
     }
     const summary = document.getElementById('selfcheck-summary');
-    if (summary) summary.textContent = `${pass} 通过 · ${fail} 失败`;
+    // 已知缺口单独计数，不并进通过——并进去就是把「我们知道它没就绪」说成「它好了」。
+    if (summary) {
+      summary.textContent = `${pass} 通过 · ${fail} 失败`
+        + (gap ? ` · ${gap} 已知缺口` : '');
+    }
     this.root.innerHTML = this.order.map((id) => {
       const item = this.items.get(id);
       const rows = item.rows.map((row) => `<div class="check-row ${cls[row.status] || 'check-pending'}">${glyph[row.status] || '…'} ${esc(row.label)}${row.detail ? ` <span>${esc(row.detail)}</span>` : ''}</div>`).join('');
@@ -141,17 +153,30 @@ export class CheckPanel {
 
 async function checkAssets(panel) {
   const rows = [];
-  for (const [path, kind] of CHECK_ASSETS) {
-    if (kind === 'expected-not-ready') {
+  for (const [path, kind, reason] of CHECK_ASSETS) {
+    if (kind === 'known-gap') {
       const result = path.endsWith('/') ? await directory(path) : await exists(path);
-      rows.push({ status: 'pass', label: path, detail: result.ok ? '已发现' : '未就绪（UI 域）' });
+      if (result.ok) {
+        // 台账过期：它已经存在了，却还挂在已知缺口上。这一条正是「曾经准、
+        // 后来不准」——不改名就会让人以为这一项仍然没就绪。
+        rows.push({ status: 'fail', label: path,
+                    detail: '台账过期：它已经存在了，却仍标着已知缺口' });
+      } else if (!reason) {
+        rows.push({ status: 'fail', label: path,
+                    detail: '标了已知缺口却没有具名理由' });
+      } else {
+        rows.push({ status: 'gap', label: path, detail: `已知缺口：${reason}` });
+      }
       continue;
     }
     const result = kind === 'directory' ? await directory(path) : await exists(path);
     rows.push({ status: result.ok ? 'pass' : 'fail', label: path, detail: result.ok ? '成功' : `缺失${result.error ? ` · ${result.error}` : ''}` });
   }
   const failed = rows.filter((row) => row.status === 'fail').length;
-  panel.set('c1', '产物齐全', failed ? 'fail' : 'pass', `${rows.length} 项逐项检查`, rows);
+  const gaps = rows.filter((row) => row.status === 'gap').length;
+  panel.set('c1', '产物齐全', failed ? 'fail' : (gaps ? 'gap' : 'pass'),
+    `${rows.length} 项逐项检查`
+    + (gaps ? ` · 已知缺口 ${gaps} 项（不计为通过）` : ''), rows);
   return rows;
 }
 

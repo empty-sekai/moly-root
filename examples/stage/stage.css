@@ -84,6 +84,8 @@ select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-o
 .check-pass { border-color: var(--ok); color: var(--ok); }
 .check-fail { border-color: var(--bad); color: var(--bad); }
 .check-pending { border-color: var(--muted); color: var(--muted); }
+/* 已知缺口:既不是通过也不是失败,面板上要一眼看出它是第三种状态 */
+.check-gap { border-color: var(--warn, #c8a24a); color: var(--warn, #c8a24a); }
 .footer-line { display: flex; justify-content: space-between; gap: 12px; padding: 12px 2px 0; color: var(--muted); font-size: 11px; }
 code { color: var(--accent-2); font-family: var(--mono); }
 
