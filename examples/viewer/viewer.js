@@ -51,7 +51,8 @@ view.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x14151c);
-const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 1000);   // 天空穹顶半径 60,远平面要够
+// 远平面要装得下天空网格:它是产物里那一个,离自己的原点最远约 660,而它每帧钉在相机脚下。
+const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 1000);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 const grid = new THREE.GridHelper(4, 16, 0x2c2f3d, 0x21232e);
@@ -308,7 +309,7 @@ function enableEnv(on) {
     environment.attach();
     environment.setCharacterMaterials(current ? current.mats : []);
     grid.visible = false;                  // 有地面了,诊断用的地格网让位
-    scene.background = null;               // 天空穹顶接管背景
+    scene.background = null;               // 天空网格接管背景
   } else {
     environment.detach();
     grid.visible = true;

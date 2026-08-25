@@ -113,31 +113,78 @@ export const LIGHT_WIRING = [
 
 // ---- 天空 -----------------------------------------------------------------
 //
-// 真运行时的天空是一个网格 + 一份材质属性块,自带四个属性:混合进度、两张渐变、一个附加色;
-// 换天气 = **两张渐变同时在位** + 插值进度。本示例照这个形状实现,但网格是**近似**:
+// 天空是一个网格 + 一份材质属性块,不是天空盒。网格与材质都在站点系统自己那套共享包里,
+// 15 个天气**共用同一份网格与同一份材质**,天气之间只差各自那张 32x1 的渐变贴图;
+// 换天气 = **两张渐变同时在位** + 插值进度。本示例照这个形状实现:
 //
-//   * 几何用半球穹顶,不是原始天空网格(那个网格在 common 包里,提取侧尚未产出);
-//     `index.json` 里一旦出现 `sky.mesh`,`SkyDome` 会走那个分支(见 `_geometryFor`)。
-//   * **穹顶 UV 是近似**:渐变按世界方向的高度分量采样(天顶 → 第 0 个纹素,地平线 → 第 31 个),
-//     真网格的 UV 布置未知,所以这条映射的方向本身也是近似。
+//   * 几何**从产物装载**(两条来源见 `Environment._loadSky`)。`SkyDome` 只认拿到的网格:
+//     装不上就**不画天空**,不自造一个穹顶顶替 —— 自造形状会连带把 UV 也造出来,
+//     而 UV 正是这条渐变律的输入,造出来的 UV 就是造出来的天空。
+//   * 渐变按**网格 UV0 的纵坐标**采样,窗口两端从材质的 `_GradientMinY` / `_GradientMaxY` 读,
+//     不写死:写死之后材质一改,画面就按旧窗口继续算,而且是悄悄地算。
 //   * 渐变采样单独抽成 `SKY_RAMP_SAMPLE` 一段 GLSL:换实现只改这一段,不动其余管线。
 //
-// 天空网格每帧钉到相机水平位置(与运行时把它钉到玩家位置同义:穹顶永远不被走出去)。
+// 天空网格每帧钉到相机水平位置(与运行时把它钉到玩家位置同义:天空永远不被走出去)。
+
+// 天空材质认**属性**不认名字:这条律要的输入就是窗口两端加两个渐变槽,谁带齐谁就是它。
+// 按名字挑等于把包内的命名抄进示例,包一改名示例就静默挑不到。
+export const SKY_GRADIENT_MIN = '_GradientMinY';
+export const SKY_GRADIENT_MAX = '_GradientMaxY';
+export const SKY_RAMP_SLOTS = ['_RampTex1', '_RampTex2'];
+// 天空视图脚本的类名:站点系统有两个 shell 包都挂着它,带网格的那个才是天空所在。
+const SKY_VIEW_SCRIPT = 'EnvironmentSkyView';
+
+/**
+ * 一份材质记录里的渐变窗口。两端缺一、读不成数、或不成一个正区间就返回 `null` ——
+ * 调用方据此**停画天空**,不许在这里补默认值。
+ */
+export function skyGradientWindow(material) {
+  const f = material && material.floats;
+  if (!f) return null;
+  const min = +f[SKY_GRADIENT_MIN], max = +f[SKY_GRADIENT_MAX];
+  if (!Number.isFinite(min) || !Number.isFinite(max) || !(max > min)) return null;
+  return { min, max };
+}
+
+/** 一份包文档里的天空材质:带齐窗口两端与两个渐变槽的那一份。 */
+export function skyMaterialOf(pkg) {
+  const list = (pkg && pkg.materials) || [];
+  return list.find((m) => m && skyGradientWindow(m)
+    && m.textures && SKY_RAMP_SLOTS.every((slot) => slot in m.textures)) || null;
+}
+
+/** 一个装载好的场景里、用天空材质绘制的那个网格。 */
+function pickSkyMesh(scene, materialName) {
+  let hit = null;
+  scene.traverse((o) => {
+    if (hit || !o.isMesh || !o.geometry) return;
+    if (!materialName) { hit = o; return; }
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    if (mats.some((m) => m && m.name === materialName)) hit = o;
+  });
+  return hit;
+}
 
 export const SKY_RAMP_SAMPLE = /* glsl */`
-// 渐变采样(**近似**):v = 世界方向的高度分量,天顶 v=1 取纹素 0,地平线 v=0 取纹素 31。
-// 32x1 的纹理边缘半纹素内缩,免得线性过滤在两端把边缘纹素与自己混出台阶。
-vec2 envRampUv(float height) {
-  float u = clamp(1.0 - clamp(height, 0.0, 1.0), 0.0, 1.0);
-  float halfTexel = 0.5 / ${RAMP_WIDTH}.0;   // 不用 half 当变量名:那是 GLSL 保留字
-  return vec2(mix(halfTexel, 1.0 - halfTexel, u), 0.5);
+// 渐变采样(真律)。v 是网格 UV0 的纵坐标(作者侧取向:天顶端≈1,底端≈0),
+// 窗口两端 minY / maxY 由材质给出:
+//     t = saturate((v - minY) / (maxY - minY));   u = 1 - t
+// 天顶端 → u≈0 → 纹素 0;窗口下沿及其以下 → t=0 → u=1 → 纹素 31。
+// **不做半纹素内缩**:运行时拿 u 直接采样,32x1 的纹理两端 clamp;内缩会把整条取样位置挪动
+// 半个纹素,那是另一条律。窗口退化(两端相等)时给分母一个下限,免得除出 NaN 把天空涂黑 ——
+// 数据里不存在这种窗口,这只是不让一处坏数据变成满屏黑。
+vec2 envRampUv(float v, float minY, float maxY) {
+  float t = clamp((v - minY) / max(maxY - minY, 1e-6), 0.0, 1.0);
+  return vec2(1.0 - t, 0.5);
 }
 `;
 
 const SKY_VERT = /* glsl */`
-varying vec3 vDir;
+varying float vGradientV;
 void main() {
-  vDir = normalize(position);
+  // 导出的几何按 glTF 的纵向纹理原点存 UV,与作者侧上下相反,所以这条律的 v 是 1 - uv.y。
+  // 三个环可核:天顶环 0.008729 → 0.991271,地平环 0.5 → 0.5,底环 0.991271 → 0.008729。
+  vGradientV = 1.0 - uv.y;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `;
@@ -146,12 +193,14 @@ const SKY_FRAG = /* glsl */`
 uniform sampler2D rampTex1;
 uniform sampler2D rampTex2;
 uniform float fadeProgress;
+uniform float gradientMinY;
+uniform float gradientMaxY;
 uniform vec4 additiveColor;
 uniform float additiveIntensity;
-varying vec3 vDir;
+varying float vGradientV;
 ${SKY_RAMP_SAMPLE}
 void main() {
-  vec2 uv = envRampUv(vDir.y);
+  vec2 uv = envRampUv(vGradientV, gradientMinY, gradientMaxY);
   vec3 a = texture2D(rampTex1, uv).rgb;
   vec3 b = texture2D(rampTex2, uv).rgb;
   vec3 c = mix(a, b, clamp(fadeProgress, 0.0, 1.0));
@@ -169,6 +218,9 @@ class SkyDome {
       rampTex1: { value: ENV_WHITE_TEX },
       rampTex2: { value: ENV_WHITE_TEX },
       fadeProgress: { value: 0 },
+      // 窗口两端的**占位值**:材质没读到就不画天空(见 `ready`),这两个不会被用到。
+      gradientMinY: { value: 0 },
+      gradientMaxY: { value: 0 },
       additiveColor: { value: new THREE.Vector4(0, 0, 0, 0) },
       additiveIntensity: { value: 1 },
     };
@@ -177,38 +229,80 @@ class SkyDome {
       uniforms: this.uniforms,
       vertexShader: SKY_VERT,
       fragmentShader: SKY_FRAG,
-      side: THREE.BackSide,
+      // 网格法线朝内、三角绕序与法线一致 —— 从里面看见的是正面,与材质那条背面剔除同一结果。
+      side: THREE.FrontSide,
       depthWrite: false,
       depthTest: true,
     });
-    this.geometrySource = 'hemisphere-approximation';
+    this.geometrySource = null;    // 装上网格之前没有来源可报
+    this.gradient = null;          // { min, max, source };读不到就是 null,不填默认值
+    this.meshInfo = null;
+    this.wantVisible = true;
     this.mesh = new THREE.Mesh(this._geometryFor(null), this.material);
-    this.mesh.name = 'env_sky_dome';
+    this.mesh.name = 'env_sky';
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = -1000;         // 先画天空,再画其余一切
+    this.mesh.visible = false;             // 网格与窗口都到位之前不画
   }
 
   /**
-   * 几何来源。`index.json` 里出现 `sky.mesh`(一个 glTF/glb 相对路径)时用它,否则用半球近似。
-   * 本示例只做**分支**与来源标注,不猜网格形状。
+   * 几何来源。给了网格就用它并记下来源;**没给就没有天空** —— 返回一个空几何(那是「还没有
+   * 网格」,不是一个形状),`ready` 因此为假,天空不画。本示例不自造穹顶顶替产物网格。
    */
-  _geometryFor(loadedGeometry) {
+  _geometryFor(loadedGeometry, source) {
     if (loadedGeometry) {
-      this.geometrySource = 'index.json sky.mesh';
+      this.geometrySource = source || 'unnamed';
       return loadedGeometry;
     }
-    // 半球:上半球 + 一点点裙边(地平线以下 6 度),免得相机略微俯视时看到穹顶开口。
-    const g = new THREE.SphereGeometry(60, 48, 24, 0, Math.PI * 2, 0, Math.PI * 0.5 + 0.1);
-    return g;
+    this.geometrySource = null;
+    return new THREE.BufferGeometry();
   }
 
-  useGeometry(geometry) {
+  useGeometry(geometry, source, name) {
     if (!geometry) return false;
     const old = this.mesh.geometry;
-    this.mesh.geometry = this._geometryFor(geometry);
+    this.mesh.geometry = this._geometryFor(geometry, source);
     if (old && old !== this.mesh.geometry) old.dispose();
+    const g = this.mesh.geometry;
+    const pos = g.getAttribute('position');
+    const index = g.getIndex();
+    this.meshInfo = {
+      name: name || g.name || null,
+      vertices: pos ? pos.count : 0,
+      triangles: index ? index.count / 3 : (pos ? Math.floor(pos.count / 3) : 0),
+      // UV0 是这条渐变律**唯一**的输入:没有它这个网格画不成天空。
+      uv: !!g.getAttribute('uv'),
+    };
+    this._syncVisible();
     return true;
   }
+
+  /** 渐变窗口。读不到(`win` 为 null)就**清空**并停画:既不留上一次的值,也不填默认值。 */
+  setGradientWindow(win, source) {
+    if (!win || !Number.isFinite(win.min) || !Number.isFinite(win.max) || !(win.max > win.min)) {
+      this.gradient = null;
+      this._syncVisible();
+      return false;
+    }
+    this.uniforms.gradientMinY.value = win.min;
+    this.uniforms.gradientMaxY.value = win.max;
+    this.gradient = { min: win.min, max: win.max, source: source || 'unnamed' };
+    this._syncVisible();
+    return true;
+  }
+
+  /** 网格(含 UV0)与窗口都到位才画得成天空。 */
+  get ready() {
+    return !!(this.geometrySource && this.gradient && this.meshInfo && this.meshInfo.uv);
+  }
+
+  setVisible(on) {
+    this.wantVisible = !!on;
+    this._syncVisible();
+    return this.mesh.visible;
+  }
+
+  _syncVisible() { this.mesh.visible = this.wantVisible && this.ready; }
 
   setRamps(a, b, progress) {
     this.uniforms.rampTex1.value = a || ENV_WHITE_TEX;
@@ -443,6 +537,9 @@ export class Environment {
     // 挂载**之前**把它引用到的 glb 全部读进来(见 loadPhenomenon 末尾那次 preload)。
     this.meshLoader = makeSharedMeshLoader(`${this.root}/`);
     this.meshFor = (file, node) => this.meshLoader.get(file, node);
+    // 天空网格的来源可能落在 `phenomena/` 之外(站点系统的共享包),所以这一份按**完整相对
+    // 路径**取,不预设根目录。
+    this.skyMeshLoader = makeSharedMeshLoader('');
 
     this.index = null;
     this.names = [];            // 现象资产名(目录名),升序
@@ -483,7 +580,9 @@ export class Environment {
     this.characterMaterials = [];
     this.errors = [];
     this.fxDataError = null;     // 清单声明了发射器却读不出效果文档时的如实记录
-    this.skyMeshNote = 'index.json 未给天空网格,使用半球近似';
+    this.skyMeshNote = '天空尚未装载';
+    this.skyMaterial = null;     // 天空材质记录(渐变窗口的**唯一**出处,不另存两个数字)
+    this.skyGradientSource = null;
   }
 
   // ---- 装载 ----
@@ -500,10 +599,93 @@ export class Environment {
     }
     this.overrideSite = [...sites].sort()[0] || null;
     this.overrideSites = [...sites].sort();
-    if (idx.sky && idx.sky.mesh) {
-      this.skyMeshNote = `index.json 给了天空网格 ${idx.sky.mesh}(未装载:本示例的装载分支待接)`;
-    }
+    await this._loadSky(idx);
     return true;
+  }
+
+  /**
+   * 天空的网格与材质。两条来源,先后有序:
+   *
+   *   1) `phenomena/index.json` 的 `sky`:`mesh` 是相对本清单的 glb 路径,`material` 是材质名,
+   *      `gradient.minY` / `gradient.maxY` 是渐变窗口。清单一旦给出这一条就优先。
+   *   2) 站点包清单:那个**自带网格**的 shell 包 —— 天空视图脚本与天空材质都在它里面。
+   *      同类的另一个 shell 包只挂着同一个脚本却没有几何,所以按「带网格」筛,不按名字筛。
+   *      包文档的文件名是几何文件换后缀;文档里带齐渐变属性的那份材质就是天空材质。
+   *
+   * 两条都不成:**天空不画**,原因进 `errors` 与 `status()`。窗口尤其不拿默认值顶替 ——
+   * 顶替之后材质一改,画面照旧按旧窗口算,谁都看不出来。
+   */
+  async _loadSky(idx) {
+    const plan = this._skyPlanFromIndex(idx) || await this._skyPlanFromSite();
+    if (!plan) {
+      this.skyMeshNote = '天空网格与材质都没解析到:天空不画';
+      return false;
+    }
+    this.skyMaterial = plan.material;
+    this.skyGradientSource = plan.gradientSource;
+    const win = skyGradientWindow(plan.material);
+    if (!win) this.errors.push(`${plan.gradientSource}: 渐变窗口读不出`);
+    await this.skyMeshLoader.preload([plan.url]);
+    const scene = this.skyMeshLoader.get(plan.url);
+    const picked = scene ? pickSkyMesh(scene, plan.materialName) : null;
+    if (!picked) {
+      this.errors.push(`${plan.url} → 天空网格取不到`
+        + `${plan.materialName ? `(按材质 ${plan.materialName} 找)` : ''}`);
+      this.skyMeshNote = `天空网格 ${plan.meshSource} 取不到:天空不画`;
+      return false;
+    }
+    // 网格在包里挂在几层节点之下,把那几层的变换烘进几何 —— 之后这个网格自己跟相机走。
+    picked.updateWorldMatrix(true, false);
+    this.sky.useGeometry(picked.geometry.clone().applyMatrix4(picked.matrixWorld),
+      plan.meshSource, picked.name || null);
+    this.sky.setGradientWindow(win, plan.gradientSource);
+    const info = this.sky.meshInfo || {};
+    this.skyMeshNote = this.sky.ready
+      ? `天空网格 ${plan.meshSource}(${info.vertices} 顶点 / ${info.triangles} 三角)`
+        + ` · 渐变窗口 [${win.min}, ${win.max}] 读自 ${plan.gradientSource}`
+      : `天空装载不全(网格 ${info.uv ? '有' : '缺'} UV0 · 窗口 ${win ? '有' : '缺'}):天空不画`;
+    return this.sky.ready;
+  }
+
+  /** 来源一:现象清单自己给出天空。给了就照它走,连窗口一起。 */
+  _skyPlanFromIndex(idx) {
+    const s = (idx && idx.sky) || null;
+    if (!s || !s.mesh) return null;
+    const g = s.gradient || {};
+    return {
+      url: `${this.root}/${s.mesh}`,
+      materialName: s.material || null,
+      meshSource: `phenomena/index.json sky.mesh(${s.mesh})`,
+      // 摆成与材质记录同一个形状,下游只认一种取法。
+      material: { floats: { [SKY_GRADIENT_MIN]: +g.minY, [SKY_GRADIENT_MAX]: +g.maxY } },
+      gradientSource: 'phenomena/index.json sky.gradient',
+    };
+  }
+
+  /** 来源二:站点包清单里那个自带网格的 shell 包。 */
+  async _skyPlanFromSite() {
+    const doc = await this._json(`${this.base}/site/packages.json`);
+    const list = doc && doc.packages ? Object.values(doc.packages) : null;
+    if (!list) return null;
+    const hit = list.find((p) => p && p.kind === 'shell'
+      && ((p.inventory || {}).scripts || {})[SKY_VIEW_SCRIPT]
+      && num(((p.inventory || {}).types || {}).Mesh) > 0
+      && (p.artifacts || {}).geometry);
+    if (!hit) { this.errors.push('site/packages.json 里没有自带网格的天空 shell 包'); return null; }
+    const dir = `${this.base}/site/${hit.directory}`;
+    const geo = String(hit.artifacts.geometry);
+    const pkg = await this._json(`${dir}/${geo.replace(/\.[^./]+$/, '')}.json`);
+    if (!pkg) return null;
+    const mat = skyMaterialOf(pkg);
+    if (!mat) { this.errors.push(`${hit.key}: 包里没有带齐渐变属性的天空材质`); return null; }
+    const file = (pkg.geometry || {}).file || geo;
+    return {
+      url: `${dir}/${file}`,
+      materialName: mat.name || null,
+      meshSource: `site/${hit.directory}/${file}`,
+      material: mat,
+      gradientSource: `材质 ${mat.name || '(未命名)'}(site/${hit.directory})`,
+    };
   }
 
   /** 一个现象的四份产物 + 覆盖。已装载的直接返回(现象资产很轻,全量常驻没有压力)。 */
@@ -727,7 +909,9 @@ export class Environment {
     }
     this.post.setProfile(prof);
 
-    // 天空:两张渐变同时在位 + 进度。
+    // 天空:两张渐变同时在位 + 进度。渐变窗口每次都**从材质记录现取** —— 不缓存成两个数字,
+    // 缓存下来的那份会在材质改动之后继续算旧窗口,而且看不出来。
+    this.sky.setGradientWindow(skyGradientWindow(this.skyMaterial), this.skyGradientSource);
     this.sky.setRamps(a.ramp, b.ramp, t);
   }
 
@@ -840,10 +1024,10 @@ export class Environment {
 
   setPost(on) { this.postOn = !!on; this.post.setEnabled(!!on); }
 
+  /** 返回**真的画不画**:网格或窗口没到位时它是假,与开关的意愿分开报。 */
   setSkyVisible(on) {
     this.skyVisible = !!on;
-    this.sky.mesh.visible = this.skyVisible;
-    return this.skyVisible;
+    return this.sky.setVisible(this.skyVisible);
   }
 
   setGroundVisible(on) {
@@ -1102,12 +1286,17 @@ export class Environment {
         dataError: this.fxDataError || null,
       },
       sky: {
-        visible: this.skyVisible,
+        // `wanted` 是开关的意愿,`visible` 是这一帧真的画不画 —— 网格或窗口缺一就是假。
+        wanted: this.skyVisible,
+        visible: this.sky.mesh.visible,
+        ready: this.sky.ready,
         geometrySource: this.sky.geometrySource,
+        mesh: this.sky.meshInfo,
+        // 窗口连同它的出处一起报:一眼看出是读出来的,还是根本没读到。
+        gradient: this.sky.gradient,
+        meshLoad: this.skyMeshLoader.stats(),
         note: this.skyMeshNote,
         approximations: [
-          '穹顶几何是半球近似(真天空网格在共享包里,提取侧尚未产出)',
-          '穹顶 UV 是近似:按世界方向的高度分量采样渐变,真网格 UV 未知',
           '附加色的缩放因子来源未知,默认 1',
         ],
       },
@@ -1135,7 +1324,7 @@ export class Environment {
  * 「原始数据不含」与「本示例未实现」是两件不同的事,分开写 —— 前者没人在等,后者是欠账。
  */
 export const NOT_RESTORED = [
-  '真天空网格:穹顶几何**已在产物里**(models 里有 dome_01 / HalfSphere_01 等候选),但「天空视图用的是哪一张」尚未认定,所以 index.json 里没有 sky.mesh 指向它 —— 当前仍是半球近似 + 近似 UV。认定之后本示例走 _geometryFor 的网格分支,不必改其余管线',
+  '天空材质的附加色:材质记录里那一项(以及它的 alpha)本示例不读,附加色 uniform 恒为零。当前这份材质里它本来就是零,所以画面上看不出差别 —— 但那是数据碰巧,不是接上了',
   '闪电时间轴:只有一个现象带时间轴资产,本示例不建模时间轴(它在产物里登记为未支持)',
   '粒子模块:**提取侧已全部建模**(自定义数据/子发射器/碰撞/受力/噪声/拖尾都在产物里),但本示例的发射器引擎只实现了出生与基本运动 —— 曲线型自定义数据、子发射器、碰撞与拖尾在画面上还未生效;未实现项与未建模的发射形状逐项计数见 particles.unmodelledShapes',
   '发射形状 Mesh / Box 等没有发射公式:这些形状的发射器**整条停发**,不退化成点发射(点发射会把本该铺开的粒子全堆在发射节点原点上)。当前站点真的挂着几个、分别是什么形状,见 particles.suppressed / particles.suppressedShapes。renderMode=Mesh 是另一道渲染器能力缺口,单独见 particles.skipped.unsupported / unsupportedModes',
