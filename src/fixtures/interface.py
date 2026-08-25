@@ -8,3 +8,21 @@ def extract(store, master, out_dir):
     """Extract fixture performance data into ``out_dir``."""
     extract_areas(store, out_dir)
     return extract_from_store(store, out_dir, master)
+
+
+def extract_geometry(store, out_dir):
+    """Extract the furniture geometry of the same packages into ``out_dir``.
+
+    The geometry is a separate entry point rather than part of :func:`extract`
+    because it is a separate decision: it writes one glTF binary per package for
+    the whole fixture family, which is orders of magnitude larger than the two
+    index documents :func:`extract` writes, and a caller that wants the attach
+    points does not necessarily want a few gigabytes of meshes.  The store is
+    the same one, so nothing is opened twice.
+
+    The import is deferred to the call: the mesh reader pulls in UnityPy's mesh
+    helper, and a caller that never asks for geometry should not have to have it
+    importable.
+    """
+    from .meshes import extract_meshes
+    return extract_meshes(store, out_dir)
