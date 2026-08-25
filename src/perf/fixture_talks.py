@@ -236,11 +236,12 @@ def _semantics(source):
         ),
         "fixtures": (
             "fixtures maps each fixtureId these talks are gated on to the package "
-            "that holds that furniture, taken from the master row that states the "
-            "two together.  It is the join a consumer needs: a talk names only a "
-            "fixtureId, while the geometry and attach-point documents are keyed "
-            "by package name, so without it the pairing could only be guessed "
-            "from package names that look related."
+            "that holds that furniture: the master row's assetbundleName behind "
+            "the fixture domain's package prefix, which is how every other "
+            "product keys that furniture.  It is the join a consumer needs: a "
+            "talk names only a fixtureId, while the geometry and attach-point "
+            "documents are keyed by package name, so without it the pairing "
+            "could only be guessed from package names that look related."
         ),
         "constants": {
             "source": (f"{LIB_PACKAGE}/{source}" if source else None),
@@ -359,11 +360,17 @@ def extract_fixture_talks(master_source, talk_bundle, out_path, master_cache=Non
     # the geometry and attach-point documents are keyed by package name -- so
     # without this a consumer cannot get from "this talk" to "this furniture",
     # and would have to guess the pairing from package names that merely look
-    # related.  The row is the only place the two are stated together.
-    fixture_packages = {
-        row["id"]: row.get("assetbundleName")
-        for row in master.table("mysekaiFixtures")
-    }
+    # related.  The master row states the id and its ``assetbundleName``
+    # together; the package name every product is keyed by is that value behind
+    # the fixture domain's own prefix, so the prefix comes from the router
+    # rather than being spelled again here.  Measured on the shipped set, all
+    # 282 names this builds for the referenced fixtures exist in
+    # ``fixture-models/``.
+    from core.assets.router import FIXTURE_PREFIX
+    fixture_packages = {}
+    for row in master.table("mysekaiFixtures"):
+        stem = row.get("assetbundleName")
+        fixture_packages[row["id"]] = f"{FIXTURE_PREFIX}{stem}" if stem else None
     assets = _text_assets(talk_bundle)
     tables, scalars, constant_source = read_constants(lib_bundle)
 
