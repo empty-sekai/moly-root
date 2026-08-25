@@ -244,11 +244,19 @@ export function sampleValue(spec, t = 0, r = 0.5) {
 function emissionPlan(system) {
   const emission = system?.emission;
   if (!emission) return { burst: 0, rate: 0, total: 0, duration: 0 };
+  const duration = Math.max(0, num(system.duration, 0));
   const burst = (emission.bursts || []).reduce((sum, item) => {
-    const cycles = Math.max(1, Math.round(num(item.cycleCount, 1)));
+    // cycleCount 0 是**无限轮**,不是「一轮」,也不是「不发」:它按 repeatInterval
+    // 一直重发。夹成 1 会让这个数小得不动声色 —— 一个看起来合理的小数字,而任何
+    // 按它判「发够了没有」的判据都会跟着变弱。单周期里的诚实值是能塞进 duration
+    // 的重发次数。
+    const declared = Math.round(num(item.cycleCount, 1));
+    const interval = Math.max(num(item.repeatInterval, 0.01), 0.01);
+    const cycles = declared === 0
+      ? Math.max(1, Math.floor((duration - num(item.time)) / interval) + 1)
+      : Math.max(1, declared);
     return sum + sampleValue(item.count, 0, 0.5) * cycles;
   }, 0);
-  const duration = Math.max(0, num(system.duration, 0));
   const rate = sampleValue(emission.rateOverTime, 0, 0.5) * duration;
   return { burst, rate, total: burst + rate, duration };
 }
@@ -586,6 +594,9 @@ class Emitter {
     this.plays = [];
     this._auto = { age: 0, pending: 0, cursors: [], origin: null, follow: null };
     this.peak = 0;
+    // 起始延迟进的是出生触发那道归一化闸,取常量那一支就够:全部系统里只有一个
+    // 声明了非零延迟。
+    this.startDelaySeconds = num(sampleValue(this.system.startDelay, 0, 0.5), 0);
     this.theoretical = emissionPlan(this.system);
     this.shapeType = (this.system.shape && this.system.shape.type) || null;
     this.shapeSupport = shapeSupport(this.system.shape);
@@ -621,10 +632,24 @@ class Emitter {
       file = material.textures?.[key] ?? null;
       const arr = material.textureArrays?.[`${key}2DArray`]
         || material.textureArrays?.[key] || null;
-      if (arr && Array.isArray(arr.files) && arr.files.length) {
+      // **一个绑定着的数组不代表这个材质在用数组。** 材质自己说了用哪一种,而两种
+      // 槽位是**同时绑着**的:采样参数里 `arrayMode` 为假时,该采的是单图那一槽,
+      // 数组只是躺在那里没被用。只看「有没有数组」就会逐粒子从 4 层里挑一层去画,
+      // 而原版画的是同一张 —— 云会变成四种云随机混着出现,看着「有变化」而其实是错的。
+      // 字段缺席不算表态,所以只在**显式为假**时才让开。
+      const arrayMode = arr && (arr.sampling || {}).arrayMode;
+      if (arr && arrayMode === false) {
+        this.arrayModeOff = (this.arrayModeOff || 0) + 1;
+      } else if (arr && Array.isArray(arr.files) && arr.files.length) {
         this.arraySlices = arr.files.map((f) => textureFor(f));
         this.arraySampling = arr.sampling || null;
       }
+      // 只有基础贴图那一槽走上面这条路。材质上别的槽(过渡图、自发光图……)同样绑着
+      // 数组,而这个 demo 一张都没读 —— 数出来,不然「基础槽处理对了」会被当成
+      // 「数组都处理了」。未读就是未读,得有个数。
+      this.baseMapKey = key;
+      this.arrayUnread = Object.keys(material.textureArrays || {})
+        .filter((k) => k !== `${key}2DArray` && k !== key).length;
     } else if (material?.external) {
       warnOnce('matext', '有粒子材质在别的包里(变体件复用主件材质),本 demo 未加载,退化成无贴图');
     }
@@ -871,10 +896,19 @@ class Emitter {
           if (play.done) continue;
           play.age += dt * num(s.simulationSpeed, 1);
           if (play.follow) play.origin.copy(play.follow.pos);
+          // 出生触发每帧过三道闸,全部通过才发。父粒子还活着是第一道(它死时由
+          // onDeath/onDrop 收场);第二道是父粒子的归一化年龄减去本系统自己的起始
+          // 延迟要落在 [0,1);第三道是播放时间要小于上限,而上限对循环目标是无穷、
+          // 对非循环目标是它自己的时长 —— 少了第三道,非循环目标会一直跟着父粒子发。
+          const follow = play.follow;
+          if (follow) {
+            const life = num(follow.life, 0);
+            const u = life > 0 ? (num(follow.age, 0) - this.startDelaySeconds) / life : 0;
+            if (u < 0 || u >= 1) continue;
+          }
+          const limit = s.looping ? Infinity : num(s.duration, 1);
+          if (play.age >= limit) { play.done = true; continue; }
           this._runEmission(em, cap, play, dt);
-          // 跟随型(出生触发)由父粒子的死亡收场,其余到时长为止。循环的目标在这里
-          // 仍然收场:一次触发是一次播放,没有主人的循环会永远发下去。
-          if (!play.follow && play.age >= num(s.duration, 1)) play.done = true;
         }
         if (this.plays.length) this.plays = this.plays.filter((play) => !play.done);
       } else {
@@ -1001,7 +1035,7 @@ class Emitter {
     const system = this.system;
     const duration = Math.max(0.0001, num(system.duration, 1));
     let age = state.age;
-    if (system.looping) {
+    if (system.looping && !state.follow) {
       const loop = Math.floor(age / duration);
       if (loop !== state.loop) { state.loop = loop; state.cursors = []; }
       age -= loop * duration;
@@ -1040,6 +1074,30 @@ class Emitter {
 
   /** 停掉一次播放(父粒子死了,或整条被回收)。 */
   stopSub(play) { if (play) play.done = true; }
+
+  /**
+   * 死亡、碰撞、触发器这三种触发**不是播放**:它们只对目标的第一发 burst 记一次数,
+   * 就地发那么多颗,然后结束。这条路径不读速率、不读 burst 的时刻/轮数/重发间隔、
+   * 也不读目标循不循环 —— 所以一个 time 大于 0 的 burst 在死亡触发时立刻就发,
+   * 而没有任何 burst 的目标在死亡触发下**一颗都不发**。
+   *
+   * 这条路径上读到的 burst 字段共四个,其中「发多少颗」是确定的,概率是否在内尚未
+   * 定死;这里按读了处理,数目上的差别只在概率小于 1 的记录上。
+   */
+  emitBurstZero(origin) {
+    const em = this.system.emission;
+    const bursts = em && em.bursts;
+    if (!bursts || !bursts.length) return 0;
+    const burst = bursts[0];
+    if (Math.random() > num(burst.probability, 1)) return 0;
+    const cap = num(this.system.maxParticles, 1000);
+    const count = Math.round(sampleValue(burst.count, 0, Math.random()));
+    let made = 0;
+    for (let k = 0; k < count && this.particles.length < cap; k++) {
+      this.spawn(origin); made += 1;
+    }
+    return made;
+  }
 
   reset() {
     for (const p of this.particles) this._drop(p);
@@ -1343,6 +1401,11 @@ export class EmoticonView {
         return m;
       }, {}),
       moduleFaults: this.emitters.flatMap((e) => e.moduleFaults || []),
+      // 材质绑着数组、但材质自己说不用数组的次数。这一项不是错误,是**被正确让开的
+      // 绑定** —— 数出来才看得见「我们没有把它当数组画」这件事真的发生了。
+      arrayModeOff: this.emitters.reduce((n, e) => n + (e.arrayModeOff || 0), 0),
+      arraySampled: this.emitters.reduce((n, e) => n + (e.arraySlices ? 1 : 0), 0),
+      arrayUnread: this.emitters.reduce((n, e) => n + (e.arrayUnread || 0), 0),
       drawFaults: this.emitters.reduce((n, e) => n + (e.drawFaults || 0), 0),
       // 模块自己报的数,按模块名归并到一处。判据要读的就是这里 —— 没有它,
       // 模块跑没跑、跑出什么数,外面一个字也看不到,「绿」就无从谈起。
