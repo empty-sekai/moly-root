@@ -328,9 +328,17 @@ def _store(monkeypatch, mapping):
     monkeypatch.setattr(environments.UnityPy, "load",
                         lambda path: mapping[os.path.basename(str(path))])
 
-def _run(tmp_path, monkeypatch, mapping, **kwargs):
-    _store(monkeypatch, mapping)
+def _run(tmp_path, monkeypatch, mapping, engine=None, **kwargs):
+    """*engine* holds files the loader serves that are **not** packages of the run.
+
+    They are handed in the way a caller hands in the engine's own containers: as
+    extra pointer targets, never as bundles to extract.  Left out, the run is the
+    default one.
+    """
+    _store(monkeypatch, {**mapping, **(engine or {})})
     out = tmp_path / "out" / "phenomena"
+    if engine:
+        kwargs["extra_archives"] = [str(tmp_path / "engine" / name) for name in engine]
     result = environments.extract_phenomena(
         [str(tmp_path / "bundles" / name) for name in mapping], str(out), **kwargs)
     return result, out, json.loads((out / "index.json").read_text(encoding="utf-8"))
@@ -1106,7 +1114,7 @@ def _model_common_bundle(phenomenon, mesh_name="dome_01"):
     return SimpleNamespace(objects=objects)
 
 
-def _mesh_emitter_bundle(phenomenon, site, mesh_file_id=0):
+def _mesh_emitter_bundle(phenomenon, site, mesh_file_id=0, mesh_path_id=620):
     """A site effect whose emitter draws copies of a mesh instead of quads."""
     bundle = _site_bundle(phenomenon, site)
     archive = bundle.objects[0].assets_file
@@ -1114,16 +1122,76 @@ def _mesh_emitter_bundle(phenomenon, site, mesh_file_id=0):
     bundle.objects.insert(-1, _Object(
         "ParticleSystemRenderer", 213,
         {"m_GameObject": {"m_PathID": 210}, "m_RenderMode": 4, "m_Pivot": {},
-         "m_Materials": [], "m_Mesh": {"m_FileID": mesh_file_id, "m_PathID": 620}},
+         "m_Materials": [], "m_Mesh": {"m_FileID": mesh_file_id,
+                                       "m_PathID": mesh_path_id}},
         archive))
     if mesh_file_id == 0:
         bundle.objects.insert(-1, _mesh_object(
-            archive, 620, f"pt_{phenomenon}",
+            archive, mesh_path_id, f"pt_{phenomenon}",
             [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0)],
             [0, 1, 2, 2, 1, 3]))
     for obj in bundle.objects:
         if obj.type.name == "GameObject" and obj.path_id == 210:
             obj._tree["m_Component"].append({"component": {"m_PathID": 213}})
+    return bundle
+
+
+# The engine fixes the path ids of its own primitives; a pointer into its
+# container names one of those numbers, and no package has any say in it.
+BUILTIN_PLANE = 10209
+
+
+def _engine_container(path_id=BUILTIN_PLANE, name="Plane"):
+    """The engine's own resource container: a primitive, and no package around it.
+
+    It is a bare serialized file, not an asset bundle — no ``AssetBundle`` object
+    inside it and nothing declaring it a dependency — so the only way it can be
+    reached is a caller handing the file over.
+    """
+    archive = _AssetFile("unity default resources")
+    return SimpleNamespace(objects=[
+        _mesh_object(archive, path_id, name,
+                     [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0),
+                      (1.0, 0.0, 1.0)],
+                     [0, 1, 2, 2, 1, 3])])
+
+
+def _builtin_emitter_mapping():
+    """One phenomenon whose mesh emitter draws a primitive out of the engine."""
+    return {"mysekai__effect__site__environment__008_thunder__global":
+            _global_bundle("008_thunder"),
+            "mysekai__effect__site__environment__008_thunder__unique__beach":
+            _mesh_emitter_bundle("008_thunder", "beach", mesh_file_id=1,
+                                 mesh_path_id=BUILTIN_PLANE)}
+
+
+def _builtin_model_bundle(phenomenon):
+    """A model asset whose mesh node is an engine primitive, not an authored mesh."""
+    bundle = _model_common_bundle(phenomenon)
+    archive = bundle.objects[0].assets_file
+    archive.externals = [SimpleNamespace(name="unity default resources")]
+    bundle.objects = [obj for obj in bundle.objects
+                      if not (obj.type.name == "Mesh" and obj.path_id == 620)]
+    for obj in bundle.objects:
+        if obj.type.name == "MeshFilter":
+            obj._tree["m_Mesh"] = {"m_FileID": 1, "m_PathID": BUILTIN_PLANE}
+        if obj.type.name == "AssetBundle":
+            obj._tree["m_Container"] = [
+                entry for entry in obj._tree["m_Container"]
+                if entry[1]["asset"]["m_PathID"] != 620]
+    return bundle
+
+
+def _builtin_shape_bundle(phenomenon, site):
+    """A site effect that is *born on* a primitive's surface, not drawn as one."""
+    bundle = _site_bundle(phenomenon, site)
+    archive = bundle.objects[0].assets_file
+    archive.externals = [SimpleNamespace(name="unity default resources")]
+    for obj in bundle.objects:
+        if obj.type.name == "ParticleSystem":
+            obj._tree["ShapeModule"]["type"] = 6          # born on a mesh surface
+            obj._tree["ShapeModule"]["m_Mesh"] = {"m_FileID": 1,
+                                                  "m_PathID": BUILTIN_PLANE}
     return bundle
 
 
@@ -1489,6 +1557,184 @@ def test_an_emitter_mesh_no_package_ships_stays_an_unresolved_pointer(tmp_path,
     gap = next(gap for gap in index["summary"]["unsupported"] if "mesh" in gap)
     assert gap["mesh"]["archive"] == "unity default resources"
     assert gap["reason"] == environments.meshes_module.NOT_IN_PACKAGE
+    # The new input is inert when it is not given: no geometry appears out of
+    # nowhere, and nothing acquires the provenance field either.
+    assert not list((out / "models").glob("*.glb"))
+    assert all("source" not in entry for entry in index["models"])
+
+
+def test_a_built_in_primitive_resolves_once_the_engine_container_is_supplied(
+        tmp_path, monkeypatch):
+    """A mesh-mode emitter with no mesh emits nothing at all, so the whole emitter
+    is lost — and with it, on the storm, every bolt of lightning.  The geometry is
+    not the game's to ship, but it is the engine's to read, so a caller who has
+    the engine can hand its container over and the pointer resolves like any
+    other."""
+    monkeypatch.setattr(core_mesh, "MeshHandler", _StubMeshHandler)
+    result, out, index = _run(
+        tmp_path, monkeypatch, _builtin_emitter_mapping(),
+        engine={"unity default resources": _engine_container()})
+    effects = json.loads((out / "008_thunder" / "fx" / "effects.json")
+                         .read_text(encoding="utf-8"))
+    emitter = effects["effects"]["fx_env_site_008_thunder_beach"]["particles"][0]
+    assert emitter["renderer"]["renderMode"] == "Mesh"
+    assert emitter["renderer"]["meshes"] == [{"file": index["models"][0]["file"],
+                                              "node": "Plane"}]
+    assert (out / emitter["renderer"]["meshes"][0]["file"]).exists()
+    assert effects["summary"]["meshEmitters"] == 1
+    assert result["meshes"] == 1
+    assert not [gap for gap in index["summary"]["unsupported"]
+                if gap.get("reason") == environments.meshes_module.NOT_IN_PACKAGE]
+
+
+def test_geometry_out_of_the_engine_says_it_came_from_the_engine(tmp_path,
+                                                                monkeypatch):
+    """A built-in primitive is the engine's shape, not this game's asset.
+
+    It is written under the same naming and into the same directory as everything
+    else, because a consumer draws it the same way — so without a mark on the
+    entry nothing in the products would distinguish an engine shape from an
+    authored one.
+    """
+    monkeypatch.setattr(core_mesh, "MeshHandler", _StubMeshHandler)
+    _, out, index = _run(tmp_path, monkeypatch, _builtin_emitter_mapping(),
+                         engine={"unity default resources": _engine_container()})
+    entry = index["models"][0]
+    assert entry["source"] == environments.meshes_module.ENGINE_BUILTIN
+    assert entry["name"] == "Plane"
+    assert entry["file"] == f"models/Plane-{entry['sha256'][:8]}.glb"
+    assert (out / entry["file"]).exists()
+
+
+def test_a_packages_own_mesh_is_not_marked_as_the_engines(tmp_path, monkeypatch):
+    """The mark has to stay narrow, or "no source" stops meaning anything."""
+    monkeypatch.setattr(core_mesh, "MeshHandler", _StubMeshHandler)
+    mapping = {"mysekai__effect__site__environment__009_meteorshower__global":
+               _global_bundle("009_meteorshower"),
+               "mysekai__effect__site__environment__009_meteorshower__unique__beach":
+               _mesh_emitter_bundle("009_meteorshower", "beach")}
+    _, _, index = _run(tmp_path, monkeypatch, mapping,
+                       engine={"unity default resources": _engine_container()})
+    entry = next(model for model in index["models"]
+                 if model["name"] == "pt_009_meteorshower")
+    assert "source" not in entry
+
+
+def test_a_model_assets_engine_mesh_is_marked_inside_the_asset(tmp_path, monkeypatch):
+    """A model asset can name a primitive too, and its node tree is one file.
+
+    The geometry is inside that file rather than beside it, so the mark has to sit
+    on the mesh row of the asset, or provenance is lost the moment the shape stops
+    being an emitter's.
+    """
+    monkeypatch.setattr(core_mesh, "MeshHandler", _StubMeshHandler)
+    mapping = {"mysekai__effect__site__environment__014_sekai__global":
+               _global_bundle("014_sekai"),
+               "mysekai__effect__site__environment__014_sekai__common":
+               _builtin_model_bundle("014_sekai")}
+    _, out, index = _run(tmp_path, monkeypatch, mapping,
+                         engine={"unity default resources": _engine_container()})
+    entry = index["phenomena"]["014_sekai"]["models"][0]
+    assert entry["meshes"] == [{"node": "dome_01", "mesh": "Plane", "vertices": 4,
+                                "triangles": 2,
+                                "source": environments.meshes_module.ENGINE_BUILTIN}]
+    assert (out / entry["file"]).exists()
+    assert not [gap for gap in index["summary"]["unsupported"]
+                if gap.get("reason") == environments.meshes_module.NOT_IN_PACKAGE]
+
+
+def test_a_mesh_shaped_emitter_is_born_on_the_engines_surface_too(tmp_path,
+                                                                  monkeypatch):
+    """The other pointer at geometry is the shape a particle is born on.
+
+    It is resolved through the same route, so leaving it out would give a
+    phenomenon its particles back with nowhere to put them.
+    """
+    monkeypatch.setattr(core_mesh, "MeshHandler", _StubMeshHandler)
+    mapping = {"mysekai__effect__site__environment__008_thunder__global":
+               _global_bundle("008_thunder"),
+               "mysekai__effect__site__environment__008_thunder__unique__beach":
+               _builtin_shape_bundle("008_thunder", "beach")}
+    _, out, index = _run(tmp_path, monkeypatch, mapping,
+                         engine={"unity default resources": _engine_container()})
+    effects = json.loads((out / "008_thunder" / "fx" / "effects.json")
+                         .read_text(encoding="utf-8"))
+    shape = (effects["effects"]["fx_env_site_008_thunder_beach"]["particles"][0]
+             ["system"]["shape"])
+    assert shape["type"] == "Mesh"
+    assert shape["meshes"] == [{"file": index["models"][0]["file"], "node": "Plane"}]
+    assert (out / shape["meshes"][0]["file"]).exists()
+    assert index["models"][0]["source"] == environments.meshes_module.ENGINE_BUILTIN
+    assert not [gap for gap in index["summary"]["unsupported"]
+                if gap.get("reason") == environments.meshes_module.NOT_IN_PACKAGE]
+
+
+def test_the_engine_container_is_the_only_thing_the_option_changes(tmp_path,
+                                                                  monkeypatch):
+    """A caller who does not pass it must get byte-for-byte what they got before.
+
+    Compared file by file rather than by counts: a new input that quietly renamed
+    a file, reordered a list or dropped a field would pass any count check and
+    still break every consumer that was already reading the output.
+    """
+    monkeypatch.setattr(core_mesh, "MeshHandler", _StubMeshHandler)
+    _, plain, _ = _run(tmp_path / "plain", monkeypatch, _builtin_emitter_mapping())
+    _, supplied, _ = _run(tmp_path / "supplied", monkeypatch,
+                          _builtin_emitter_mapping(),
+                          engine={"unity default resources": _engine_container()})
+
+    def files(root):
+        return {path.relative_to(root).as_posix(): path.read_bytes()
+                for path in root.rglob("*") if path.is_file()}
+
+    before, after = files(plain), files(supplied)
+    added = sorted(set(after) - set(before))
+    assert added and all(name.startswith("models/Plane-") for name in added)
+    assert not set(before) - set(after)
+    differing = sorted(name for name in before if before[name] != after[name])
+    # Only the two documents that name the resolved geometry move.
+    assert differing == ["008_thunder/fx/effects.json", "index.json"]
+
+
+def test_a_directory_of_engine_containers_contributes_only_those_containers(tmp_path):
+    """Where the engine's files live is the caller's to say, and only theirs.
+
+    A caller naming the directory must not be able to sweep whatever else is in
+    it into the pointer store, and naming a file must take that file as it is.
+    """
+    from core.assets.packages import BUILTIN_ARCHIVES, builtin_archive_paths
+    directory = tmp_path / "engine-resources"
+    directory.mkdir()
+    for name in BUILTIN_ARCHIVES:
+        (directory / name).write_bytes(b"")
+    (directory / "something else").write_bytes(b"")
+    assert builtin_archive_paths([str(directory)]) == [
+        str(directory / name) for name in BUILTIN_ARCHIVES]
+    one = directory / BUILTIN_ARCHIVES[0]
+    assert builtin_archive_paths([str(one)]) == [str(one)]
+    assert builtin_archive_paths(None) == []
+
+
+def test_the_command_line_asks_for_the_container_and_never_assumes_one(tmp_path,
+                                                                      monkeypatch):
+    """The path can only come from the caller: nothing here has a default for it."""
+    from core import cli
+    seen = {}
+
+    def fake(bundles, out_dir, **kwargs):
+        seen.clear()
+        seen.update(kwargs)
+        return {"perBundle": {}, "meshes": 0}
+
+    monkeypatch.setattr(environments, "extract_phenomena", fake)
+    assert cli.main(["phenomena", "--bundle", "package", "--out-dir",
+                     str(tmp_path)]) == 0
+    assert seen["extra_archives"] == []
+    container = tmp_path / "unity default resources"
+    container.write_bytes(b"")
+    assert cli.main(["phenomena", "--bundle", "package", "--out-dir", str(tmp_path),
+                     "--builtin-resources", str(container)]) == 0
+    assert seen["extra_archives"] == [str(container)]
 
 
 # -- components read and deliberately not exported --------------------------

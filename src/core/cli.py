@@ -111,6 +111,13 @@ def main(argv=None):
                    help="an environment package, or the shared phenomena thumbnail package")
     w.add_argument("--bundle-root",
                    help="directory the packages a bundle depends on are read from")
+    w.add_argument("--builtin-resources", action="append", default=[],
+                   metavar="PATH",
+                   help="the engine's own built-in resource container, or a "
+                        "directory holding it; some emitters draw copies of a "
+                        "built-in primitive and no package ships those. Repeatable. "
+                        "Without it those meshes stay listed under `unsupported`, "
+                        "exactly as before")
     w.add_argument("--out-dir", required=True)
     w.add_argument("--master", help="directory of caller-supplied master tables")
     w.add_argument("--master-url", nargs="?", const="", default=None,
@@ -239,12 +246,15 @@ def main(argv=None):
         print(json.dumps(extract_emoticons(args.bundle, args.out_dir), ensure_ascii=False))
         return 0
     if args.cmd == "phenomena":
+        from .assets.packages import builtin_archive_paths
         from phenomena.environments import extract_phenomena
         source, cache = _master_source(args)
         report = extract_phenomena(args.bundle, args.out_dir,
                                    bundle_root=args.bundle_root, master=source,
                                    master_cache=cache, vgmstream=args.vgmstream,
-                                   ffmpeg=args.ffmpeg)
+                                   ffmpeg=args.ffmpeg,
+                                   extra_archives=builtin_archive_paths(
+                                       args.builtin_resources))
         print(json.dumps({k: v for k, v in report.items() if k != "perBundle"},
                          ensure_ascii=False))
         return 0

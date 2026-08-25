@@ -19,17 +19,40 @@ that happen to share a name stay separate.  Nothing that varies per phenomenon i
 recorded in a shared file's entry, so a shared file means the same thing to every
 phenomenon that points at it.
 
-Some emitters point at the engine's own built-in primitives, which no package ships;
-those stay visible as unresolved pointers instead of being replaced by a guess.
+Some emitters point at the engine's own built-in primitives, which no package ships.
+Those resolve only when the caller supplies the engine's container alongside the
+packages; without it the pointer stays visible as unresolved instead of being
+replaced by a guess.  A mesh that does come out of that container is the engine's
+geometry and not the game's, so its entry says so with ``source``: the file is
+named and written like every other one, but a reader can tell the two apart
+rather than having to assume where a shape came from.
 """
 import hashlib
 from pathlib import Path
 
+from core.assets.packages import is_builtin_archive
 from core.gltf import GLB, unity_to_gltf_pos, unity_to_gltf_quat
 from core.mesh import add_mesh  # noqa: F401  (re-exported: callers import it here)
 
 NOT_IN_PACKAGE = ("mesh is not in any supplied package: the pointer names the "
                   "engine's own built-in resources, which no package ships")
+# A pointer that names nothing at all is a different thing from one that names
+# something this run was not given.  Saying the first is the second sends the
+# reader looking for a container that would not have helped.
+NO_MESH_ASSIGNED = "no mesh is assigned: the pointer names nothing"
+
+
+def pointer_gap(pointer):
+    """Why a mesh pointer did not resolve, told apart by what it names."""
+    pointer = pointer or {}
+    if not pointer.get("m_FileID") and not pointer.get("m_PathID"):
+        return NO_MESH_ASSIGNED
+    return NOT_IN_PACKAGE
+
+# What ``source`` says on geometry that came out of the engine's own container.
+# The field is absent on everything else, so "no source" keeps meaning "shipped
+# by a package of this game" without any entry having to be rewritten.
+ENGINE_BUILTIN = "engineBuiltin"
 
 
 def _vec(node, keys):
@@ -109,7 +132,7 @@ def model(root_id, kinds, trees, follow, material_name=None):
             pointer = trees[filters[0]].get("m_Mesh") or {}
             target = follow(pointer)
             if target is None:
-                unsupported.append({"node": node["name"], "reason": NOT_IN_PACKAGE,
+                unsupported.append({"node": node["name"], "reason": pointer_gap(pointer),
                                     "pointer": {"fileId": pointer.get("m_FileID"),
                                                 "pathId": pointer.get("m_PathID")}})
             else:
@@ -120,9 +143,11 @@ def model(root_id, kinds, trees, follow, material_name=None):
                     glb, record.objects[mesh_id], mesh_tree, mesh_name)
                 document["vertices"] += vertices
                 document["triangles"] += triangles
-                document["meshes"].append({"node": node["name"], "mesh": mesh_name,
-                                           "vertices": vertices,
-                                           "triangles": triangles})
+                entry = {"node": node["name"], "mesh": mesh_name,
+                         "vertices": vertices, "triangles": triangles}
+                if is_builtin_archive(record.archive):
+                    entry["source"] = ENGINE_BUILTIN
+                document["meshes"].append(entry)
             if material_name is not None:
                 document["materials"].append(
                     {"node": node["name"],
@@ -157,11 +182,19 @@ class Store:
         return dict(self.written[digest])
 
     def mesh(self, record, path_id):
-        """Reference to one mesh, exported as a single-mesh file."""
+        """Reference to one mesh, exported as a single-mesh file.
+
+        Geometry out of the engine's own container is written under the same
+        naming and in the same directory as everything else — a consumer draws it
+        the same way — and its entry carries ``source`` so its provenance stays
+        readable.
+        """
         key = (record.archive, path_id)
         if key not in self.by_key:
             tree = record.tree(path_id)
             glb, document = single_mesh(record.objects[path_id], tree)
+            if is_builtin_archive(record.archive):
+                document["source"] = ENGINE_BUILTIN
             self.by_key[key] = self._write(glb, document["name"], document)
         return dict(self.by_key[key])
 

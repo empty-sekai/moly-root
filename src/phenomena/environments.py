@@ -437,7 +437,7 @@ class _Phenomenon:
                 index = pointer.get("m_FileID", 0) - 1
                 archive = (record.externals[index]
                            if 0 <= index < len(record.externals) else None)
-                return None, {"reason": meshes_module.NOT_IN_PACKAGE,
+                return None, {"reason": meshes_module.pointer_gap(pointer),
                               "mesh": {"fileId": pointer.get("m_FileID"),
                                        "pathId": pointer.get("m_PathID"),
                                        "archive": archive}}
@@ -736,8 +736,11 @@ def extract_phenomena(bundles, out_dir, bundle_root=None, master=None,
     *bundles* and *bundle_root*.  A pointer that names an archive not among the
     packages already loaded is otherwise left visibly unresolved; a caller that
     can supply that archive (for example an engine-owned built-in container) adds
-    it here so those pointers resolve.  The default per-collection behaviour is
-    unchanged — pass nothing and nothing extra is loaded.
+    it here so those pointers resolve.  Geometry that comes out of an
+    engine-owned container is written like any other mesh and its entry says
+    where it came from (``source``), so a reader can tell the engine's own shapes
+    from this game's.  The default per-collection behaviour is unchanged — pass
+    nothing and nothing extra is loaded.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)

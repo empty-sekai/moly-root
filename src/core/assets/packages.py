@@ -18,6 +18,39 @@ from pathlib import Path
 
 import UnityPy
 
+# Serialized files the *engine* owns rather than any asset package.  A pointer
+# into one of these carries an archive name exactly the way a pointer into a
+# package does, so nothing about the pointer says it is special — only the name
+# does.  No package ships them, so such a pointer resolves only when the caller
+# supplies the file; where that file lives is the caller's to say and is never
+# assumed here.
+BUILTIN_ARCHIVES = ("unity default resources", "unity_builtin_extra")
+
+
+def is_builtin_archive(name):
+    """Whether a serialized file's name is one the engine ships, not a package."""
+    return str(name) in BUILTIN_ARCHIVES
+
+
+def builtin_archive_paths(values):
+    """Engine-owned container files a caller offers, as paths to load.
+
+    Each value is either a container file itself or a directory holding the
+    engine's containers; a directory contributes those containers and nothing
+    else, so naming one cannot drag unrelated files into the store.  A value
+    that names neither is passed through unchanged and simply fails to match any
+    pointer, which leaves the pointer as visibly unresolved as it was before.
+    """
+    paths = []
+    for value in values or []:
+        path = Path(value)
+        if path.is_dir():
+            paths.extend(str(path / name) for name in BUILTIN_ARCHIVES
+                         if (path / name).is_file())
+        else:
+            paths.append(str(path))
+    return paths
+
 
 def pairs(entries):
     """Unity serialises property maps as (name, value) pairs; accept either form."""
