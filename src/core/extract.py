@@ -6,6 +6,55 @@ from pathlib import Path
 from .assets.manifest import parse_manifest
 from .assets.router import route
 
+# Furniture geometry is the one pass whose output is measured in gigabytes: one
+# ``.glb`` per package over the whole ``mysekai__fixture__`` family.  Making it
+# unconditional would put that cost on every extraction, so it is opt-in -- and
+# because "not asked for" and "does not exist" must stay distinguishable in the
+# report, the artifact is then listed as ``skipped`` carrying this reason rather
+# than left out (the same rule the player-data UI artifact keeps below).
+FIXTURE_MESHES_SKIPPED = ("furniture geometry was not requested; it is one glb "
+                          "per package over the whole fixture family, so the "
+                          "pass is opt-in via fixture_meshes=True")
+
+# Every output path this module's jobs write that does *not* vary with a package
+# or unit name, relative to the output directory, with a trailing ``/`` on the
+# ones that are directories the jobs fill with per-package files.  The name says
+# "fixed" because that is all it covers: ``sd_<unit>.glb``, ``sd_<unit>.rig.json``
+# and the ``<package>.json`` documents inside the listed directories are named
+# after their subject and are not enumerated here.
+#
+# It exists so a consumer's declared read paths can be checked against what the
+# pipeline actually writes.  A demo that reads ``fixture-attach/attach-points.json``
+# while the pipeline writes ``fixture-interface/attach-points.json`` is broken in
+# a way no amount of green extraction reveals: both sides pass their own tests
+# and the consumer still shows nothing.
+FIXED_ARTIFACT_PATHS = (
+    "extraction-report.json",
+    "manifest.json",
+    "characters.json",
+    "motion-library.glb",
+    "motion-library.index.json",
+    "facial-tables.json",
+    "alone-actions.json",
+    "talks.json",
+    "emoticons/emoticons.json",
+    "phenomena/index.json",
+    "site/index.json",
+    "fixture-interface/attach-points.json",
+    "fixture-interface/areas.json",
+    "fixture-models/",
+    "fixture-talks/talks.json",
+    "cutscene-timeline/tracks/",
+    "cutscene-timeline/clips/",
+    "cutscene-timeline/clip-targets/",
+    "fixture-timeline/tracks/",
+    "fixture-timeline/clips/",
+    "fixture-timeline/clip-targets/",
+    "camera/",
+    "perf-animations/",
+    "ui/talk.json",
+)
+
 
 def _bundle_path(bundles, logical_name):
     root = Path(bundles)
@@ -60,6 +109,107 @@ def _registry_artifact(names, out, master, master_cache=None):
                      counts={k: v for k, v in document["summary"].items()
                              if isinstance(v, (int, bool))})
         entry["path"] = str(path)
+    except Exception as exc:
+        entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+    return entry
+
+
+# The dialogue window and the head-up display are the two things this UI lane is
+# about, so these three behaviour classes are its roots.  Every other hand
+# decoder in ``ui.talk`` is a *part* those trees are built from -- an image, a
+# button, a layout group, a tween -- and those parts are used all over the game:
+# decoding every one of them in the player data would put 104k objects behind a
+# name that promises the talk UI.  So the roots are named, and the artifact holds
+# exactly the trees hanging off them.
+UI_WINDOW_ROOT_CLASSES = ("Sekai.TalkWindow",
+                          "Sekai.Mysekai.MysekaiChatBalloon",
+                          "Sekai.Mysekai.TweetHeadUpDisplay")
+
+
+def _ui_artifact(out, player_data):
+    """Build ``ui/talk.json`` when the caller supplies the player-data file.
+
+    The dialogue UI is not in any downloadable package: it is built into the
+    APK's player data, so no bundle name can name it and no route can claim it.
+    The path therefore has to come from the caller, and without it the artifact
+    is reported as ``skipped`` *with the reason* rather than being left out of
+    the report -- an omitted entry would read as "this domain does not exist"
+    instead of "nobody handed it its input", which is exactly the distinction
+    the master-backed registry artifact above keeps.
+
+    What is read is the window tree under each root behaviour: every component
+    of every node, hand-decoded, each carrying its own leftover-bytes check.  A
+    component whose class has no hand decoder is kept with the reader's own
+    "partial" note and counted separately, never dropped.
+    """
+    entry = {"artifact": "ui/talk.json", "domain": "ui", "status": "skipped",
+             "counts": {},
+             "error": "no player-data file supplied; the dialogue UI is built "
+                      "into the APK player data, which is not a downloadable "
+                      "package and cannot be routed by bundle name"}
+    if not player_data:
+        return entry
+    try:
+        import ui.talk as talk
+        from .jsonio import write_json
+        if not Path(player_data).exists():
+            raise FileNotFoundError(f"player data not found: {player_data}")
+        env = talk.load_env(str(player_data))
+        mono_index = talk.build_monoscript_index(env)
+        roots = []
+        for obj in env.objects:
+            if obj.type.name != "MonoBehaviour":
+                continue
+            cls = talk.resolve_script_class(obj, mono_index)
+            if cls not in UI_WINDOW_ROOT_CLASSES:
+                continue
+            _, game_object = talk.Reader(obj.get_raw_data()).pptr()
+            roots.append((obj.assets_file.name, obj.path_id, cls, game_object))
+        roots.sort()
+        by_file = {}
+        windows = []
+        nodes_total = components_total = residual_zero = partial = 0
+        classes = set()
+        for file_name, path_id, cls, game_object in roots:
+            objects = by_file.get(file_name)
+            if objects is None:
+                objects = by_file[file_name] = talk.objects_by_file(env, file_name)
+            tree = talk.collect_tree(env, game_object, mono_index, file=file_name)
+            nodes = []
+            for node in tree:
+                decoded = []
+                for component in node["components"]:
+                    target = objects.get(component["path_id"])
+                    if target is None:
+                        continue
+                    record = talk.decode_object(env, target, mono_index,
+                                                allow_partial=True)
+                    record["pathId"] = component["path_id"]
+                    decoded.append(record)
+                    components_total += 1
+                    classes.add(record["class"])
+                    if record["residual"] == 0:
+                        residual_zero += 1
+                    if record.get("note"):
+                        partial += 1
+                nodes.append({"rectPathId": node["rect_pid"],
+                              "goPathId": node["go_pid"],
+                              "depth": node["depth"],
+                              "parentGo": node["parent_go"],
+                              "components": decoded})
+            nodes_total += len(nodes)
+            windows.append({"root": {"class": cls, "file": file_name,
+                                     "pathId": path_id,
+                                     "goPathId": game_object},
+                            "nodes": nodes})
+        counts = {"windows": len(windows), "nodes": nodes_total,
+                  "components": components_total, "classes": len(classes),
+                  "residualZero": residual_zero, "partial": partial}
+        path = write_json(out / "ui" / "talk.json",
+                          {"version": 1,
+                           "rootClasses": list(UI_WINDOW_ROOT_CLASSES),
+                           "windows": windows, "summary": counts})
+        entry.update(status="succeeded", error="", counts=counts, path=str(path))
     except Exception as exc:
         entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
     return entry
@@ -170,6 +320,8 @@ def write_pack_manifest(out):
 
 
 def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
+                     player_data=None,
+                     fixture_meshes=False,
                      master_cache=None, vgmstream=None, ffmpeg=None):
     """Extract every logical bundle in *manifest* and write a JSON report.
 
@@ -189,6 +341,17 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
     *master* is a directory of caller-supplied master tables.  Identity and
     locomotion come only from there, so without it the registry artifact is
     reported as skipped rather than silently omitted.
+
+    *player_data* is the caller-supplied APK player-data file.  The dialogue UI
+    lives there and in no downloadable package, so it is not a routed domain at
+    all; without the path its artifact is likewise reported as skipped with the
+    reason, never left out.
+
+    *fixture_meshes* asks for the furniture geometry pass, which writes one glTF
+    binary per package of the whole fixture family into ``fixture-models/``.  It
+    is off by default because that is the heaviest artifact the pipeline makes;
+    off, its entry is reported ``skipped`` with the reason, never omitted, so a
+    reader can tell "nobody asked for it" from "this domain does not exist".
     """
     if manifest is None:
         names, ignored = discover_bundles(bundles)
@@ -300,16 +463,63 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             fixture_errors[name] = f"{type(exc).__name__}: {exc}"
     fixture_result = None
     fixture_error = None
+    fixture_store = None
+    fixture_mesh_result = None
+    fixture_mesh_error = None
     if fixture_paths:
         try:
             from core.assets.packages import PackageStore
             from fixtures.interface import extract as extract_fixtures
             store = PackageStore([str(path) for path in fixture_paths.values()],
                                  root=bundles)
+            fixture_store = store
             fixture_result = extract_fixtures(
                 store, master, str(out / "fixture-interface"))
         except Exception as exc:
             fixture_error = f"{type(exc).__name__}: {exc}"
+        # Geometry is the third read of this same package family, and it reads
+        # the same opened store: the attach points, the placement grid and the
+        # meshes are three views of one prefab tree, so re-opening the bundles
+        # would be paying the load cost twice for the same objects.  It is a
+        # pass of its own with its own try, though -- a geometry failure must be
+        # reported as a geometry failure, not fold into the attach job's status.
+        # The domain stays ``fixture-interface`` (its subject is the routing);
+        # the geometry is registered as its own artifact set under its own path.
+        if fixture_meshes:
+            try:
+                from core.assets.packages import PackageStore
+                from fixtures.interface import extract_geometry
+                if fixture_store is None:
+                    fixture_store = PackageStore(
+                        [str(path) for path in fixture_paths.values()],
+                        root=bundles)
+                fixture_mesh_result = extract_geometry(
+                    fixture_store, str(out / "fixture-models"))
+            except Exception as exc:
+                fixture_mesh_error = f"{type(exc).__name__}: {exc}"
+    # The dialogue-camera domain is one package today, but the reader takes a
+    # family and reports per package, so it is driven exactly like the other
+    # shared-read domains rather than being special-cased on today's count.
+    camera_paths = {}
+    camera_errors = {}
+    for name in names:
+        target = route(name)
+        if target is None or target.domain != "camera":
+            continue
+        try:
+            camera_paths[name] = _bundle_path(bundles, name)
+        except Exception as exc:
+            camera_errors[name] = f"{type(exc).__name__}: {exc}"
+    camera_result = None
+    camera_error = None
+    if camera_paths:
+        try:
+            from perf.camera import read_camera_assets
+            camera_result = read_camera_assets(
+                [str(path) for path in camera_paths.values()],
+                str(out / "camera"), bundle_root=bundles)
+        except Exception as exc:
+            camera_error = f"{type(exc).__name__}: {exc}"
     # The two timeline families each run their three timeline reads as one job
     # over the whole family, for the same cross-package reason.
     cutscene_paths = {}
@@ -350,6 +560,33 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 str(out / "fixture-timeline"), bundle_root=bundles)
         except Exception as exc:
             fixture_timeline_error = f"{type(exc).__name__}: {exc}"
+    # The animation-clip export is a derived pass, not a routed domain: what it
+    # exports is decided by the clip-target documents the two timeline jobs have
+    # just written, never by a package name.  Giving it a route would promise
+    # that a bundle name selects it, which no bundle name does; so it runs here,
+    # after both timeline jobs, over their output.
+    animation_target_dirs = [out / "cutscene-timeline" / "clip-targets",
+                             out / "fixture-timeline" / "clip-targets"]
+    animation_asked = any(directory.is_dir() for directory in animation_target_dirs)
+    animation_result = None
+    animation_error = None
+    animation_targets = 0
+    animation_missing_deps = []
+    # The export itself runs *after* the per-bundle loop, not here.  A clip's
+    # channels name paths into hierarchies the animation package does not own —
+    # the character rig (written as ``sd_<unit>.glb`` by the character domain)
+    # and the fixture rig (written as ``fixture-models/`` by the geometry pass).
+    # Running the export before those exist resolves nothing: measured on one
+    # end-to-end run, ``character_motion`` came out with 371 animations over
+    # **0** nodes, so the whole cut-scene family could not play.  Only an
+    # end-to-end run shows this — each domain's own gate prepares its inputs by
+    # hand and never hits the ordering.  See the call site below the loop.
+    # The one talk package feeds two extractors; the second one's own outcome is
+    # reported separately so that a failure there cannot be read as a failure of
+    # the first, nor hide behind its success.
+    fixture_talks_asked = False
+    fixture_talks_result = None
+    fixture_talks_error = None
     for name in names:
         entry = _entry(name)
         target = route(name)
@@ -442,6 +679,18 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 if fixture_timeline_error:
                     raise RuntimeError(fixture_timeline_error)
                 result = dict((fixture_timeline_result or {}).get("perBundle", {}).get(name, {}))
+            elif target.domain == "camera":
+                if name in camera_errors:
+                    raise FileNotFoundError(camera_errors[name])
+                if camera_error:
+                    raise RuntimeError(camera_error)
+                record = next((r for r in (camera_result or {}).get("packages", [])
+                               if r.get("package") == name), None)
+                if record is None or record.get("missing"):
+                    raise FileNotFoundError(
+                        f"camera package not read: {name}")
+                result = {k: v for k, v in record.items() if k != "package"}
+                result["json"] = str(out / "camera" / f"{name}.json")
             elif target.domain == "talk":
                 # Which talks belong to one character is decided by master tables,
                 # so without them the corpus cannot be scoped and is not written.
@@ -455,6 +704,23 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 from chara.talks import extract_talks
                 result = extract_talks(master, str(bundle), str(out / "talks.json"),
                                        master_cache=master_cache)
+                # One package, two families.  ``chara/talks`` reads the
+                # single-character talks that happen away from any fixture;
+                # ``perf/fixture_talks`` reads the beside-the-fixture ones.
+                # Both read this same package and write different artifacts, so
+                # both run here.  A second route would have been the wrong shape:
+                # one package cannot belong to two domains.
+                fixture_talks_asked = True
+                fixture_talks_path = out / "fixture-talks" / "talks.json"
+                try:
+                    from perf.fixture_talks import extract_fixture_talks
+                    fixture_talks_result = extract_fixture_talks(
+                        master, str(bundle), str(fixture_talks_path),
+                        master_cache=master_cache)
+                    result = dict(result)
+                    result["fixtureTalks"] = str(fixture_talks_path)
+                except Exception as exc:
+                    fixture_talks_error = f"{type(exc).__name__}: {exc}"
             elif target.domain == "performance":
                 from chara.alone_actions import write_alone_actions
                 result = write_alone_actions(str(bundle), str(out / "alone-actions.json"))
@@ -471,6 +737,47 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             entry["error"] = f"{type(exc).__name__}: {exc}"
             report["summary"]["failed"] += 1
         report["bundles"].append(entry)
+    # Derived animation pass, deferred to here so the hierarchies its channels
+    # name are already on disk (see the note where its inputs are declared).
+    # A dependency that is absent is *reported*, never silently tolerated: an
+    # export that resolves no rig still writes files and would otherwise be read
+    # as a success while every clip plays over zero nodes.
+    if animation_asked:
+        if not list(Path(out).glob("sd_*.glb")):
+            animation_missing_deps.append(
+                "character rigs (sd_*.glb): foreign character-rig channels "
+                "cannot resolve, so cut-scene clips export over zero nodes")
+        if not (out / "fixture-models").is_dir():
+            animation_missing_deps.append(
+                "fixture geometry (fixture-models/): fixture-rig channels "
+                "cannot resolve; pass fixture_meshes=True to write it")
+        try:
+            from perf.animations import (ForeignRigs, export_targets,
+                                         load_clip_targets)
+            by_target = {}
+            for directory in animation_target_dirs:
+                if not directory.is_dir():
+                    continue
+                _, part = load_clip_targets(str(directory))
+                for target, clips in part.items():
+                    by_target.setdefault(target, set()).update(clips)
+            animation_targets = len(by_target)
+            # The rigs a clip's channels reach into have to be handed in: with
+            # none, every foreign path stays unresolved and the export still
+            # writes a file, so the run looks successful while the clips play
+            # over zero nodes.  That is why the pass is deferred to here — both
+            # rig sources are outputs of this same run.
+            fixture_models = out / "fixture-models"
+            foreign = ForeignRigs.load(
+                fixture_models_dir=(str(fixture_models)
+                                    if fixture_models.is_dir() else None),
+                character_rig_paths=[str(path) for path
+                                     in sorted(Path(out).glob("sd_*.glb"))])
+            animation_result = export_targets(by_target, str(bundles),
+                                              str(out / "perf-animations"),
+                                              foreign=foreign)
+        except Exception as exc:
+            animation_error = f"{type(exc).__name__}: {exc}"
     report["derived"] = [_registry_artifact(names, out, master, master_cache)]
     if phenomena_paths:
         counted = {k: v for k, v in (phenomena_result or {}).items()
@@ -494,6 +801,51 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             "counts": {k: v for k, v in (fixture_result or {}).items()
                        if isinstance(v, int)},
             "error": fixture_error or ""})
+        # Always present, never omitted: skipped-with-a-reason when the caller
+        # did not ask for geometry, otherwise the outcome of the pass.
+        if not fixture_meshes:
+            geometry_status = "skipped"
+            geometry_error = FIXTURE_MESHES_SKIPPED
+        elif fixture_mesh_error:
+            geometry_status = "failed"
+            geometry_error = fixture_mesh_error
+        else:
+            geometry_status = "succeeded"
+            geometry_error = ""
+        report["derived"].append({
+            "artifact": "fixture-models/",
+            "domain": "fixture-interface",
+            "status": geometry_status,
+            "counts": {k: v for k, v in (fixture_mesh_result or {}).items()
+                       if isinstance(v, int)},
+            "error": geometry_error})
+    if fixture_talks_asked:
+        report["derived"].append({
+            "artifact": "fixture-talks/talks.json",
+            "status": "failed" if fixture_talks_error else "succeeded",
+            "counts": {k: v for k, v in (fixture_talks_result or {}).items()
+                       if isinstance(v, int)},
+            "error": fixture_talks_error or ""})
+    if animation_asked:
+        # A package that failed to export is reported as a failure of this pass,
+        # not folded into the count of what did export.
+        animation_failed = list((animation_result or {}).get("failed") or [])
+        report["derived"].append({
+            "artifact": "perf-animations/",
+            "status": "failed" if (animation_error or animation_failed) else "succeeded",
+            "counts": dict({"targets": animation_targets},
+                           **{k: v for k, v in (animation_result or {}).items()
+                              if isinstance(v, int)}),
+            "missingDependencies": list(animation_missing_deps),
+            "error": animation_error or (
+                "; ".join(f"{f['package']}: {f['detail']}" for f in animation_failed)
+                if animation_failed else "")
+            or ("; ".join(animation_missing_deps) if animation_missing_deps else "")})
+    # The dialogue UI is not derived from any bundle -- its input is a file the
+    # caller hands in -- so it is reported under its own key rather than among
+    # the artifacts derived from the extracted packages.  It is always present:
+    # skipped-with-a-reason when no path was supplied, never absent.
+    report["playerData"] = [_ui_artifact(out, player_data)]
     pack_manifest = write_pack_manifest(out)
     report["derived"].append({
         "artifact": "manifest.json",

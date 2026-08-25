@@ -48,6 +48,13 @@ FIXTURE_PREFIX = "mysekai__fixture__"
 CUT_SCENE_PREFIX = "mysekai__cut_scene__"
 FIXTURE_TIMELINE_PREFIX = "mysekai__fixture_timeline__"
 
+# The dialogue-camera assets live in exactly one package, so the domain is
+# claimed by that exact name and never by a prefix: ``mysekai__camera`` as a
+# prefix would also swallow any future ``mysekai__camera_*`` neighbour whose
+# contents nobody has read yet, and route it into the camera job silently.  An
+# exact name leaves such a neighbour visible as ``unsupported`` instead.
+CAMERA_PACKAGE = "mysekai__camera"
+
 
 @dataclass(frozen=True)
 class Route:
@@ -68,6 +75,8 @@ def route(name):
         return Route("emoticon", "emoticons")
     if name == "mysekai__talk__scenario__talk":
         return Route("talk", "talks")
+    if name == CAMERA_PACKAGE:
+        return Route("camera", "perf")
     if PHENOMENA_BUNDLE.match(name) or name == PHENOMENA_THUMBNAIL:
         return Route("phenomena", "phenomena")
     if name.startswith(SITE_PREFIX):
