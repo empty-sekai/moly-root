@@ -399,9 +399,36 @@ async function checkChannelBinding(panel, probe) {
     rows.push({ status: 'fail', label: `…还有 ${totals.unbound.length - 25} 条绑不上的通道（面板「上链残差」里全列）` });
   }
   for (const line of errors) rows.push({ status: 'fail', label: `动画包读不到：${line}` });
-  const ok = totals.rootFallback === 0 && totals.channels > 0 && !errors.length;
+  // 差分：判据独立重数的账，必须与运行时自己报的账逐个数字相同。
+  // 这两边曾各说一套（运行时绑上 0、判据重数 18/18），而「一致」不是靠把两边改到
+  // 一样得来的——是先回产物判定「通道的目标在 glTF 里用节点下标表示，名字只是派生物」，
+  // 判定判据那一侧对、运行时那一侧错，然后只改错的那一侧。
+  const runtime = probe.bindingReport ? probe.bindingReport() : null;
+  const diffs = [];
+  if (!runtime) {
+    diffs.push('运行时没有上链报告');
+  } else {
+    const pairs = [
+      ['通道数', totals.channels, runtime.channels],
+      ['绑上', totals.bound, runtime.bound],
+      ['绑不上', totals.unbound.length, runtime.unbound],
+      ['根兜底', totals.rootFallback, runtime.rootFallback],
+      ['歧义', totals.ambiguous, runtime.ambiguous],
+    ];
+    for (const [label, mine, theirs] of pairs) {
+      if (mine !== theirs) diffs.push(`${label}：判据 ${mine} vs 运行时 ${theirs}`);
+    }
+    rows.push({
+      status: diffs.length ? 'fail' : 'pass',
+      label: '与运行时的差分（同一输入，两个实现）',
+      detail: diffs.length ? diffs.join(' · ') : '五个计数逐个相同',
+    });
+  }
+  const ok = totals.rootFallback === 0 && totals.channels > 0
+    && !errors.length && !diffs.length;
   panel.set('c8', '通道绑定残差', ok ? 'pass' : 'fail',
-    `轨 ${lane.key} · 通道 ${totals.channels} · 绑上 ${totals.bound} · 绑不上 ${totals.unbound.length} · 根兜底 ${totals.rootFallback}`,
+    `轨 ${lane.key} · 通道 ${totals.channels} · 绑上 ${totals.bound} · 绑不上 ${totals.unbound.length} · 根兜底 ${totals.rootFallback}`
+    + (diffs.length ? ` · 与运行时不一致 ${diffs.length} 处` : ' · 与运行时一致'),
     rows);
   return boundObjects;
 }

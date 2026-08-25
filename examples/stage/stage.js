@@ -491,7 +491,7 @@ async function bindLane(lane) {
       const entry = await loadAnimationPackage(pkg);
       const report = Bind.retargetClips({
         clips: entry.gltf.animations || [], json: entry.json,
-        nodeObjects: entry.nodeObjects, resolvers, want: names,
+        resolvers, want: names,
       });
       for (const [name, clip] of report.clips) state.clipsByKey.set(`${pkg}::${name}`, clip);
       reports.push(report);
@@ -1246,6 +1246,33 @@ window.__stageProbe = {
   } : { status: state.talkStatus, choices: state.talkChoices.length }),
   bodyChannels: () => Object.fromEntries(bodyChannelCounts()),
   bodyBones: () => [...BODY_BONES],
+  // 已装载的演出动画包，按包名取。判据要能拿运行时**真正用的那份** gltf/json/
+  // nodeObjects 去比，而不是自己再读一遍文件——两份读法不同正是要查的东西。
+  animationPackage: (pkg) => {
+    const entry = state.packages.get(pkg);
+    if (!entry) return null;
+    return {
+      json: entry.json,
+      animations: (entry.gltf.animations || []).map((clip) => ({
+        name: clip.name,
+        tracks: (clip.tracks || []).map((track) => track.name),
+      })),
+      nodeNames: entry.nodeObjects.map((object, index) => ({
+        index, name: object ? object.name : null,
+      })).filter((row) => row.name !== null),
+    };
+  },
+  laneNames: () => (state.lane ? [...state.lane.names] : []),
+  // 运行时自己算出的上链账。判据拿它与判据独立重数的结果比：两个数不同即红。
+  // 「把两边改到一致」不算修好——一致可以是两个都错，所以判据先回产物判定谁对。
+  bindingReport: () => (state.binding ? {
+    channels: state.binding.channels,
+    bound: state.binding.bound,
+    unbound: state.binding.unbound.length,
+    ambiguous: state.binding.ambiguous,
+    rootFallback: state.binding.rootFallback,
+    viaSuffix: state.binding.viaSuffix,
+  } : null),
   advance(frames = 30, dt = 1 / 60) {
     const wasPlaying = state.playing;
     state.playing = true;

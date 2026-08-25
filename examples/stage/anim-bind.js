@@ -130,16 +130,39 @@ function countBound(report, object) {
 }
 
 /**
+ * 源包里「节点名 → 节点下标」的表，**从 glTF json 建**，不从 Object3D 建。
+ *
+ * 为什么不能从 `nodeObjects` 建：演出动画包里一个 mesh 都没有、节点也不在任何
+ * scene 下，GLTFLoader 因此不给它们造 Object3D，`parser.associations` 是空的
+ * ⇒ 表是空的 ⇒ 每条轨都查不到 ⇒ 整包 18 条通道全判「绑不上」，而这些通道其实
+ * 都能解。实测标本：`mysekai__fixture__mdl_ext0001_fixture_sofa1` 的
+ * `act_cw_ex01_..._033_{S,L,E}`，运行时绑上 0 而判据独立重数得 18/18。
+ * json 的 `nodes[].name` 一直在，通道的目标本来也是用**下标**表示的，名字只是派生物。
+ *
+ * 重名要报出来，不能默默取第一个：同一份 json 里两个节点同名时，按名字回查是
+ * 二义的，取第一个就是「动了，但动的是别的节点」。
+ */
+export function nodeIndexByName(json) {
+  const nodes = json?.nodes || [];
+  const byName = new Map();
+  const duplicated = new Set();
+  nodes.forEach((node, index) => {
+    const name = node?.name;
+    if (!name) return;
+    if (byName.has(name)) duplicated.add(name);
+    else byName.set(name, index);
+  });
+  return { byName, duplicated };
+}
+
+/**
  * 把演出动画包的剪辑改绑到目标树。
  * `resolvers` 是 `{ native: suffixIndex, 'character-rig': suffixIndex, ... }`。
  */
-export function retargetClips({ clips, json, nodeObjects, resolvers, want = null }) {
+export function retargetClips({ clips, json, resolvers, want = null }) {
   const report = emptyReport();
   const pathOf = nodePathIndex(json);
-  const indexByName = new Map();
-  nodeObjects.forEach((object, index) => {
-    if (object && object.name && !indexByName.has(object.name)) indexByName.set(object.name, index);
-  });
+  const { byName: indexByName, duplicated } = nodeIndexByName(json);
   for (const clip of clips || []) {
     if (want && !want.has(clip.name)) continue;
     const tracks = [];
@@ -148,8 +171,17 @@ export function retargetClips({ clips, json, nodeObjects, resolvers, want = null
       const dot = track.name.lastIndexOf('.');
       const nodeName = dot < 0 ? track.name : track.name.slice(0, dot);
       const property = dot < 0 ? '' : track.name.slice(dot + 1);
+      if (duplicated.has(nodeName)) {
+        report.unbound.push({
+          clip: clip.name, path: nodeName, kind: '?', property,
+          reason: `ambiguous-node-name:${nodeName}`,
+        });
+        report.ambiguous += 1;
+        continue;
+      }
       const nodeIndex = indexByName.get(nodeName);
       const record = nodeIndex === undefined ? null : pathOf.get(nodeIndex);
+
       const resolver = record ? (resolvers[record.kind] || null) : null;
       const hit = record && resolver
         ? resolvePath(resolver, record.path)
