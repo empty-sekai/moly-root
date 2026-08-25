@@ -15,6 +15,7 @@
 
 import * as THREE from 'three';
 import * as Shading from '../viewer/shading.js';
+import { surfaceProgramForShader } from '../viewer/environment.js';
 
 // 家具本体按「身体」角色着色：与 viewer 的 body 默认档一致。
 export const FIXTURE_TOON = { usage: 1, override: 1, intensity: 1, threshold: 0.01, smoothness: 0.05 };
@@ -23,10 +24,40 @@ const CULL_TO_SIDE = { 0: THREE.DoubleSide, 1: THREE.BackSide, 2: THREE.FrontSid
 
 const ALBEDO_ANCHOR = 'vec4 albedo = texture2D(mainTex, vUv);';
 
-function isShadowDecal(material, mesh) {
+// 材质该走哪套程序,**按产物记下来的着色器名判**,不按材质名后缀猜。
+//
+// 后缀猜法（`/_shadow$/`）曾是这里唯一的依据,而那是三档判据里的红档:材质名的词缀
+// 不是「谁来画这个面」的陈述。产物现在带着从资产里解出来的着色器名（实测六个包 17/17:
+// `Mysekai/Fixture/Basic` 12 · `ShadowMesh` 2 · `Effect/UberUnlit` 2 · `Object` 1）,
+// 所以判据升到第二档:**名 → 程序**的映射,且**未命中必须计数**。
+//
+// 未命中不给回落程序。`surfaceProgramForShader` 故意在未命中时返回 null 而不是近似程序——
+// 回落会让「用了近似」在消费侧不留痕迹,于是覆盖账上出现假的「用上了」。要近似可以,
+// 但必须由这里自己声明并计数。
+const SHADOW_MESH_SHADER = 'Mysekai/Fixture/ShadowMesh';
+
+/** 材质记下来的着色器名,没有就返回空串（旧产物没有这个字段）。 */
+function shaderNameOf(material) {
+  const extras = material?.userData || {};
+  const value = extras.shader;
+  if (typeof value === 'string') return value;
+  // 未解析的指针记成对象（带 status/reason）,那不是名字,按「没有名字」处理。
+  return '';
+}
+
+/**
+ * 这个材质是不是阴影贴片。
+ * 有着色器名 ⇒ 按名字判（权威）；没有 ⇒ 退回后缀猜法,**并告诉调用方这是猜的**,
+ * 让它计数。旧产物仍能画出来,但「有多少是猜的」在界面上是个数字。
+ */
+function shadowDecalDecision(material, mesh) {
+  const shader = shaderNameOf(material);
+  if (shader) return { decal: shader === SHADOW_MESH_SHADER, guessed: false, shader };
   const materialName = String(material?.name || '');
   const meshName = String(mesh?.name || '');
-  return /_shadow$/i.test(materialName) || /(^|_)shadow$/i.test(meshName) || meshName === 'mdl_shadow';
+  const guess = /_shadow$/i.test(materialName)
+    || /(^|_)shadow$/i.test(meshName) || meshName === 'mdl_shadow';
+  return { decal: guess, guessed: true, shader: '' };
 }
 
 function attachAlphaClip(material, clip) {
@@ -52,6 +83,10 @@ export function applyFixtureMaterials(root, { stencilIndex = 1 } = {}) {
   const report = {
     meshes: 0, toon: 0, decal: 0, textured: 0, untextured: 0,
     alphaClip: 0, leftDefault: 0, materials: [],
+    // 路由账:按着色器名判的 / 名字缺失只能猜的 / 名字在而八套程序里没有的。
+    // 第三项是「未命中」,它不是错误,但必须是个数字而不是沉默。
+    byShader: {}, routedByName: 0, guessedByName: 0,
+    unmatchedShaders: {},
   };
   if (!root) return report;
   root.traverse((mesh) => {
@@ -61,7 +96,19 @@ export function applyFixtureMaterials(root, { stencilIndex = 1 } = {}) {
     const old = mesh.material;
     const extras = old?.userData || {};
 
-    if (isShadowDecal(old, mesh)) {
+    const decision = shadowDecalDecision(old, mesh);
+    if (decision.shader) {
+      report.routedByName += 1;
+      report.byShader[decision.shader] = (report.byShader[decision.shader] || 0) + 1;
+      if (!surfaceProgramForShader(decision.shader)) {
+        report.unmatchedShaders[decision.shader] =
+          (report.unmatchedShaders[decision.shader] || 0) + 1;
+      }
+    } else {
+      report.guessedByName += 1;
+    }
+
+    if (decision.decal) {
       const decal = new THREE.MeshBasicMaterial({
         name: `${old?.name || mesh.name}·shadow-decal`,
         color: 0xffffff,

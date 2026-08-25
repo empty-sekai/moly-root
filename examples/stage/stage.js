@@ -213,6 +213,19 @@ function updateRenderFacts() {
   setText('material-facts', fixture
     ? `家具 ${fixture.toon} toon / ${fixture.decal} 阴影贴片 / 有贴图 ${fixture.textured} · 角色 ${character?.replaced ?? 0} toon（布料链 ${character?.clothChains ?? 0}）`
     : `家具未装载 · 角色 ${character?.replaced ?? 0} toon`);
+  // 路由账:按着色器名判了几个、只能按名字猜几个、名字在而八套程序里没有的几个。
+  // 「猜」与「未命中」都不是错误,但它们必须是数字——沉默才是错误。
+  const unmatched = Object.entries(fixture?.unmatchedShaders || {});
+  setText('shader-facts', fixture
+    ? `按着色器名路由 ${fixture.routedByName} · 名字缺失只能猜 ${fixture.guessedByName}`
+      + (Object.keys(fixture.byShader || {}).length
+        ? ` · ${Object.entries(fixture.byShader)
+            .map(([name, n]) => `${name.replace('Mysekai/', '')} ${n}`).join(' / ')}`
+        : '')
+      + (unmatched.length
+        ? ` · 八套程序未覆盖 ${unmatched.map(([n, c]) => `${n}×${c}`).join(' ')}`
+        : '')
+    : '—');
   const binding = state.binding;
   setText('binding-facts', binding
     ? `通道 ${binding.channels} · 按路径绑上 ${binding.bound} · 绑不上 ${binding.unbound.length}`
