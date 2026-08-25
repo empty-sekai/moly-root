@@ -79,6 +79,10 @@ function billboard(renderer, ctx) {
   const THREE = ctx.THREE;
   const shading = ctx.shading;
   if (!shading) return null;
+  // 没有可画的基础贴图就**不建绘制件**。取用器永远不返回 null(加载失败留下的是一个
+  // 空白占位),而数组选层也可能取空 —— 拿这两种去画得到的都是一块白方片,
+  // 看着「有东西」而其实是缺失。调用方拿到 null 就不发这一颗并计数。
+  if (!ctx.map) return null;
   const material = shading.material;
   // A sprite is still the right object for this mode — it is the one three.js
   // shape whose quad is assembled in view space — but the shader on it is the

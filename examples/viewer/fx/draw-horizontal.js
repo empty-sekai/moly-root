@@ -95,6 +95,10 @@ export function makeDrawable(renderer, ctx) {
   // billboard runs; only the orientation differs between the two modes.
   const shading = ctx.shading;
   if (!shading) return null;
+  // 没有可画的基础贴图就**不建绘制件**。取用器永远不返回 null(加载失败留下的是一个
+  // 空白占位),而数组选层也可能取空 —— 拿这两种去画得到的都是一块白方片,
+  // 看着「有东西」而其实是缺失。调用方拿到 null 就不发这一颗并计数。
+  if (!ctx.map) return null;
   const material = shading.material;
   const state = shading.makeState();
   state.color.copy(ctx.color);

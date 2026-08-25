@@ -9,6 +9,7 @@ import { GLTFLoader } from './GLTFLoader.js';
 import { makeHooks, registeredModules } from './fx/hooks.js';
 import { makeDrawable, drawableModes, drawableRejection } from './fx/drawable.js';
 import { createParticleShading, coordSource } from './fx/particle-shader.js';
+import { LaneStream, nextAutoSeed, toUnit } from './fx/rng.js';
 // 绘制件的实现文件在这里注册。没被注册的绘制模式一律整条不画并计数。
 import * as drawMesh from './fx/draw-mesh.js';
 import * as drawHorizontal from './fx/draw-horizontal.js';
@@ -379,10 +380,13 @@ export const OPTIONAL_MODULES = ['emission', 'shape', 'sizeOverLifetime', 'color
   'noise', 'collision', 'trails', 'subEmitters', 'textureSheet', 'customData'];
 
 /** Annulus sampling for radius-based shapes: thickness 1 fills the whole
- *  region, 0 emits from the outer rim only; power 2 = disc, 3 = sphere. */
-function sampleShapeRadius(radius, thickness, power) {
+ *  region, 0 emits from the outer rim only; power 2 = disc, 3 = sphere.
+ *
+ *  `u` 是这一次抽样的取值。**厚度为 0 时结果恒等于 `radius`,但那一次抽样照抽** ——
+ *  真源里那段取值不在任何分支里,省掉会让整条流错位一格,之后每一颗粒子的角度全错。 */
+function sampleShapeRadius(radius, thickness, power, u = Math.random()) {
   const inner = Math.pow(Math.min(1, Math.max(0, 1 - num(thickness))), power);
-  return radius * Math.pow(inner + (1 - inner) * Math.random(), 1 / power);
+  return radius * Math.pow(inner + (1 - inner) * u, 1 / power);
 }
 
 // ---- 从网格表面发射 ------------------------------------------------------
@@ -536,8 +540,13 @@ function applyShapeTransform(shape, pos, dir) {
  * `mesh` 是「从网格表面发射」用的三角表,由发射器在装配时从**已经预载好的**网格备好
  * (见 `meshSamplerFor`)。发射是同步的而网格是异步读的,所以这里只用现成的,不去取;
  * 该有而没有就整条不发(返回 null),由调用方计数。
+ *
+ * `draw` 是这一颗粒子在**形状模块那条随机流**上取到的一组值(见 `fx/rng.js`)。
+ * 只有圆形那一支的消耗次数与次序是取得的(每 4 颗一组、组内**先角度后半径**),
+ * 所以只有它拿得到 `draw`;其余形状的消耗次数**未取得**,调用方传 null,
+ * 这里退回平台随机数并由调用方计数 —— 不许照着圆形那一支猜别的形状。
  */
-export function emitFrom(shape, mesh = null) {
+export function emitFrom(shape, mesh = null, draw = null) {
   if (shapeSupport(shape) === 'unimplemented' && !EMIT_FAULT.pointEmit) {
     warnOnce(`shape:${shape.type}`,
       `发射形状 ${shape.type} 没有发射公式,该发射器停发(不退化成点发射:那会把粒子堆在节点原点)`);
@@ -558,9 +567,14 @@ export function emitFrom(shape, mesh = null) {
     case 'Circle': {
       // Position in the local XY plane; direction is radially outward within
       // that plane — not the +Z normal.
-      const a = Math.random() * (arc || Math.PI * 2);
+      //
+      // 两次取值,**先角度后半径**,顺序不能换:换了之后每一颗粒子拿到的还是同样两个
+      // 数,但配错了对,落点整体错乱而每个数看着都「在范围内」。
+      // 角度是 `arc * u`(弧度制),没有「arc 为 0 就当整圈」这回事。
+      const a = (draw ? draw.angle : Math.random()) * arc;
+      const ur = draw ? draw.radius : Math.random();
       dir.set(Math.cos(a), Math.sin(a), 0);
-      pos.copy(dir).multiplyScalar(sampleShapeRadius(radius, shape.radiusThickness, 2));
+      pos.copy(dir).multiplyScalar(sampleShapeRadius(radius, shape.radiusThickness, 2, ur));
       break;
     }
     case 'Cone': {
@@ -664,6 +678,17 @@ export function emitFrom(shape, mesh = null) {
 
 // ---- 粒子发射器 ----------------------------------------------------------
 
+/**
+ * 这张贴图**能不能画**。
+ *
+ * 贴图取用器永远不返回 null:一张读不到的图留下的是一个空白占位对象,拿它去画就是
+ * 一块白方片(默认贴图 RGB 全白、形状全在 alpha)—— 看着「有东西」而其实是缺失。
+ * 所以「有没有图」这道闸对加载失败是瞎的,必须问「加载成功了吗」。
+ */
+function usableTexture(tex) {
+  return !!tex && !(tex.userData && tex.userData.molyLoadFailed);
+}
+
 const GRAVITY = -9.81;
 const MIN_PARTICLE_SCALE = 0.0001;     // 零缩放的 sprite 会被剔掉,给一个下限
 const TMP_V3 = new THREE.Vector3();    // 屏幕占比截断算深度用的临时向量(每帧每粒子,别新建)
@@ -753,7 +778,9 @@ class Emitter {
   _arrayLayer(rand, u) {
     if (!this.arraySlices) return null;
     const layer = this._arrayLayerIndex(rand, u || 0);
-    return this.arraySlices[layer] || this.arraySlices[0] || null;
+    // 取不到就是取不到:**不拿第 0 层顶替**。顶替看着「有东西」,而画的是另一层的图 ——
+    // 比空着更难发现。调用方据此不画并计数。
+    return this.arraySlices[layer] || null;
   }
 
   /**
@@ -868,6 +895,49 @@ class Emitter {
       const t = vec3(this.system.shape.position);
       this.shapeCenter.set(-t.x, t.y, t.z);
     }
+
+    // —— 逐粒子随机流 ——
+    //
+    // 每个模块各持**一条独立的持续流**,而它们都用同一个系统种子播种(没有按模块加
+    // 偏移)。流一路往下走:不在每帧、不在循环回绕、不在环形复用时重播 —— 只有
+    // 重新播放才重播。粒子的种子是流的**输出**,不是输入;粒子索引与环形槽位号
+    // 从不进入随机数运算。
+    //
+    // 出生那一组取值表是按**位置**定的,不是按「这一项用不用得上」定的:取值点在
+    // 分支之外,曲线不是「两值之间随机」也照抽,取出来的数被求值忽略而流已经推进。
+    // 逐轴尺寸与三轴旋转那两组则真的在分支里,关掉时不消耗。
+    const startSpec = this.system.start || {};
+    const initialDraws = ['seed', 'lifetime', 'sizeX'];
+    if (startSpec.size3D) initialDraws.push('sizeY', 'sizeZ');
+    initialDraws.push('rotationZ');
+    if (startSpec.rotation3D) initialDraws.push('rotationX', 'rotationY');
+    initialDraws.push('color');
+    this.rand = new LaneStream(0, initialDraws);
+    // 形状模块自己的一条流。**只有圆形那一支**的消耗次数与次序是取得的
+    // (每 4 颗一组、组内先角度后半径),别的形状消耗几次未取得 —— 那些退回平台
+    // 随机数并逐个数出来,不许照着圆形猜。
+    this.shapeAligned = this.shapeType === 'Circle' ? 1 : 0;
+    this.shapeRand = new LaneStream(0, ['angle', 'radius']);
+    // 圆形那一支还有两件产物里没有导出的东西:arc 的分派模式(这里按随机档走)与
+    // arc 的离散化步长(这里按 0 走)。导出了才谈得上对齐,先数出来。
+    this.arcModeUnexported = this.shapeAligned;
+    // 形状自带的方向/位置扰动量只要有一个大于 0,真源就在形状流上额外取值,
+    // 而取几次、什么次序**未取得**。
+    const shapeSpec = this.system.shape || {};
+    this.emitterStoreUnread = (num(shapeSpec.randomDirectionAmount) > 0
+      || num(shapeSpec.sphericalDirectionAmount) > 0) ? 1 : 0;
+    this.systemSeed = 0;
+    // 发射数量那几处(速率的两值随机、burst 的概率与颗数)走的是哪一条流**未取得**,
+    // 照旧用平台随机数并数出来。
+    this.emissionRandUnread = this.system.emission ? 1 : 0;
+    // 出生速度与重力系数的取值点不在已取得的那张表里,它们的流**未取得**;
+    // 这里用这颗粒子自己的种子当因子并数出来。
+    this.startSpeedUnread = 1;
+    // 一批的边界 = 一次生成调用。批内第 j 颗用车道 j & 3,流每 4 颗才推进一次,
+    // 所以「每批发几颗」是对账量:组数应当等于各批 ceil(颗数/4) 之和。
+    this.rngExpectedGroups = 0;
+    this._batchMark = 0;
+
     this.birth = this._emptyBirth();
 
     const material = this.renderer.material;
@@ -1108,6 +1178,52 @@ class Emitter {
   }
 
   /**
+   * 重新播种。真源里这件事只发生在**重新播放**时,逐帧更新与循环回绕都不做。
+   *
+   * 自动种子取自一个**进程级**的确定性发生器(它的初值等价于以 0 播种),不是时间熵:
+   * 同一个进程内启动次序相同,拿到的自动种子就完全相同;而反复重播会一路往下走,
+   * 所以自动种子的系统每次重播确实换一个种子 —— 这与原版一致,不是缺陷。
+   * 关掉自动种子时**直接用序列化的那个数**,一个字都不改。
+   *
+   * 每个模块各一条流,但**都用同一个系统种子**播种,没有按模块加偏移。
+   */
+  _resetSeeds() {
+    const s = this.system;
+    this.systemSeed = s.autoRandomSeed === false
+      ? (Math.round(num(s.randomSeed, 0)) >>> 0)
+      : nextAutoSeed();
+    this.rand.setSeed(this.systemSeed);
+    this.shapeRand.setSeed(this.systemSeed);
+    this.rngExpectedGroups = 0;
+    this._batchMark = 0;
+  }
+
+  /**
+   * 一批的开头:把两条流的车道游标归零。
+   *
+   * 一批 = 一次生成调用,生成起点对齐到 4,所以每一批的第一颗恒落在车道 0。
+   * 「一帧发 1 颗、连发 4 帧」与「一帧发 4 颗」消耗的随机数**不同** —— 把批次
+   * 铺平会让整条流错位,之后每一颗粒子的每一个量全错。
+   */
+  _beginBatch() {
+    this.rand.beginBatch();
+    this.shapeRand.beginBatch();
+    this._batchMark = this.rand.taken;
+  }
+
+  /**
+   * 一批的结尾:把这一批的颗数折成应有的组数,给对账用。
+   *
+   * 数的是**从流上取了几颗**,不是「画成了几颗」:一颗粒子在原版里照样出生、照样
+   * 消耗随机数,我们这一侧因为贴图取不到而不画它是另一回事。拿「画成了几颗」去折,
+   * 一次贴图缺失就会让这本账凭空对不上。
+   */
+  _endBatch() {
+    const made = this.rand.taken - this._batchMark;
+    if (made > 0) this.rngExpectedGroups += Math.ceil(made / 4);
+  }
+
+  /**
    * 发一颗。`origin` 非空时是**世界空间的发射原点**,用于子发射:目标系统被父粒子
    * 驱动时,它是被搬到父粒子所在处再发射的,所以形状的局部偏移仍按本节点的**旋转**
    * 摆放,但平移来自父粒子而不是本节点。继承父粒子的颜色/尺寸等是另一回事,本方法
@@ -1115,8 +1231,15 @@ class Emitter {
    */
   spawn(origin = null) {
     const s = this.system, start = s.start || {};
-    const r = Math.random();
-    const sampled = emitFrom(s.shape, this.meshShape);
+    // 出生那一组取值。**粒子的种子是流的输出**,原样存下,不做任何变换。
+    const born = this.rand.next();
+    const seed = born.w.seed;
+    // 生命期里那些「每颗稳定」的随机求值取的是**这颗粒子自己的种子**(取得);
+    // 种子到 [0,1] 的具体映射**未取得**,这里用本引擎里唯一读出的那一条归一化。
+    const r = toUnit(seed);
+    // 形状模块是另一条流。圆形那一支照真源的次序取值,别的形状退回平台随机数并计数。
+    const sampled = emitFrom(s.shape, this.meshShape,
+                             this.shapeAligned ? this.shapeRand.next().u : null);
     if (!sampled) return;                // 形状没建模:这一发不发(计数见 this.suppressed)
     const { pos, dir } = sampled;
     pos.x = -pos.x; dir.x = -dir.x;      // 同一节点内容的 M 换手(节点链共轭之外的另一半)
@@ -1136,19 +1259,21 @@ class Emitter {
       }
       this._recordBirth(pos);
     }
-    const life = Math.max(0.01, sampleValue(start.lifetime, 0, r));
+    // 出生的每一项各取**自己那一次**值,不是全体共用一个因子:真源里它们是流上
+    // 相邻的几次取值,共用一个因子会让寿命长的粒子必然也大、必然也转得多。
+    const life = Math.max(0.01, sampleValue(start.lifetime, 0, born.u.lifetime));
     // 出生尺寸是**逐轴量**:`size3D` 为真时 `start.size` 只是 X 轴,Y 轴另有 `sizeY`
     // (雨滴就是这样:X 0.01~0.02 米、Y 0.1~0.8 米的一道细长条;当成各向同性的标量
     // 就会画成 1~2 厘米的小方块,远看等于没有雨)。
     // `sizeZ` 只对 Mesh 绘制模式有意义(billboard 是二维片,没有第三轴可缩),但它
     // **必须带进粒子记录**:26 个 Mesh 发射器导出了它,绘制件读不到就只能拿两轴去缩
     // 一个三维网格 —— 那是错的,而且错得看不出来。
-    const sizeX = sampleValue(start.size, 0, r);
-    const sizeY = start.size3D ? sampleValue(start.sizeY, 0, r) : sizeX;
-    const sizeZ = start.size3D && start.sizeZ ? sampleValue(start.sizeZ, 0, r) : sizeX;
+    const sizeX = sampleValue(start.size, 0, born.u.sizeX);
+    const sizeY = start.size3D ? sampleValue(start.sizeY, 0, born.u.sizeY) : sizeX;
+    const sizeZ = start.size3D && start.sizeZ ? sampleValue(start.sizeZ, 0, born.u.sizeZ) : sizeX;
     // 出生色就是顶点色。染色不再在这里乘 —— 它是片元链上的一环,乘的是**采样出来的
     // 那一像素**,而且乘 alpha,与「先乘进顶点色」不等价。
-    const first = sampleColor(start.color, 0, r);
+    const first = sampleColor(start.color, 0, born.u.color);
     // 逐粒子量(颜色、透明度、旋转、贴图帧、两个逐粒子向量)进 uniform,材质是整条
     // 发射器共用的一份 —— 所以**贴图对象不再需要逐粒子复制**:缩放偏移与片表格位
     // 都是着色器里的量,不再写进贴图对象的平铺/偏移。
@@ -1156,8 +1281,11 @@ class Emitter {
     // 所以这里把随机因子直接传进去,**不要引用还不存在的粒子对象**。
     // 层不是终生不变的,后面每帧按当时的年龄重算(见 `_update` 里的翻页那一段)。
     const map = this.arraySlices ? this._arrayLayer(r, 0) : this.map;
+    // 取不到贴图就**不画这一颗**并数出来:数组选层取空,或者那张图根本没加载成功。
+    // 拿一个空白占位去画得到的是一块白方片 —— 看着「有东西」而其实是缺失。
+    if (!usableTexture(map)) { this.textureMisses = (this.textureMisses || 0) + 1; return; }
     const st = this.state;
-    const spin0 = sampleValue(start.rotation, 0, r);
+    const spin0 = sampleValue(start.rotation, 0, born.u.rotationZ);
     // 绘制件按渲染器的绘制模式分派(朝相机的 billboard 是内建的那一支)。
     // 没有对应实现的绘制模式在挂载时就被挡掉了,所以这里拿到 null 只可能是
     // 材质/贴图这一侧出了问题 —— 那就不发这一颗,并数出来。
@@ -1180,9 +1308,15 @@ class Emitter {
     this.parent.add(sprite);
     const p = {
       sprite, draw, map, r, life, age: 0, sizeX, sizeY, sizeZ,
+      // 这颗粒子的种子:流的输出,原样存下。生命期里那些「每颗稳定」的随机求值
+      // 与子发射的种子推导都从它来,不从粒子序号来。
+      seed,
+      lane: born.lane,
       // 数组档这一刻的层号。逐帧重算,变了才换贴图(见 `_update`)。
       layer: this.arraySlices ? this._arrayLayerIndex(r, 0) : -1,
       pos: pos.clone(),
+      // 出生速度与重力系数:它们的取值点不在已取得的那张出生取值表里,走哪一条流
+      // **未取得**。照旧用这颗粒子自己的因子并计数(`startSpeedUnread`)。
       vel: dir.multiplyScalar(sampleValue(start.speed, 0, r)),
       spin: spin0,
       gravity: sampleValue(start.gravityModifier, 0, r),
@@ -1245,6 +1379,10 @@ class Emitter {
     // 不是只放 time=0 的那一发 —— 靠速率发射的目标一发都不会有 burst@0。
     // 少了这道闸,目标的 burst 会在挂载时自己放一次,与触发的那次叠成两份。
     if (em) {
+      // 这一帧的发射是**一批**:批内第 j 颗用车道 j & 3,流每 4 颗才推进一次。
+      // 一次触发式播放算不算独立的一批**未取得**(那条外部发射路径没有读),
+      // 这里把同一帧里发的都算作一批。
+      this._beginBatch();
       if (this.subEmitterDriven) {
         for (const play of this.plays) {
           if (play.done) continue;
@@ -1271,6 +1409,7 @@ class Emitter {
         this.pending = this._auto.pending;
         this.burstCursor = this._auto.cursors;
       }
+      this._endBatch();
     }
     for (const h of this.hooks) h.onFrame?.(dt);
     const alive = [];
@@ -1382,9 +1521,17 @@ class Emitter {
       if (this.arraySlices) {
         const layer = this._arrayLayerIndex(p.r, u);
         if (layer !== p.layer) {
+          const tex = this.arraySlices[layer] || null;
+          // 这一层取不到(那张图没加载成功):**不画**并数出来。既不拿第 0 层顶替,
+          // 也不留在上一层继续画 —— 那两种都是「画了另一张图」。
+          if (!usableTexture(tex)) {
+            this.textureMisses = (this.textureMisses || 0) + 1;
+            this._drop(p);
+            continue;
+          }
           p.layer = layer;
-          p.map = this.arraySlices[layer] || this.arraySlices[0] || null;
-          p.draw.state.map = p.map;
+          p.map = tex;
+          p.draw.state.map = tex;
           this.arrayPageTurns = (this.arrayPageTurns || 0) + 1;
         }
       }
@@ -1471,6 +1618,9 @@ class Emitter {
     const em = this.system.emission;
     const bursts = em && em.bursts;
     if (!bursts || !bursts.length) return 0;
+    // 一次触发也是一次生成调用,所以是自己的一批(车道从 0 起)。这条外部发射
+    // 路径的随机行为**未取得**,这里按与自主发射同一条律走。
+    this._beginBatch();
     const burst = bursts[0];
     if (Math.random() > num(burst.probability, 1)) return 0;
     const cap = num(this.system.maxParticles, 1000);
@@ -1479,6 +1629,7 @@ class Emitter {
     for (let k = 0; k < count && this.particles.length < cap; k++) {
       this.spawn(origin); made += 1;
     }
+    this._endBatch();
     return made;
   }
 
@@ -1491,6 +1642,9 @@ class Emitter {
     this.plays = [];
     this._auto = { age: 0, pending: 0, cursors: [], origin: null, follow: null };
     this.birth = this._emptyBirth();     // 判据读的是这一轮的出生点,不是上一轮的
+    // 重新播放 = 重新播种。这是**唯一**会重播的时机:逐帧更新、循环回绕、环形复用
+    // 都不重播,流跨帧跨循环一路往下走。
+    this._resetSeeds();
   }
 
   dispose() {
@@ -1804,6 +1958,39 @@ export class EmoticonView {
       ringPaused: this.emitters.reduce((n, e) => n + (e.ringPaused || 0), 0),
       customReads: this.emitters.reduce((n, e) => n + (e.customReads || 0), 0),
       customMisses: this.emitters.reduce((n, e) => n + (e.customMisses || 0), 0),
+      // 「该画而画不成」的次数:数组选层取空,或者那张图没加载成功。
+      // 这类粒子**不画**,不拿别的层或空白占位顶替。
+      textureMisses: this.emitters.reduce((n, e) => n + (e.textureMisses || 0), 0),
+      // —— 逐粒子随机流的账 ——
+      //
+      // `groups` 对 `expectedGroups`:后者是按**每批发几颗**独立折出来的应有组数
+      // (各批 ceil(颗数/4) 之和),前者是流上真的推进了几组。两个数不等就说明批次
+      // 边界或车道映射错了 —— 把批次铺平会让整条流错位。
+      // `steps` 对 `groups * drawsPerGroup`:每组按取值表推进固定次数。
+      rng: this.emitters.reduce((acc, e) => {
+        if (!e.rand) return acc;
+        acc.emitters += 1;
+        acc.autoSeeded += e.system.autoRandomSeed === false ? 0 : 1;
+        acc.serializedSeed += e.system.autoRandomSeed === false ? 1 : 0;
+        acc.shapeAligned += e.shapeAligned || 0;
+        acc.shapeUnread += (e.system.shape && !e.shapeAligned) ? 1 : 0;
+        acc.arcModeUnexported += e.arcModeUnexported || 0;
+        acc.emitterStoreUnread += e.emitterStoreUnread || 0;
+        acc.emissionRandUnread += e.emissionRandUnread || 0;
+        acc.startSpeedUnread += e.startSpeedUnread || 0;
+        acc.seedDerived += e.spawnedTotal || 0;
+        acc.particles += e.rand.taken;
+        acc.groups += e.rand.groups;
+        acc.expectedGroups += e.rngExpectedGroups || 0;
+        acc.steps += e.rand.steps;
+        acc.drawsPerGroup += e.rand.names.length;
+        acc.shapeGroups += e.shapeRand.groups;
+        acc.shapeSteps += e.shapeRand.steps;
+        return acc;
+      }, { emitters: 0, autoSeeded: 0, serializedSeed: 0, shapeAligned: 0, shapeUnread: 0,
+           arcModeUnexported: 0, emitterStoreUnread: 0, emissionRandUnread: 0,
+           startSpeedUnread: 0, seedDerived: 0, particles: 0, groups: 0, expectedGroups: 0,
+           steps: 0, drawsPerGroup: 0, shapeGroups: 0, shapeSteps: 0 }),
       // 材质对象数。**一个发射器一份**,不是一颗粒子一份 —— 两个数放在一起才看得出
       // 这件事真的成立(`materials` 应当等于 `emitters`,与 `live` 无关)。
       materials: this.emitters.filter((e) => e.shading).length,
@@ -1856,18 +2043,40 @@ export class EmoticonView {
   }
 }
 
+/**
+ * 贴图取用器。
+ *
+ * 加载是异步的而取用是同步的,所以 `load` 立刻返回一个**还没有图的贴图对象** ——
+ * 它永远不是 null。于是「取到了吗」这道闸对**加载失败**是瞎的:失败留下的是同一个
+ * 空白占位,拿它去画就是一块白方片(默认贴图 RGB 全白、形状全在 alpha),
+ * 看着「有东西」而其实是缺失。
+ *
+ * 所以这里做两件事:失败时在贴图对象上留一个记号(`usableTexture` 问的就是它),
+ * 并把这个文件记进失败表 —— 之后再问同一个文件**直接返回 null**,让调用方那道
+ * 「没有图就不画」的闸真的关得上。
+ */
 function makeTextureLoader(base) {
   const loader = new THREE.TextureLoader();
   const cache = new Map();
+  const failed = new Map();            // 文件 -> 失败原因(面板与判据读它)
   const prefix = base && !base.endsWith('/') ? `${base}/` : base;
-  return (file) => {
+  const get = (file) => {
+    if (!file) return null;
+    if (failed.has(file)) return null;
     if (!cache.has(file)) {
-      const tex = loader.load(prefix + file);
+      const tex = loader.load(prefix + file, undefined, undefined, (err) => {
+        tex.userData.molyLoadFailed = true;
+        failed.set(file, String(err && err.message ? err.message : err).slice(0, 120));
+        warnOnce(`tex:${file}`, `贴图读不到,用它的发射器不画并计数:${file}`);
+      });
       tex.colorSpace = THREE.SRGBColorSpace;
       cache.set(file, tex);
     }
     return cache.get(file);
   };
+  get.failures = () => Object.fromEntries(failed);
+  get.failureCount = () => failed.size;
+  return get;
 }
 
 /**
