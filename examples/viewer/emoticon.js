@@ -10,12 +10,14 @@ import { makeHooks, registeredModules } from './fx/hooks.js';
 import { makeDrawable, drawableModes, drawableRejection } from './fx/drawable.js';
 // 绘制件的实现文件在这里注册。没被注册的绘制模式一律整条不画并计数。
 import * as drawMesh from './fx/draw-mesh.js';
+import * as drawHorizontal from './fx/draw-horizontal.js';
 import * as trails from './fx/trails.js';
 import * as noise from './fx/noise.js';
 import * as subEmitters from './fx/sub-emitters.js';
 import { registerDrawable } from './fx/drawable.js';
 import { registerFxModule } from './fx/hooks.js';
 registerDrawable(drawMesh);
+registerDrawable(drawHorizontal);
 // Noise is pre-simulation slot 6, before InheritVelocity, Force, and ClampVelocity.
 registerFxModule(noise, 200);
 // Trail runs after Lights and before Size in the post-simulation block (canon
