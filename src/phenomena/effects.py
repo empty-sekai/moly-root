@@ -160,11 +160,21 @@ def hierarchy(root_id, kinds, trees):
         game_object = owner[transform]
         tree = trees[transform]
         game_object_tree = trees.get(game_object, {})
+        # Which class the transform is, and whether the object carries the
+        # renderer that goes with the rectangle one.  Neither changes a pixel:
+        # the rectangle fields are at their factory values on every one of them,
+        # nothing in these packages explains those fields, and the same kind of
+        # node is authored both ways across phenomena.  They are recorded so the
+        # objects are represented by something read rather than left out of the
+        # count.
+        components = {kinds.get(cid) for cid in _component_ids(game_object_tree)}
         nodes.append({
             "name": str(game_object_tree.get("m_Name", "")),
             "path": path,
             "parent": parent_path,
             "active": bool(game_object_tree.get("m_IsActive", 1)),
+            "transformType": kinds.get(transform, "Transform"),
+            "canvasRenderer": "CanvasRenderer" in components,
             "position": _vec(tree.get("m_LocalPosition", {}), "xyz"),
             "rotation": _vec(tree.get("m_LocalRotation", {}), "xyzw"),
             "scale": _vec(tree.get("m_LocalScale", {}), "xyz"),
