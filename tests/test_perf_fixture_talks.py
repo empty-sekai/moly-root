@@ -132,8 +132,16 @@ def _clean_full_doc():
         "unknownOperations": {}, "missingScripts": [],
         "fixtureOps": _fixture_ops(talks),
         "constants": _constants(),
+        "fixtures": _fixtures(talks),
+        "fixturesWithoutPackage": [],
     }
     return {"summary": summary, "talks": talks}
+
+
+def _fixtures(talks):
+    """A fixtureId -> package map covering exactly the ids the talks name."""
+    ids = sorted({fid for t in talks for fid in t.get("fixtureIds", [])})
+    return {str(fid): f"mdl_synth_fixture_{fid}" for fid in ids}
 
 
 def _fixture_ops(talks):
@@ -294,6 +302,40 @@ def test_fixture_ops_table_answers_operational_question():
     assert "change_fixture_character_mouth" in fops["837"]
     # 837 has the closed-set operators.
     assert "change_fixture_timeline" in fops["837"]
+
+
+# --- c11: every fixture a talk is gated on names a package ---
+
+def test_c11_red_when_a_referenced_fixture_has_no_package_then_green():
+    # A talk carries a fixtureId and every geometry document is keyed by package
+    # name, so without this join a consumer has to guess the pairing from names
+    # that look related.  The violation is planted by removing one mapping.
+    doc = _clean_full_doc()
+    fixtures = doc["summary"]["fixtures"]
+    victim = sorted(fixtures)[0]
+    fixtures[victim] = None
+    doc["summary"]["fixturesWithoutPackage"] = [victim]
+    assert _gate(doc, "c11") is False
+    fixtures[victim] = f"mdl_synth_fixture_{victim}"
+    doc["summary"]["fixturesWithoutPackage"] = []
+    assert _gate(doc, "c11") is True
+
+
+def test_c11_red_when_a_referenced_fixture_is_missing_from_the_map():
+    # Absent from the map is a different failure from present-but-null, and it
+    # must not read as "nothing to resolve".
+    doc = _clean_full_doc()
+    victim = sorted(doc["summary"]["fixtures"])[0]
+    del doc["summary"]["fixtures"][victim]
+    assert _gate(doc, "c11") is False
+
+
+def test_c11_red_when_the_map_is_empty():
+    # What a missing master table looks like: no map at all, while the talks
+    # still name fixtures.  Zero over zero must not pass.
+    doc = _clean_full_doc()
+    doc["summary"]["fixtures"] = {}
+    assert _gate(doc, "c11") is False
 
 
 def test_full_document_is_green():

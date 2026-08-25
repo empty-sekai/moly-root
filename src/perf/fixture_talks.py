@@ -234,6 +234,14 @@ def _semantics(source):
             "furniture have an operational script\" (count > 0) versus talks that "
             "merely happen beside it."
         ),
+        "fixtures": (
+            "fixtures maps each fixtureId these talks are gated on to the package "
+            "that holds that furniture, taken from the master row that states the "
+            "two together.  It is the join a consumer needs: a talk names only a "
+            "fixtureId, while the geometry and attach-point documents are keyed "
+            "by package name, so without it the pairing could only be guessed "
+            "from package names that look related."
+        ),
         "constants": {
             "source": (f"{LIB_PACKAGE}/{source}" if source else None),
             "rule": (
@@ -346,6 +354,16 @@ def extract_fixture_talks(master_source, talk_bundle, out_path, master_cache=Non
     records, report = fixture_talks(master_source, master_cache=master_cache)
     master = Master(master_source, cache_dir=master_cache)
     tweets = {row["id"]: row for row in master.table("mysekaiCharacterTalkTweets")}
+    # Which package holds the furniture a talk is gated on.  A talk names a
+    # fixtureId and nothing else, and no extracted product carries that id --
+    # the geometry and attach-point documents are keyed by package name -- so
+    # without this a consumer cannot get from "this talk" to "this furniture",
+    # and would have to guess the pairing from package names that merely look
+    # related.  The row is the only place the two are stated together.
+    fixture_packages = {
+        row["id"]: row.get("assetbundleName")
+        for row in master.table("mysekaiFixtures")
+    }
     assets = _text_assets(talk_bundle)
     tables, scalars, constant_source = read_constants(lib_bundle)
 
@@ -399,6 +417,12 @@ def extract_fixture_talks(master_source, talk_bundle, out_path, master_cache=Non
     undefined = {f"{table}.{key}"
                  for table, keys in census["unresolved"].items()
                  for key in keys}
+    # Only the fixtures these talks are actually gated on, so the map's size is
+    # the number a consumer has to resolve rather than the whole fixture table.
+    referenced_fixtures = sorted(
+        {fid for talk in talks_doc for fid in talk.get("fixtureIds", [])})
+    fixtures = {str(fid): fixture_packages.get(fid)
+                for fid in referenced_fixtures}
     summary = {
         "selectedCount": report["talks"],
         "talks": len(talks_doc),
@@ -420,6 +444,9 @@ def extract_fixture_talks(master_source, talk_bundle, out_path, master_cache=Non
         "totalSteps": total_steps,
         "voiceCues": len(voices),
         "missingScripts": missing_scripts,
+        "fixtures": fixtures,
+        "fixturesWithoutPackage": sorted(
+            fid for fid, pkg in fixtures.items() if not pkg),
         "constants": {
             "source": (f"{LIB_PACKAGE}/{constant_source}"
                        if constant_source else None),
@@ -444,7 +471,7 @@ def extract_fixture_talks(master_source, talk_bundle, out_path, master_cache=Non
 
 
 def check_doc(doc, sample_seed=0, motion_library=None):
-    """Run the c1–c10 gates over an extracted furniture-talks document.
+    """Run the c1–c11 gates over an extracted furniture-talks document.
 
     *motion_library* is the set of animation names the shared motion library
     holds; c10 needs it and says so when it is absent.
@@ -636,6 +663,31 @@ def check_doc(doc, sample_seed=0, motion_library=None):
         check("c10",
               not absent and not unnamed_token and classified == total,
               c10_detail)
+
+    # c11: every fixtureId these talks are gated on names a package.  Without
+    # this a consumer cannot get from a talk to the furniture it is about: the
+    # talk carries an id and every geometry document is keyed by package name.
+    # Red when a referenced id has no package -- the case that would otherwise
+    # be papered over by matching package names that look related -- and red
+    # when the map is empty while talks reference fixtures at all, which is what
+    # a missing master table looks like.
+    fixtures = summary.get("fixtures", {})
+    without = summary.get("fixturesWithoutPackage", [])
+    referenced = {str(fid) for t in talks for fid in t.get("fixtureIds", [])}
+    unmapped = sorted(referenced - set(fixtures))
+    c11_detail = (f"referenced={len(referenced)} mapped="
+                  f"{sum(1 for pkg in fixtures.values() if pkg)}"
+                  f" withoutPackage={len(without)} notInMap={len(unmapped)}")
+    if fixtures:
+        c11_detail += " | " + json.dumps(
+            {fid: fixtures[fid] for fid in sorted(fixtures)}, ensure_ascii=False)
+    if without:
+        c11_detail += " | NO-PACKAGE=" + json.dumps(without, ensure_ascii=False)
+    if unmapped:
+        c11_detail += " | NOT-IN-MAP=" + json.dumps(unmapped, ensure_ascii=False)
+    check("c11",
+          bool(referenced) and not without and not unmapped,
+          c11_detail)
 
     return checks
 
