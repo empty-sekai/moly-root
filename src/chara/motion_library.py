@@ -161,7 +161,7 @@ def export_motion_library(reference_bundle, motion_bundle, out_dir, name="motion
                "counts": {"discovered": len(samples) + len(failures), "exported": baked,
                            "failed": len(failures)}, "failures": failures}
     with open(index_path, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(document, fh, ensure_ascii=False, indent=1)
+        json.dump(document, fh, ensure_ascii=False, indent=1, allow_nan=False)
         fh.write("\n")
     return {"glb": glb_path, "index": index_path, "discovered": document["counts"]["discovered"],
             "exported": baked, "failed": len(failures), "failures": failures,

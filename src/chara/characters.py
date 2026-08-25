@@ -732,7 +732,7 @@ def extract_character(bundle, out_dir, name, sampled=None, aux=(),
     }
     rig_path = os.path.join(out_dir, f"{name}.rig.json")
     with open(rig_path, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(sidecar, fh, ensure_ascii=False, indent=1)
+        json.dump(sidecar, fh, ensure_ascii=False, indent=1, allow_nan=False)
         fh.write("\n")
 
     # orphan assets: materials/textures in the bundle that no renderer or

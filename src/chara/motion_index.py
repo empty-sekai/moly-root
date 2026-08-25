@@ -108,5 +108,5 @@ def build_motion_index(controller_bundle, motion_bundle, lua_dir):
 
 def write_motion_index(controller_bundle, motion_bundle, lua_dir, output):
     doc = build_motion_index(controller_bundle, motion_bundle, lua_dir)
-    Path(output).write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+    Path(output).write_text(json.dumps(doc, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
     return doc

@@ -382,7 +382,7 @@ def write_alone_actions(bundle, out_path):
     doc = extract_alone_actions(bundle)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(doc, handle, ensure_ascii=False, indent=1)
+        json.dump(doc, handle, ensure_ascii=False, indent=1, allow_nan=False)
     return {"path": out_path, "units": doc["summary"]["units"],
             "scenarios": doc["summary"]["scenarios"], "steps": doc["summary"]["steps"],
             "constantTables": doc["constantTables"]}

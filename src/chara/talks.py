@@ -587,7 +587,7 @@ def extract_talks(master_source, talk_bundle, out_path, master_cache=None):
     }
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(doc, handle, ensure_ascii=False, indent=1)
+        json.dump(doc, handle, ensure_ascii=False, indent=1, allow_nan=False)
         handle.write("\n")
     return {
         **summary,
