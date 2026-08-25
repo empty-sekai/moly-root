@@ -467,6 +467,38 @@ def decode_system(tree, resolve_node=None):
     return out, unsupported + gaps
 
 
+# The per-particle values a renderer hands the shader, in the order they are
+# packed into the vertex.  A material addresses one of them by naming a slot and
+# a component, so without this list those addresses point at nothing.
+VERTEX_STREAMS = {
+    0: "position", 1: "normal", 2: "tangent", 3: "color", 4: "uv", 5: "uv2",
+    6: "uv3", 7: "uv4", 8: "animBlend", 9: "animFrame", 10: "center",
+    11: "vertexId", 12: "sizeX", 13: "sizeXY", 14: "sizeXYZ", 15: "rotation",
+    16: "rotation3D", 17: "rotationSpeed", 18: "rotationSpeed3D",
+    19: "velocity", 20: "speed", 21: "agePercent", 22: "invStartLifetime",
+    23: "stableRandomX", 24: "stableRandomXY", 25: "stableRandomXYZ",
+    26: "stableRandomXYZW", 27: "varyingRandomX", 28: "varyingRandomXY",
+    29: "varyingRandomXYZ", 30: "varyingRandomXYZW",
+    31: "custom1X", 32: "custom1XY", 33: "custom1XYZ", 34: "custom1XYZW",
+    35: "custom2X", 36: "custom2XY", 37: "custom2XYZ", 38: "custom2XYZW",
+    39: "noiseSumX", 40: "noiseSumXY", 41: "noiseSumXYZ",
+    42: "noiseImpulseX", 43: "noiseImpulseXY", 44: "noiseImpulseXYZ",
+    45: "meshIndex", 46: "particleIndex", 47: "colorPackedAsTwoFloats",
+    48: "meshAxisOfRotation", 49: "nextTrailCenter", 50: "previousTrailCenter",
+}
+
+
+def vertex_streams(values):
+    """One renderer's stream list, as names, with the raw codes kept alongside.
+
+    A code this table does not know is reported as its number rather than
+    dropped, so a stream list can never come out shorter than it is.
+    """
+    codes = [int(v) for v in (values or [])]
+    return {"codes": codes,
+            "names": [VERTEX_STREAMS.get(code, code) for code in codes]}
+
+
 def decode_renderer(tree, material, trail_material=None):
     """Draw settings of one particle renderer.
 
@@ -493,6 +525,14 @@ def decode_renderer(tree, material, trail_material=None):
         "cameraVelocityScale": round(float(tree.get("m_CameraVelocityScale", 0.0)), 6),
         "pivot": _vec(tree.get("m_Pivot", {})),
         "alignment": tree.get("m_RenderAlignment"),
+        # Custom streams are what a material's per-particle addresses resolve
+        # against.  The switch is reported separately from the list, because a
+        # list is authored whether or not it is switched on.
+        "useCustomVertexStreams": bool(tree.get("m_UseCustomVertexStreams", False)),
+        "vertexStreams": vertex_streams(tree.get("m_VertexStreams")),
+        "useCustomTrailVertexStreams": bool(
+            tree.get("m_UseCustomTrailVertexStreams", False)),
+        "trailVertexStreams": vertex_streams(tree.get("m_TrailVertexStreams")),
         "material": material,
     }
     if len(tree.get("m_Materials") or []) > TRAIL_MATERIAL_SLOT:
