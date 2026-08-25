@@ -619,6 +619,42 @@ class _Phenomenon:
                     f"{self.name}/overrides/{site}/{stem}.json")
             self._count(bundle_name, field)
 
+    def _model_meshes(self):
+        """The model assets' mesh nodes, as one flat list for the effect document.
+
+        A phenomenon's geometry arrives two ways.  Emitters carry their own mesh
+        reference and are described inside ``effects``.  The rest sits on model
+        assets, whose renderers are not components of any effect prefab, so a
+        reader that walks ``effects`` alone never learns those meshes exist.
+        Nothing in the packages ties a model asset to a particular effect, so the
+        association is stated at the phenomenon's own level and no finer: it is
+        the level the data actually supports.
+
+        ``materialName`` is the material's name and nothing else.  It is
+        deliberately not called ``material``: an emitter's material is a full
+        record (shader, render queue, keywords, texture slots, scalars, colours),
+        and this one is a bare name, which is not enough to decide whether the
+        surface is transparent or what pictures it samples.  ``materialEncoding``
+        says so in the document rather than leaving a reader to discover it.
+        """
+        rows = []
+        for model in self.models:
+            meshes = model.get("meshes") or []
+            materials = model.get("materials") or []
+            aligned = len(materials) == len(meshes)
+            for index, mesh in enumerate(meshes):
+                if aligned:
+                    name = materials[index].get("material")
+                else:
+                    # Node names repeat within a model, so a name lookup can only
+                    # be used when the two lists cannot be paired by position.
+                    name = next((entry.get("material") for entry in materials
+                                 if entry.get("node") == mesh.get("node")), None)
+                rows.append({"file": model["file"], "node": mesh.get("node"),
+                             "mesh": mesh.get("mesh"), "materialName": name,
+                             "materialEncoding": "nameOnly"})
+        return rows
+
     def finish(self):
         """Write the effect document and return this phenomenon's index entry."""
         if self.effects:
@@ -626,8 +662,10 @@ class _Phenomenon:
                 "version": 1,
                 "phenomenon": self.name,
                 "effects": {name: self.effects[name] for name in sorted(self.effects)},
+                "modelMeshes": self._model_meshes(),
                 "summary": {
                     "effects": len(self.effects),
+                    "modelMeshes": len(self._model_meshes()),
                     "emitters": sum(len(effect["particles"])
                                     for effect in self.effects.values()),
                     "meshEmitters": sum(1 for effect in self.effects.values()

@@ -6,9 +6,21 @@
 // the files a phenomenon references are loaded before it mounts, so `ctx.meshFor`
 // is a cache lookup, never a fetch.
 //
-// Alignment 0 uses the camera's world rotation as its basis. Alignment 1 keeps
-// the authored mesh orientation in world axes. Alignment 2 is intentionally
-// refused until its emitter-local basis is established.
+// The alignment field picks the basis, and all three of its values appear in
+// the data:
+//
+//   0  the camera's world rotation, so the mesh keeps one face to the viewer;
+//   1  the world axes themselves, so the mesh ignores whatever rotation its
+//      emitter's frame carries;
+//   2  the emitter's own frame, so the mesh turns with the node it sits on.
+//
+// 1 and 2 differ only when the emitter's frame is rotated, which is exactly why
+// leaving 1 alone was wrong: with no basis applied a mesh inherits its parent's
+// rotation, which is what 2 means, not what 1 means.
+//
+// Every basis here is a quaternion, so a scaled emitter transform contributes
+// none of its scale to the orientation. The node graph applies that scale once,
+// the same way it does for every other node, and the basis cannot double it.
 export const MODES = ['Mesh'];
 
 const ALIGNMENT_VIEW = 0;
@@ -25,8 +37,10 @@ export function rejects(renderer, num) {
   const meshes = renderer && renderer.meshes;
   if (!Array.isArray(meshes) || !meshes.length) return 'noMeshRef';
   const alignment = n(renderer.alignment, 0);
-  if (alignment === ALIGNMENT_VIEW || alignment === ALIGNMENT_WORLD) return null;
-  if (alignment === ALIGNMENT_LOCAL) return 'alignmentLocalUnread';
+  if (alignment === ALIGNMENT_VIEW || alignment === ALIGNMENT_WORLD
+      || alignment === ALIGNMENT_LOCAL) return null;
+  // Facing and velocity alignment do not appear in this data and have no basis
+  // read out of the engine, so they are refused rather than approximated.
   return 'alignmentUnread';
 }
 
@@ -83,11 +97,15 @@ export function makeDrawable(renderer, ctx) {
   let spin = ctx.num(ctx.rotation, 0);
   const authoredQ = object.quaternion.clone();
   const alignment = ctx.num(renderer.alignment, ALIGNMENT_WORLD);
-  const applyView = () => {
+  // `viewLocalQ` holds the chosen basis expressed in this object's parent space,
+  // which is the space its quaternion lives in. Emitter-local alignment needs no
+  // correction there — sitting still in the parent space *is* the emitter's
+  // frame — so it stays identity and only the world basis has to undo anything.
+  const apply = () => {
     viewSpinQ.setFromAxisAngle(viewZ, spin);
     object.quaternion.copy(viewLocalQ).multiply(authoredQ).multiply(viewSpinQ);
   };
-  if (spin && alignment !== ALIGNMENT_VIEW) object.rotation.z = spin;
+  apply();
 
   return {
     object,
@@ -102,20 +120,26 @@ export function makeDrawable(renderer, ctx) {
     // applied first, then this quaternion is multiplied on the right.
     setRotation(rad) {
       spin = rad;
-      if (alignment === ALIGNMENT_VIEW) applyView();
-      else object.rotation.z = rad;
+      apply();
     },
-    // View alignment uses the camera's world basis, converted to this object's
-    // parent space. The authored mesh orientation and particle spin follow it.
-    // World alignment remains a no-op; Local alignment never reaches here.
+    // The basis is chosen here and written into the object's parent space; the
+    // authored mesh orientation and then the particle spin multiply onto it.
     orient(camera) {
-      if (alignment !== ALIGNMENT_VIEW || !camera) return;
-      camera.getWorldQuaternion(viewWorldQ);
       if (object.parent) object.parent.getWorldQuaternion(viewParentQ);
       else viewParentQ.identity();
-      viewLocalQ.copy(viewParentQ).invert().multiply(viewWorldQ);
+      if (alignment === ALIGNMENT_VIEW) {
+        if (!camera) return;
+        camera.getWorldQuaternion(viewWorldQ);
+        viewLocalQ.copy(viewParentQ).invert().multiply(viewWorldQ);
+      } else if (alignment === ALIGNMENT_WORLD) {
+        // Undo the emitter frame so the basis lands on the world axes.
+        viewLocalQ.copy(viewParentQ).invert();
+      } else {
+        // Emitter-local: the parent space already is the frame.
+        viewLocalQ.identity();
+      }
       viewBasisWorldQ.copy(viewParentQ).multiply(viewLocalQ);
-      applyView();
+      apply();
     },
     // The screen-size clamp is a billboard rule: it scales a quad by its share of
     // the viewport. A mesh has real extent in the world and is not clamped.

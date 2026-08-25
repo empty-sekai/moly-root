@@ -12,6 +12,7 @@ import { makeDrawable, drawableModes, drawableRejection } from './fx/drawable.js
 import * as drawMesh from './fx/draw-mesh.js';
 import * as trails from './fx/trails.js';
 import * as noise from './fx/noise.js';
+import * as subEmitters from './fx/sub-emitters.js';
 import { registerDrawable } from './fx/drawable.js';
 import { registerFxModule } from './fx/hooks.js';
 registerDrawable(drawMesh);
@@ -21,6 +22,9 @@ registerFxModule(noise, 200);
 // particle-module-order). The numeric order just needs to be inside that block;
 // the per-particle hooks that read position run after integration regardless.
 registerFxModule(trails, 420);
+// Sub-emitters run in the post-simulation block after Trail: a death-triggered
+// record needs the position the particle integrated to this frame.
+registerFxModule(subEmitters, 440);
 
 export const EMO_BUILD = 'example';       // Public example build identifier
 console.info('[emoticon] build', 'example');
@@ -481,6 +485,7 @@ export function emitFrom(shape) {
 const GRAVITY = -9.81;
 const MIN_PARTICLE_SCALE = 0.0001;     // 零缩放的 sprite 会被剔掉,给一个下限
 const TMP_V3 = new THREE.Vector3();    // 屏幕占比截断算深度用的临时向量(每帧每粒子,别新建)
+const _subQ = new THREE.Quaternion();  // 子发射:只取发射节点的世界旋转
 const _birthP = new THREE.Vector3();   // 出生点统计复用
 const _centerP = new THREE.Vector3();
 
@@ -577,6 +582,9 @@ class Emitter {
     this.age = 0;
     this.pending = 0;
     this.burstCursor = [];
+    // 被触发的播放实例(子发射目标用),与自主播放共用 `_runEmission`。
+    this.plays = [];
+    this._auto = { age: 0, pending: 0, cursors: [], origin: null, follow: null };
     this.peak = 0;
     this.theoretical = emissionPlan(this.system);
     this.shapeType = (this.system.shape && this.system.shape.type) || null;
@@ -746,7 +754,13 @@ class Emitter {
     };
   }
 
-  spawn() {
+  /**
+   * 发一颗。`origin` 非空时是**世界空间的发射原点**,用于子发射:目标系统被父粒子
+   * 驱动时,它是被搬到父粒子所在处再发射的,所以形状的局部偏移仍按本节点的**旋转**
+   * 摆放,但平移来自父粒子而不是本节点。继承父粒子的颜色/尺寸等是另一回事,本方法
+   * 不做 —— 那需要一条尚未从真源读出的合成律,见 `fx/sub-emitters.js`。
+   */
+  spawn(origin = null) {
     const s = this.system, start = s.start || {};
     const r = Math.random();
     const sampled = emitFrom(s.shape);
@@ -755,7 +769,13 @@ class Emitter {
     pos.x = -pos.x; dir.x = -dir.x;      // 同一节点内容的 M 换手(节点链共轭之外的另一半)
     if (this.node) {
       this.node.updateWorldMatrix(true, false);
-      if (this.worldSpace && !EMIT_FAULT.dropNodeTransform) {
+      if (origin) {
+        // 只取旋转:平移由父粒子给。用整条 matrixWorld 会把本节点的世界位置也加
+        // 进去,水环就会在雨滴落点与发射节点之间的某处冒出来。
+        this.node.getWorldQuaternion(_subQ);
+        pos.applyQuaternion(_subQ).add(origin);
+        dir.applyQuaternion(_subQ).normalize();
+      } else if (this.worldSpace && !EMIT_FAULT.dropNodeTransform) {
         // 局部点/方向 → 世界。父链的旋转也一起吃掉(挂点在绑定姿态下带 90° 旋转,
         // 不转换的话件的 y 偏移会跑成世界 x 偏移)。
         pos.applyMatrix4(this.node.matrixWorld);
@@ -841,25 +861,27 @@ class Emitter {
     const s = this.system, em = this.suppressed ? null : s.emission;
     this.age += dt * num(s.simulationSpeed, 1);
     const cap = num(s.maxParticles, 1000);
+    // 子发射的目标系统**不自行播放**:它的发射完全由父粒子触发,而「触发」的意思是
+    // 把这个系统搬到触发点、从它自己的 0 时刻**跑一遍它整套发射**(速率 + 全部 burst),
+    // 不是只放 time=0 的那一发 —— 靠速率发射的目标一发都不会有 burst@0。
+    // 少了这道闸,目标的 burst 会在挂载时自己放一次,与触发的那次叠成两份。
     if (em) {
-      this.pending += sampleValue(em.rateOverTime, 0, Math.random()) * dt;
-      while (this.pending >= 1) {
-        this.pending -= 1;
-        if (this.particles.length < cap) this.spawn();
-      }
-      for (const [bi, burst] of (em.bursts || []).entries()) {
-        // cycleCount 0 = 无限循环(每 repeatInterval 重发一轮),非 0 = 固定轮数。
-        const declared = num(burst.cycleCount, 1);
-        const cycles = declared === 0 ? Infinity : Math.max(1, declared);
-        const interval = Math.max(num(burst.repeatInterval, 0.01), 0.01);
-        let c = this.burstCursor[bi] || 0;
-        while (c < cycles && this.age >= num(burst.time) + c * interval) {
-          c += 1;
-          if (Math.random() > num(burst.probability, 1)) continue;
-          const count = Math.round(sampleValue(burst.count, 0, Math.random()));
-          for (let k = 0; k < count && this.particles.length < cap; k++) this.spawn();
+      if (this.subEmitterDriven) {
+        for (const play of this.plays) {
+          if (play.done) continue;
+          play.age += dt * num(s.simulationSpeed, 1);
+          if (play.follow) play.origin.copy(play.follow.pos);
+          this._runEmission(em, cap, play, dt);
+          // 跟随型(出生触发)由父粒子的死亡收场,其余到时长为止。循环的目标在这里
+          // 仍然收场:一次触发是一次播放,没有主人的循环会永远发下去。
+          if (!play.follow && play.age >= num(s.duration, 1)) play.done = true;
         }
-        this.burstCursor[bi] = c;
+        if (this.plays.length) this.plays = this.plays.filter((play) => !play.done);
+      } else {
+        this._auto.age = this.age;
+        this._runEmission(em, cap, this._auto, dt);
+        this.pending = this._auto.pending;
+        this.burstCursor = this._auto.cursors;
       }
     }
     for (const h of this.hooks) h.onFrame?.(dt);
@@ -968,12 +990,65 @@ class Emitter {
     if (p.map && p.ownsMap) p.map.dispose();   // 只销毁自己克隆的那份,共享贴图不动
   }
 
+  /**
+   * 一次发射循环。**自主播放与被触发播放共用这一段**,所以两者的律必然一致 ——
+   * 各自的时钟、速率余数、burst 游标、发射原点都装在 `state` 里。
+   */
+  _runEmission(em, cap, state, dt) {
+    // 循环系统的发射时钟在 duration 处回绕,burst 游标随之复位 —— 少了这一步,
+    // 只靠 burst 发射的循环系统会在第一轮把游标推过 cycleCount,然后**永远沉默**:
+    // 画面上是「加载时闪一下就没了」,而每个发射器都挂载成功、没有任何计数报错。
+    const system = this.system;
+    const duration = Math.max(0.0001, num(system.duration, 1));
+    let age = state.age;
+    if (system.looping) {
+      const loop = Math.floor(age / duration);
+      if (loop !== state.loop) { state.loop = loop; state.cursors = []; }
+      age -= loop * duration;
+    }
+    state.pending += sampleValue(em.rateOverTime, 0, Math.random()) * dt;
+    while (state.pending >= 1) {
+      state.pending -= 1;
+      if (this.particles.length < cap) this.spawn(state.origin);
+    }
+    for (const [bi, burst] of (em.bursts || []).entries()) {
+      // cycleCount 0 = 无限循环(每 repeatInterval 重发一轮),非 0 = 固定轮数。
+      const declared = num(burst.cycleCount, 1);
+      const cycles = declared === 0 ? Infinity : Math.max(1, declared);
+      const interval = Math.max(num(burst.repeatInterval, 0.01), 0.01);
+      let c = state.cursors[bi] || 0;
+      while (c < cycles && age >= num(burst.time) + c * interval) {
+        c += 1;
+        if (Math.random() > num(burst.probability, 1)) continue;
+        const count = Math.round(sampleValue(burst.count, 0, Math.random()));
+        for (let k = 0; k < count && this.particles.length < cap; k++) this.spawn(state.origin);
+      }
+      state.cursors[bi] = c;
+    }
+  }
+
+  /**
+   * 播放一次这个系统,原点在 `origin`。`follow` 非空时原点每帧跟着那颗粒子走,
+   * 直到调用方停掉它 —— 出生触发在 Unity 里就是挂在父粒子上活一辈子的。
+   */
+  playSub(origin, follow = null) {
+    const play = { age: 0, pending: 0, cursors: [], done: false,
+                   origin: origin.clone(), follow };
+    this.plays.push(play);
+    return play;
+  }
+
+  /** 停掉一次播放(父粒子死了,或整条被回收)。 */
+  stopSub(play) { if (play) play.done = true; }
+
   reset() {
     for (const p of this.particles) this._drop(p);
     this.particles = [];
     this.age = 0;
     this.pending = 0;
     this.burstCursor = [];
+    this.plays = [];
+    this._auto = { age: 0, pending: 0, cursors: [], origin: null, follow: null };
     this.birth = this._emptyBirth();     // 判据读的是这一轮的出生点,不是上一轮的
   }
 
@@ -1132,6 +1207,13 @@ export class EmoticonView {
       if (!emitter.hasTexture) { this.skipped.missingTexture++; continue; }
       this.emitters.push(emitter);
       if (emitter.nodePath) this.emitterByNode.set(emitter.nodePath, emitter);
+    }
+    // 标记子发射目标。要等全部发射器建完才做得了:目标可能排在引用者后面。
+    for (const emitter of this.emitters) {
+      for (const record of (emitter.system.subEmitters || [])) {
+        const target = record.emitter && this.emitterByNode.get(record.emitter);
+        if (target) target.subEmitterDriven = true;
+      }
     }
     if (opts.anchor) opts.anchor.add(this.root);
     this.reset();
