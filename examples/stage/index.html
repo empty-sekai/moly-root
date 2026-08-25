@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stage 演出预览</title>
+  <link rel="stylesheet" href="./stage.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">MOLY / STAGE</p>
+        <h1>演出预览</h1>
+      </div>
+      <div class="integration-note" id="integration-note">运镜待接入 · UI 字段待接入</div>
+    </header>
+
+    <section class="toolbar" aria-label="演出选择与播放控制">
+      <label class="field-label" for="performance-select">
+        <span>选择演出</span>
+        <select id="performance-select" disabled>
+          <option>读取 cutscene-timeline/ 与 fixture-timeline/…</option>
+        </select>
+      </label>
+      <button class="icon-button" id="play-button" type="button" title="播放选中的演出" aria-label="播放选中的演出">▶</button>
+      <button class="icon-button" id="stop-button" type="button" title="停止并回到起点" aria-label="停止并回到起点">■</button>
+      <label class="field-label" for="lane-select">
+        <span>动画轨（演员/座位）</span>
+        <select id="lane-select" disabled>
+          <option>等待演出…</option>
+        </select>
+      </label>
+      <label class="field-label compact" for="speed-select">
+        <span>速度</span>
+        <select id="speed-select">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+        </select>
+      </label>
+      <label class="field-label compact" for="env-select">
+        <span>现象</span>
+        <select id="env-select" disabled>
+          <option>读取 phenomena/…</option>
+        </select>
+      </label>
+      <label class="field-label compact toggle-label" for="env-toggle">
+        <span>环境层</span>
+        <input id="env-toggle" type="checkbox" checked>
+      </label>
+      <label class="field-label compact" for="export-frame-count">
+        <span>导出帧数</span>
+        <input id="export-frame-count" type="number" min="1" max="120" step="1" value="24">
+      </label>
+      <label class="field-label compact" for="export-fps">
+        <span>FPS</span>
+        <input id="export-fps" type="number" min="1" max="60" step="1" value="12">
+      </label>
+      <button class="icon-button" id="export-button" type="button" title="导出 GIF、APNG 与 PNG 帧序列" aria-label="导出 GIF、APNG 与 PNG 帧序列">⇩</button>
+      <div class="mode-switch" role="group" aria-label="演出形态">
+        <button class="mode-button is-active" data-form="spontaneous" type="button">自发型</button>
+        <button class="mode-button" data-form="participatory" type="button">玩家参与型</button>
+      </div>
+    </section>
+
+    <main class="workspace">
+      <section class="viewport-panel" aria-label="三维演出画面">
+        <div id="viewport">
+          <div class="screen-label">STAGE VIEW</div>
+          <div id="tweet-hud" class="tweet-hud">tweet HUD · 等待演出</div>
+          <div id="emoticon-bubble" class="emoticon-bubble" aria-live="polite">气泡轨道 · —</div>
+          <div id="geometry-warning" class="geometry-warning" hidden>家具几何未就绪</div>
+          <div id="dialogue-window" class="dialogue-window" hidden>
+            <div class="dialogue-speaker">玩家参与型</div>
+            <div id="dialogue-text">UI 字段待接入</div>
+          </div>
+        </div>
+        <div class="transport">
+          <span id="stage-status">正在读取演出数据…</span>
+          <span id="active-clip">当前无 clip</span>
+          <span id="timeline-time">0.00 / 0.00 s</span>
+        </div>
+      </section>
+
+      <aside class="side-panel">
+        <section class="panel-section">
+          <div class="section-heading">
+            <h2>当前演出</h2>
+            <span id="form-indicator" class="status-pill">自发型</span>
+          </div>
+          <dl class="facts">
+            <div><dt>包</dt><dd id="package-name">—</dd></div>
+            <div><dt>timeline</dt><dd id="timeline-name">—</dd></div>
+            <div><dt>家具目标</dt><dd id="fixture-name">—</dd></div>
+            <div><dt>attach</dt><dd id="attach-name">—</dd></div>
+            <div><dt>clip</dt><dd id="clip-count">0</dd></div>
+            <div><dt>材质</dt><dd id="material-facts">—</dd></div>
+            <div><dt>通道上链</dt><dd id="binding-facts">—</dd></div>
+            <div><dt>可播性</dt><dd id="playable-facts">—</dd></div>
+            <div><dt>环境</dt><dd id="env-note">读取 phenomena/…</dd></div>
+          </dl>
+          <p class="muted" id="recommendation-note"></p>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-heading">
+            <h2>上链残差</h2>
+            <span class="muted">绑不上的通道 / 不可播的 clip</span>
+          </div>
+          <pre id="binding-detail" class="track-tree">等待选中演出…</pre>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-heading">
+            <h2>轨树</h2>
+            <span class="muted">原始节点</span>
+          </div>
+          <pre id="track-tree" class="track-tree">等待数据…</pre>
+        </section>
+
+        <section class="panel-section selfcheck-section">
+          <div class="section-heading">
+            <h2>机械自检</h2>
+            <span id="selfcheck-summary" class="muted">进行中…</span>
+          </div>
+          <div id="selfcheck" aria-live="polite"></div>
+        </section>
+        <section class="panel-section export-section">
+          <div class="section-heading">
+            <h2>动图导出</h2>
+            <span id="export-summary" class="muted">待导出</span>
+          </div>
+          <div id="export-meta" class="muted">透明采样点待导出</div>
+          <div id="export-check" aria-live="polite"></div>
+          <div id="export-downloads" class="export-downloads"></div>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="footer-line">
+      <span>路径根：<code id="base-path">../../local-data</code></span>
+      <span id="motion-status">动作库：未加载</span>
+    </footer>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "../viewer/three.module.min.js"
+    }
+  }
+  </script>
+  <script type="module" src="./stage.js"></script>
+  <script type="module" src="./export.js"></script>
+</body>
+</html>
