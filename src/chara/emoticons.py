@@ -26,7 +26,8 @@ import zlib
 import UnityPy
 
 from .mecanim.clip import ATTR_SIZE, TRANSFORM_TYPEID, curve_index_map, decode, evaluate
-from core.particles import decode_renderer, decode_system
+from core.jsonio import dumps
+from core.particles import TRAIL_MATERIAL_SLOT, decode_renderer, decode_system
 
 ATTR_NAME = {1: "position", 2: "rotation", 3: "scale", 4: "eulerAngles"}
 PHASE_BY_SUFFIX = {"start": "start", "loop": "loop", "end": "end"}
@@ -230,8 +231,20 @@ def _material(tree, texture_files, shader=None):
     """Material name, shader, queue, texture bindings, and scalar properties."""
     props = tree.get("m_SavedProperties", {}) or {}
     textures = {}
+    scale_offset = {}
     for name, value in _pairs(props.get("m_TexEnvs")):
-        pointer = (value or {}).get("m_Texture", {}) or {}
+        entry = value or {}
+        # Every texture slot carries a scale/offset pair; a shader that declares
+        # `<name>_ST` samples through it, so it has to travel with the binding.
+        # It is recorded for every slot, present texture or not, because the
+        # pair is what the vertex stage reads, not the image.
+        sc = entry.get("m_Scale", {}) or {}
+        of = entry.get("m_Offset", {}) or {}
+        scale_offset[name] = [round(float(sc.get("x", 1.0)), 6),
+                              round(float(sc.get("y", 1.0)), 6),
+                              round(float(of.get("x", 0.0)), 6),
+                              round(float(of.get("y", 0.0)), 6)]
+        pointer = entry.get("m_Texture", {}) or {}
         path_id = pointer.get("m_PathID", 0)
         if not path_id:
             continue
@@ -241,6 +254,7 @@ def _material(tree, texture_files, shader=None):
         "shader": shader,
         "renderQueue": tree.get("m_CustomRenderQueue", -1),
         "textures": textures,
+        "textureScaleOffset": scale_offset,
         "floats": {n: round(float(v), 6) for n, v in _pairs(props.get("m_Floats"))
                    if isinstance(v, (int, float))},
         "colors": {n: [round(v.get(c, 0.0), 6) for c in "rgba"]
@@ -281,12 +295,14 @@ def _shader_name(tree, trees, external_shaders=None, source_name=None):
 
 def _resolve_material(renderer_tree, trees, texture_files, externals,
                       external_materials=None, source_name=None,
-                      external_shaders=None):
-    """Resolve a renderer material, preserving null and unresolved states."""
+                      external_shaders=None, slot=0):
+    """Resolve one material slot of a renderer, preserving null and unresolved
+    states.  Slot 0 is what the particles are drawn with; a second slot, when a
+    renderer has one, is the trail's material."""
     materials = renderer_tree.get("m_Materials") or []
-    if not materials:
+    if slot >= len(materials):
         return None
-    pointer = materials[0] or {}
+    pointer = materials[slot] or {}
     path_id, file_id = pointer.get("m_PathID", 0), pointer.get("m_FileID", 0)
     if not path_id:
         return None
@@ -397,7 +413,7 @@ def write_document(out_dir, items):
         },
     }
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(document, handle, ensure_ascii=False, indent=1)
+        handle.write(dumps(document))
         handle.write("\n")
     return path
 
@@ -542,10 +558,10 @@ def extract_emoticons(bundles, out_dir, lookup_bundles=None):
         externals = [str(getattr(e, "name", ""))
                      for obj in objects[:1]
                      for e in getattr(obj.assets_file, "externals", [])]
-        resolve_renderer = lambda renderer: _resolve_material(
+        resolve_renderer = lambda renderer, slot=0: _resolve_material(
             renderer, trees, texture_files, externals,
             external_materials=external_materials, source_name=name,
-            external_shaders=external_shaders)
+            external_shaders=external_shaders, slot=slot)
         dependencies = sorted({str(dep) for obj in objects if obj.type.name == "AssetBundle"
                                for dep in (trees[obj.path_id].get("m_Dependencies") or [])})
         scripts = {obj.path_id: str(trees[obj.path_id].get("m_ClassName", ""))
@@ -615,6 +631,17 @@ def extract_emoticons(bundles, out_dir, lookup_bundles=None):
         # Particle emitters, keyed by the node they sit on.  A system and its
         # renderer are separate components of the same node, so they are merged.
         texture_files = {pid: _texture_file(name, tex) for pid, tex in texture_names.items()}
+
+        def resolve_node(pointer):
+            """The node path a sub-emitter or collision-plane pointer names."""
+            pointer = pointer or {}
+            if pointer.get("m_FileID", 0):
+                return None
+            target = trees.get(pointer.get("m_PathID", 0))
+            if target is None:
+                return None
+            return go_paths.get((target.get("m_GameObject") or {}).get("m_PathID", 0))
+
         emitters = {}
         for obj in objects:
             kind = obj.type.name
@@ -624,13 +651,15 @@ def extract_emoticons(bundles, out_dir, lookup_bundles=None):
             node_path = go_paths.get(tree.get("m_GameObject", {}).get("m_PathID", 0))
             slot = emitters.setdefault(node_path, {"node": node_path})
             if kind == "ParticleSystem":
-                system, unmodelled = decode_system(tree)
+                system, gaps = decode_system(tree, resolve_node)
                 slot["system"] = system
-                for module in unmodelled:
-                    item["unsupported"].append({"node": node_path, "module": module,
-                                                "reason": "particle module not modelled"})
+                for gap in gaps:
+                    item["unsupported"].append(dict(gap, node=node_path))
             else:
-                slot["renderer"] = decode_renderer(tree, resolve_renderer(tree))
+                slots = len(tree.get("m_Materials") or [])
+                trail = (resolve_renderer(tree, TRAIL_MATERIAL_SLOT)
+                         if slots > TRAIL_MATERIAL_SLOT else None)
+                slot["renderer"] = decode_renderer(tree, resolve_renderer(tree), trail)
         item["particles"] = [emitters[k] for k in sorted(emitters, key=lambda x: (x is None, x))]
 
         if not item["sprites"] and not item["textures"] and not item["particles"]:

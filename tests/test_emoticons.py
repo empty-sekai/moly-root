@@ -16,7 +16,33 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import chara.emoticons as emoticon_module
 from chara.emoticons import (ATTR_NAME, LABEL_TYPE, ROOT_TYPE, _channels, _hierarchy,
-                            _phase_of, _resolve_material, _texture_file, write_document)
+                            _material, _phase_of, _resolve_material, _texture_file,
+                            write_document)
+
+
+def test_a_texture_binding_carries_its_scale_and_offset():
+    # A shader that declares `<name>_ST` samples the slot through this pair, so
+    # dropping it silently draws the wrong region of the atlas at the wrong tile
+    # size.  It travels for every slot, image resolved or not.
+    tree = {"m_Name": "mat", "m_SavedProperties": {"m_TexEnvs": [
+        ["_MainTex", {"m_Texture": {"m_PathID": 7},
+                      "m_Scale": {"x": 0.25, "y": 0.5},
+                      "m_Offset": {"x": 0.75, "y": 0.125}}],
+        ["_BumpMap", {"m_Texture": {"m_PathID": 0},
+                      "m_Scale": {"x": 2.0, "y": 3.0},
+                      "m_Offset": {"x": -1.0, "y": 0.0}}],
+    ]}}
+    out = _material(tree, {7: "main.png"})
+    assert out["textures"] == {"_MainTex": "main.png"}
+    assert out["textureScaleOffset"]["_MainTex"] == [0.25, 0.5, 0.75, 0.125]
+    assert out["textureScaleOffset"]["_BumpMap"] == [2.0, 3.0, -1.0, 0.0]
+
+
+def test_a_texture_binding_with_no_scale_recorded_reads_as_identity():
+    tree = {"m_Name": "mat", "m_SavedProperties": {
+        "m_TexEnvs": [["_MainTex", {"m_Texture": {"m_PathID": 7}}]]}}
+    out = _material(tree, {7: "main.png"})
+    assert out["textureScaleOffset"]["_MainTex"] == [1.0, 1.0, 0.0, 0.0]
 
 
 def test_sprite_renderer_node_carries_resolved_material():
