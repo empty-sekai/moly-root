@@ -209,10 +209,9 @@ class Textures:
 def shader_reference(store, record, tree):
     """The shader a material points at: its family name and its subshader tags.
 
-    Every site material's shader lives in a package this domain does not own, so
-    the name and the tags are all that can be honestly reported.  The queue and
-    render type come from the shader's own first subshader, which is what decides
-    whether the material is drawn as opaque or transparent.
+    The shader is named and its tags are recorded, but shader code is not
+    translated here.  The preview material therefore makes its transparency
+    decision from the material's authored render queue instead.
     """
     target = store.follow(record, tree.get("m_Shader") or {})
     if target is None:
@@ -271,20 +270,34 @@ def material_document(store, record, path_id, textures):
 TEXTURE_TRANSFORM = "KHR_texture_transform"
 
 
+def effective_queue(document):
+    """The render queue the material is actually drawn in.
+
+    A material may override the queue its shader asks for.  When it does not,
+    the field holds Unity's "no override" marker and the shader's own queue is
+    the one in force -- so reading only the override would call every material
+    that never overrode anything opaque.  The shader is not translated here, so
+    for that case only the queue's name is available, and only the transparent
+    one changes the outcome.
+    """
+    queue = float(document.get("renderQueue", -1))
+    if queue >= 0:
+        return queue
+    tags = document["shader"].get("tags") or {}
+    return 3000.0 if str(tags.get("QUEUE", "")).startswith("Transparent") else -1.0
+
+
 def preview_material(document, texture=None):
     """A glTF material approximating one Unity material, for viewers.
 
-    The real shaders are not in this domain's packages, so this cannot be a
-    translation and does not pretend to be one.  Every value it uses is authored
-    data read from the material or from its shader's own subshader tags:
-
-    * base colour picture — the first of ``_MainTex``/``_BaseMap``/… that is bound,
-      sampled through that slot's scale/offset pair when it is not the identity;
-    * base colour factor — ``_Color``/``_BaseColor``/… when present;
-    * cutout — ``_UseAlphaClip`` on, with ``_AlphaClip`` as the threshold;
-    * blending — the shader's own ``QUEUE`` tag being ``Transparent``;
-    * two-sidedness — ``_Cull`` set to Unity's *Off*.
+    Every value used here is authored material data.  Shader code is not
+    translated: the preview reads the bound base-colour slot and factor, the
+    alpha-clip pair, the material render queue, and cull mode.  A queue above
+    Unity's last opaque queue (2500) maps to glTF ``BLEND``.  glTF has no
+    additive blend mode, so an additive material keeps that fact in
+    ``extras.blendMode`` and its authored factors in ``extras.blendFactors``.
     """
+
     floats = document["floats"]
     colors = document["colors"]
     factor = [1.0, 1.0, 1.0, 1.0]
@@ -296,6 +309,16 @@ def preview_material(document, texture=None):
                 "pbrMetallicRoughness": {"baseColorFactor": factor,
                                          "metallicFactor": 0.0,
                                          "roughnessFactor": 1.0}}
+    material["extras"] = {
+        "blendMode": ("additive" if floats.get("_BlendSrc") == 5
+                       and floats.get("_BlendDst") == 1 else "standard_alpha"
+                       if floats.get("_BlendSrc") == 5
+                       and floats.get("_BlendDst") == 10 else None),
+        "blendFactors": ({"src": floats["_BlendSrc"], "dst": floats["_BlendDst"]}
+                         if floats.get("_BlendSrc") in (1, 5)
+                         and floats.get("_BlendDst") in (1, 10) else None)}
+    if not any(value is not None for value in material["extras"].values()):
+        material.pop("extras")
     if texture is not None:
         index, slot = texture
         binding = {"index": index}
@@ -310,7 +333,7 @@ def preview_material(document, texture=None):
     if floats.get(ALPHA_CLIP_SWITCH):
         material["alphaMode"] = "MASK"
         material["alphaCutoff"] = float(floats.get(ALPHA_CLIP_THRESHOLD, 0.5))
-    elif str((document["shader"].get("tags") or {}).get("QUEUE", "")) == "Transparent":
+    elif effective_queue(document) > 2500:
         material["alphaMode"] = "BLEND"
     if float(floats.get("_Cull", 2.0)) == CULL_OFF:
         material["doubleSided"] = True
