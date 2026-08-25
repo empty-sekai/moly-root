@@ -112,6 +112,257 @@ export const LIGHT_WIRING = [
   { key: 'dropShadowEdgeSmoothness', label: '落影边缘平滑', wired: true, to: '站点表面落影的边缘过渡' },
 ];
 
+// ---- 时间轴 ---------------------------------------------------------------
+//
+// 有一个现象不是恒定状态,它由一份时间轴资产驱动 —— 清单 `semantics.timeline` 的原话:
+// "one phenomenon is driven by a timeline; each track says which value it drives, and each clip
+// carries its own curve or gradient on a normalized axis over the clip's duration"。
+// **打雷天那一下亮就出自这里**:天空与光的「附加色 / 附加强度」四项是四条轨的目标,
+// 现象配置里根本没有这四项,时间轴就是它们唯一的来源。
+//
+// 一、接哪四根线。按轨记录里的 `target` 字段接,**不按轨名猜** —— 轨名是编辑器里给人看的
+//    标签,`target` 才是从轨上的枚举读出来的目标名(`targetValue` 是它的原始整数,一并报出
+//    来便于对账)。当前内容里四条轨的对应关系是:
+//
+//      skyAdditiveColor       (1) → 天空材质的附加色    → SkyDome 的 additiveColor
+//      skyAdditiveIntensity   (1) → 天空材质的附加强度  → SkyDome 的 additiveIntensity
+//      lightAdditiveColor     (2) → 方向光的附加色      ↘ 两项一起叠到**现象方向光**上
+//      lightAdditiveIntensity (2) → 方向光的附加强度    ↗ (哪一盏灯的取舍见 NOT_RESTORED)
+//
+// 二、一拍怎么算。
+//    * clip 在 `[start, start + duration)` 上活;它自己的曲线/渐变跑在**归一化的 0..1 轴**上,
+//      轴的位置 = `(clipIn + (t - start) * timeScale) / duration`(契约原话:normalized axis
+//      over the clip's duration, scaled by `timeScale` and offset by `clipIn`)。
+//    * 数值轨的值 = 曲线值 × clip 自带的 `scale` × **轨自带的 `scale`**。轨那一档不是 1:
+//      当前内容里天空那条是 0.5、光那条是 2.56,漏掉它闪光的强弱就是错的。
+//    * 混入混出(`blendIn/OutDuration`)与缓入缓出(`easeIn/OutDuration`)按记录里的秒数取线性
+//      权重。**当前内容里这四项全是 0**,所以权重恒为 1 —— 是 0 就按 0 处理,不额外加平滑。
+//    * 同一条轨上若有多个 clip 同时活,按权重加权平均(当前内容里没有一处重叠)。
+//    * 一条轨上**没有** clip 活着 = 这一拍它不出力:颜色回到材质自带的那一份,强度回到 0。
+//      时间轴混合器在权重为零时把绑定值还原回默认值,这里照同一条处置。
+//
+// 三、没做的照实计数(见 `notModelled`):两条 `ValueNoiseTrack` 是两条强度轨的**子轨**,
+//    记录里带噪声强度、频率与强度曲线,但「噪声怎么并进父轨的值」产物一个字没说 —— 不猜,
+//    整条不做并计一笔;空的 `MarkerTrack` 同理照实列出来。
+
+/** 四条附加量:轨的 `target` 名 → 这条轨是颜色轨还是数值轨。名单之外的目标一律计进未建模。 */
+export const TIMELINE_TARGETS = {
+  skyAdditiveColor: 'color',
+  skyAdditiveIntensity: 'value',
+  lightAdditiveColor: 'color',
+  lightAdditiveIntensity: 'value',
+};
+
+// 加权切线的位:1 = 入端用键自带的权重,2 = 出端用,3 = 两端。没有那一位就取 1/3 ——
+// 那正好让下面的贝塞尔段退化成普通的 Hermite 段,两条路走同一份代码。
+const CURVE_WEIGHT_IN = 1;
+const CURVE_WEIGHT_OUT = 2;
+const CURVE_DEFAULT_WEIGHT = 1 / 3;
+
+/** 三次贝塞尔在参数 s 处的一维取值。 */
+function bezier1(p0, p1, p2, p3, s) {
+  const m = 1 - s;
+  return m * m * m * p0 + 3 * m * m * s * p1 + 3 * m * s * s * p2 + s * s * s * p3;
+}
+
+/**
+ * 已知横坐标反解参数 s。**加权切线下 x(s) 不是线性的**,拿 `(x - x0) / dt` 当 s 会取错值;
+ * 未加权时两个控制点正好落在三等分处,x(s) 退化成线性,二分给出的还是同一个答案。
+ */
+function bezierParamAt(x0, x1, x2, x3, x) {
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 32; i += 1) {
+    const mid = (lo + hi) * 0.5;
+    if (bezier1(x0, x1, x2, x3, mid) < x) lo = mid; else hi = mid;
+  }
+  return (lo + hi) * 0.5;
+}
+
+/**
+ * 一条动画曲线在 `u` 处的值。键之间是三次段:未加权 = Hermite,加权 = 按键自带权重摆控制点。
+ * 斜率为 `null` 的键是作者侧的**阶梯键**(原始值是无穷,JSON 存不下,提取侧记成 null),
+ * 整段保持左键的值。轴外按端点值钳住。
+ */
+export function evalCurve(curve, u) {
+  const keys = (curve && curve.keys) || [];
+  if (!keys.length) return 0;
+  if (u <= num(keys[0].time)) return num(keys[0].value);
+  const last = keys[keys.length - 1];
+  if (u >= num(last.time)) return num(last.value);
+  let i = 0;
+  while (i < keys.length - 2 && num(keys[i + 1].time) <= u) i += 1;
+  const a = keys[i], b = keys[i + 1];
+  const dt = num(b.time) - num(a.time);
+  if (dt <= 0) return num(b.value);
+  if (a.outSlope === null || b.inSlope === null) return num(a.value);
+  const w0 = ((a.weightedMode | 0) & CURVE_WEIGHT_OUT)
+    ? num(a.outWeight, CURVE_DEFAULT_WEIGHT) : CURVE_DEFAULT_WEIGHT;
+  const w1 = ((b.weightedMode | 0) & CURVE_WEIGHT_IN)
+    ? num(b.inWeight, CURVE_DEFAULT_WEIGHT) : CURVE_DEFAULT_WEIGHT;
+  const x0 = num(a.time), x3 = num(b.time);
+  const y0 = num(a.value), y3 = num(b.value);
+  const x1 = x0 + w0 * dt, x2 = x3 - w1 * dt;
+  const y1 = y0 + num(a.outSlope) * w0 * dt, y2 = y3 - num(b.inSlope) * w1 * dt;
+  return bezier1(y0, y1, y2, y3, bezierParamAt(x0, x1, x2, x3, u));
+}
+
+/**
+ * 一份渐变在 `u` 处的 RGBA。颜色键与透明键是**两串独立的键**,各自线性插值 —— 产物里存的
+ * 就是这两串,没有第三个字段说它是别的插值方式,所以不去发明一种。
+ */
+export function evalGradient(gradient, u) {
+  const pick = (keys, field, dflt) => {
+    if (!keys || !keys.length) return dflt;
+    if (u <= num(keys[0].time)) return keys[0][field];
+    const last = keys[keys.length - 1];
+    if (u >= num(last.time)) return last[field];
+    for (let i = 0; i < keys.length - 1; i += 1) {
+      const a = keys[i], b = keys[i + 1];
+      if (u <= num(b.time)) {
+        const span = num(b.time) - num(a.time);
+        const k = span > 0 ? (u - num(a.time)) / span : 0;
+        if (Array.isArray(a[field])) {
+          return [lerp(num(a[field][0]), num(b[field][0]), k),
+            lerp(num(a[field][1]), num(b[field][1]), k),
+            lerp(num(a[field][2]), num(b[field][2]), k)];
+        }
+        return lerp(num(a[field]), num(b[field]), k);
+      }
+    }
+    return last[field];
+  };
+  const rgb = pick((gradient || {}).colorKeys, 'color', [0, 0, 0]);
+  const alpha = pick((gradient || {}).alphaKeys, 'alpha', 1);
+  return [num(rgb[0]), num(rgb[1]), num(rgb[2]), num(alpha, 1)];
+}
+
+/**
+ * 一个 clip 在其局部秒数处的权重。混入/缓入吃前段、混出/缓出吃后段,各自线性。
+ * **当前内容里这四个时长全是 0**,所以这里恒返回 1 —— 数据是 0 就按 0 处理。
+ */
+export function clipWeight(clip, local, duration) {
+  let w = 1;
+  for (const len of [num(clip.easeInDuration), num(clip.blendInDuration)]) {
+    if (len > 0 && local < len) w *= local / len;
+  }
+  for (const len of [num(clip.easeOutDuration), num(clip.blendOutDuration)]) {
+    if (len > 0 && local > duration - len) w *= (duration - local) / len;
+  }
+  return Math.max(0, Math.min(1, w));
+}
+
+/**
+ * 一份现象时间轴。构造时按 `target` 分拣轨道:认得的四个目标进 `tracks`,其余(目标是
+ * `none`、轨被静音、或轨类本示例没建模)一条不落地进 `notModelled`。
+ */
+export class PhenomenonTimeline {
+  constructor(doc) {
+    const d = doc || {};
+    this.name = String(d.name || '');
+    this.duration = num(d.duration);
+    // 帧率是资产自带的编辑器帧率:面板按它报「第几帧」、按 1/帧率 步进;
+    // **不拿它去量化取样** —— 那是另一条律,产物没说运行时按帧对齐。
+    this.frameRate = num(d.frameRate, 60) || 60;
+    this.durationMode = d.durationMode;
+    this.tracks = [];
+    this.notModelled = [];
+    for (const t of d.tracks || []) {
+      const target = t ? t.target : null;
+      if (t && !t.muted && target && TIMELINE_TARGETS[target]) {
+        this.tracks.push({
+          name: String(t.name || ''), class: t.class || null, target,
+          targetValue: t.targetValue === undefined ? null : t.targetValue,
+          kind: TIMELINE_TARGETS[target], scale: num(t.scale, 1), clips: t.clips || [],
+        });
+        continue;
+      }
+      this.notModelled.push({
+        track: t ? String(t.name || '(未命名)') : '(未命名)',
+        class: t ? t.class : null,
+        role: t ? t.role || null : null,
+        clips: t && t.clips ? t.clips.length : 0,
+        why: (t && t.muted) ? '轨被静音'
+          : (t && target && !TIMELINE_TARGETS[target]) ? `目标 ${target} 不在四条附加量之内`
+            : `轨类 ${t ? t.class : '?'} 未建模:产物没说它怎么并进父轨`,
+      });
+    }
+  }
+
+  get clipCount() { return this.tracks.reduce((n, t) => n + t.clips.length, 0); }
+
+  get notModelledClips() { return this.notModelled.reduce((n, t) => n + t.clips, 0); }
+
+  /** 面板与 status() 读的轨道摘要(不含 clip 本体)。 */
+  trackSummary() {
+    return this.tracks.map((t) => ({
+      name: t.name, class: t.class, target: t.target, targetValue: t.targetValue,
+      scale: t.scale, clips: t.clips.length,
+    }));
+  }
+
+  /**
+   * 时间轴在 `time` 秒处的一拍。返回的对象上,四个目标名各挂一项:有 clip 活着就是算出来的
+   * 值,**没有就是 `null`**(不是 0 也不是黑色)—— 「这一拍这条轨不出力」与「它算出来正好是零」
+   * 是两件事,消费方据此回落到自己的默认值。
+   */
+  sample(time) {
+    const d = this.duration;
+    const t = d > 0 ? ((num(time) % d) + d) % d : 0;
+    const out = {
+      time: t, frame: Math.floor(t * this.frameRate), duration: d, tracks: [],
+      skyAdditiveColor: null, skyAdditiveIntensity: null,
+      lightAdditiveColor: null, lightAdditiveIntensity: null,
+    };
+    for (const track of this.tracks) {
+      let weight = 0, live = 0;
+      let acc = track.kind === 'color' ? [0, 0, 0, 0] : 0;
+      for (const clip of track.clips) {
+        const start = num(clip.start), dur = num(clip.duration);
+        if (!(dur > 0) || t < start || t >= start + dur) continue;
+        const w = clipWeight(clip, t - start, dur);
+        if (!(w > 0)) continue;
+        live += 1;
+        const u = Math.max(0, Math.min(1,
+          (num(clip.clipIn) + (t - start) * num(clip.timeScale, 1)) / dur));
+        const asset = clip.asset || {};
+        if (track.kind === 'color') {
+          const c = evalGradient(asset.gradient, u);
+          acc = [acc[0] + c[0] * w, acc[1] + c[1] * w, acc[2] + c[2] * w, acc[3] + c[3] * w];
+        } else {
+          acc += evalCurve(asset.curve, u) * num(asset.scale, 1) * w;
+        }
+        weight += w;
+      }
+      let value = null;
+      if (weight > 0) {
+        value = track.kind === 'color'
+          ? [acc[0] / weight, acc[1] / weight, acc[2] / weight, acc[3] / weight]
+          : (acc / weight) * track.scale;
+      }
+      out.tracks.push({
+        name: track.name, target: track.target, targetValue: track.targetValue,
+        scale: track.scale, live, weight: +weight.toFixed(6), value,
+      });
+      out[track.target] = value;
+    }
+    return out;
+  }
+}
+
+/**
+ * 把一份附加色叠到一个颜色上。与天空着色器里那一段**同一形状**:两边各走一趟 gamma→线性,
+ * 附加项乘自己的 alpha 与强度之后相加,再回 gamma。alpha 不动(它不是这条律的量)。
+ */
+export function addAdditiveColor(base, add, intensity) {
+  const out = [num(base[0]), num(base[1]), num(base[2]), num(base[3], 1)];
+  if (!add || !(num(intensity) > 0)) return out;
+  const lin = (v) => Math.pow(Math.max(v, 0), 2.2);
+  const gam = (v) => Math.pow(Math.max(v, 0), 1 / 2.2);
+  const k = num(add[3], 1) * num(intensity);
+  for (let i = 0; i < 3; i += 1) out[i] = gam(lin(out[i]) + lin(num(add[i])) * k);
+  return out;
+}
+
 // ---- 天空 -----------------------------------------------------------------
 //
 // 天空是一个网格 + 一份材质属性块,不是天空盒。网格与材质都在站点系统自己那套共享包里,
@@ -132,6 +383,9 @@ export const LIGHT_WIRING = [
 export const SKY_GRADIENT_MIN = '_GradientMinY';
 export const SKY_GRADIENT_MAX = '_GradientMaxY';
 export const SKY_RAMP_SLOTS = ['_RampTex1', '_RampTex2'];
+// 附加色在材质里的属性名。材质自带的那一份是**没有 clip 活着时的底值**(当前这份是全零),
+// 时间轴一活就由 skyAdditiveColor 轨接管。
+export const SKY_ADDITIVE_COLOR = '_AdditiveColor';
 // 天空视图脚本的类名:站点系统有两个 shell 包都挂着它,带网格的那个才是天空所在。
 const SKY_VIEW_SCRIPT = 'EnvironmentSkyView';
 
@@ -205,8 +459,9 @@ void main() {
   vec3 a = texture2D(rampTex1, uv).rgb;
   vec3 b = texture2D(rampTex2, uv).rgb;
   vec3 c = mix(a, b, clamp(fadeProgress, 0.0, 1.0));
-  // 附加色在运行时走一趟 gamma→linear→缩放→gamma 的往返;这里按同一形状实现,
-  // 缩放因子(AdditiveIntensity)的来源未知,默认 1。
+  // 附加色在运行时走一趟 gamma→linear→缩放→gamma 的往返;这里按同一形状实现。
+  // 缩放因子(AdditiveIntensity)由现象时间轴的 skyAdditiveIntensity 轨写进来(见「时间轴」段);
+  // 没有时间轴、或这一拍没有 clip 活着时它是 0,附加项因而整项不出力。
   vec3 lin = pow(max(c, vec3(0.0)), vec3(2.2)) + pow(max(additiveColor.rgb, vec3(0.0)), vec3(2.2))
            * additiveColor.a * additiveIntensity;
   gl_FragColor = vec4(pow(max(lin, vec3(0.0)), vec3(1.0 / 2.2)), 1.0);
@@ -223,7 +478,9 @@ class SkyDome {
       gradientMinY: { value: 0 },
       gradientMaxY: { value: 0 },
       additiveColor: { value: new THREE.Vector4(0, 0, 0, 0) },
-      additiveIntensity: { value: 1 },
+      // 底值 0:没有时间轴写它的时候附加项一分不出力。**不是 1** —— 1 会让任何一份非零的
+      // 材质附加色在没人驱动时也悄悄加进画面。
+      additiveIntensity: { value: 0 },
     };
     this.material = new THREE.ShaderMaterial({
       name: 'env-sky',
@@ -235,6 +492,7 @@ class SkyDome {
       depthWrite: false,
       depthTest: true,
     });
+    this.additive = { color: [0, 0, 0, 0], intensity: 0 };  // 时间轴写进来的那一拍(status 读它)
     this.geometrySource = null;    // 装上网格之前没有来源可报
     this.gradient = null;          // { min, max, source };读不到就是 null,不填默认值
     this.meshInfo = null;
@@ -305,6 +563,16 @@ class SkyDome {
 
   _syncVisible() { this.mesh.visible = this.wantVisible && this.ready; }
 
+  /** 附加色与附加强度(时间轴驱动)。两项一起写,免得只更新一半。 */
+  setAdditive(color, intensity) {
+    const c = col4(color, [0, 0, 0, 0]);
+    const i = num(intensity);
+    this.uniforms.additiveColor.value.set(c[0], c[1], c[2], c[3]);
+    this.uniforms.additiveIntensity.value = i;
+    this.additive = { color: c, intensity: i };
+    return this.additive;
+  }
+
   setRamps(a, b, progress) {
     this.uniforms.rampTex1.value = a || ENV_WHITE_TEX;
     this.uniforms.rampTex2.value = b || a || ENV_WHITE_TEX;
@@ -346,13 +614,30 @@ class SkyDome {
 //   两条在当前内容里同解(室内 = first_floor / my_room,其余六个室外)。不一致时**以主判据
 //   为准**,分歧记进 `status().site.indoorDisagree`,不静默取一条。
 //
-// 三、室内装什么
-//   房间站点的场景包里**没有墙也没有地板**(`indoor.assembly` 原话),房间是「套件的网格由某
-//   一级扩张模块摆出来 + 该级的可走面」。所以室内在场景包之外再挂一份
-//   `indoor.levels.<级>.module`,按 `module.prefabs[].root` **点名**取那几个 glTF scene
-//   (不是「把 glb 里的 scene 全挂上」)。站点等级是 master 表的字段,本仓没有 master ——
-//   `sites.json` 的 `missing` 写明「no master directory supplied」,所以取产物里最高的一级
-//   (`semantics.levels`:房间站点到 5 级封顶),并如实标注这是**假定**而不是读出来的。
+// 三、室内怎么拼
+//   房间站点的场景包里**没有墙也没有地板**。`indoor.assembly` 一句话给了完整编排:
+//   "a room is the kit's meshes placed by one expansion module per level plus that level's
+//   walkable surface; the site package of a room site holds no wall or floor geometry at all"。
+//   照这句话拼,三件:
+//
+//     场景包    —— 照常取它的默认场景。房间站点的默认场景里只有那一件「房间体积」
+//                  (`env` 槽里的天穹网格),墙与地一片都没有 —— 这正是上面那句话的后半句。
+//     扩张模块  —— `indoor.levels.<级>.module`,按 `module.prefabs[].root` **点名**取那几个
+//                  glTF scene(不是「把 glb 里的 scene 全挂上」)。模块包自己**一个网格资产
+//                  都没有**(它的清单里 Mesh 一项为零),它的绘制件指向套件包里的网格;
+//                  产物把这层跨包引用解开后把几何写进了模块的 glb,所以「套件的网格由模块
+//                  摆出来」这一步取模块的 glb 就是完整的一份 —— 套件包名一并记进读数,
+//                  让拼上去的每一件都追得到出处。
+//     可走面    —— `indoor.levels.<级>.walkable`,一级一份,文件相对可走面包自己的目录。
+//                  它是 MeshCollider,**原版不画**,所以这里挂上但不画(与「原版不画的节点
+//                  照样在几何计数里」同一条处置),读数里单列 `drawn: false`。有几级的
+//                  可走面在盘上就没有几何,记录自己写明那是作者状态而不是查找失败 ——
+//                  照抄那句话,不当成错误。
+//
+//   房间是第几级由 master 表决定,本仓没有 master(`sites.json` 的 `missing` 写明
+//   「no master directory supplied」)。所以等级按「服务端决定的做成面板下发」处置:
+//   面板上一个旋钮,默认取产物里最高的一级(`semantics.levels`:房间站点到 5 级封顶),
+//   读数见 `mounted.level` 与 `mounted.levelSource`。
 //
 // 四、站点世界位置
 //   `sitePosition` 同样只在 master 表里(`placement` 指到的 `sites.json` 里 `sites` 是空数组),
@@ -478,6 +763,7 @@ class SiteView {
     this.group = new THREE.Group();
     this.group.name = 'env_site';
     this.key = null;              // 当前挂着的场景键
+    this.level = null;            // 面板下发的室内等级;null = 取产物里最高的一级
     this.mounted = null;          // 当前挂载的读数(status 直接报它)
     this.mounting = null;         // 正在进行的挂载 Promise(判据可以等它)
     this.materials = [];
@@ -517,6 +803,43 @@ class SiteView {
     };
   }
 
+  /** 产物里有哪几级室内扩张模块,以及每一级带不带可走面几何。面板下拉框直接用。 */
+  levels() {
+    const levels = ((this.index || {}).indoor || {}).levels || {};
+    return Object.keys(levels).sort().map((key) => {
+      const lv = levels[key] || {};
+      const surfaces = (lv.walkable || {}).surfaces || [];
+      return {
+        key,
+        module: (lv.module || {}).package || null,
+        prefabs: ((lv.module || {}).prefabs || []).map((x) => x.root).filter(Boolean),
+        colliders: ((lv.module || {}).colliders || []).length,
+        walkablePackage: (lv.walkable || {}).package || null,
+        walkableFiles: surfaces.filter((x) => x && x.file).length,
+        // 盘上没有几何的那几级:记录自己写明是作者状态,原话带出来给面板显示。
+        walkableNotes: surfaces.filter((x) => x && !x.file).map((x) => x.reason || '记录里没有几何'),
+      };
+    });
+  }
+
+  /** 产物里最高的一级(房间站点到 5 级封顶)。 */
+  get topLevel() {
+    return Object.keys(((this.index || {}).indoor || {}).levels || {}).sort().pop() || null;
+  }
+
+  /** 这一次拼哪一级:面板下发的那一级,没下发就是最高的一级。 */
+  get activeLevel() {
+    const all = Object.keys(((this.index || {}).indoor || {}).levels || {});
+    return (this.level && all.includes(this.level)) ? this.level : this.topLevel;
+  }
+
+  /** 面板下发等级。传空 = 回到「取最高的一级」。 */
+  setLevel(level) {
+    const all = Object.keys(((this.index || {}).indoor || {}).levels || {});
+    this.level = (level && all.includes(String(level))) ? String(level) : null;
+    return this.activeLevel;
+  }
+
   /** 面板下拉框的名单:键、包、室内与否,全部从清单读出来。 */
   scenes() {
     const all = (this.index || {}).scenes || {};
@@ -534,26 +857,62 @@ class SiteView {
    * 默认场景(那是游戏摆出来的那个);给了名单就按名字点名取。
    */
   _plan(key, indoor) {
-    const rec = ((this.index || {}).scenes || {})[key];
+    const idx = this.index || {};
+    const rec = (idx.scenes || {})[key];
     const out = [];
     if (!rec) return out;
-    if (rec.geometry) out.push({ file: rec.geometry, scenes: null, why: '场景包的默认场景' });
-    if (!indoor) return out;
-    const levels = ((this.index || {}).indoor || {}).levels || {};
-    const lv = Object.keys(levels).sort().pop();
-    const mod = lv ? (levels[lv] || {}).module : null;
-    const fam = ((this.index || {}).families || {}).roomModule || [];
-    const hit = mod ? fam.find((f) => f.package === mod.package) : null;
-    if (!hit || !hit.geometry) {
-      this.errors.push(`${key}: 室内扩张模块的几何取不到(级 ${lv || '?'})`);
-      return out;
+    if (rec.geometry) {
+      out.push({
+        part: 'scene', file: rec.geometry, scenes: null, drawn: true,
+        package: rec.package || null, from: `scenes.${key}.geometry`,
+        why: '场景包的默认场景',
+      });
     }
-    out.push({
-      file: hit.geometry,
-      scenes: (mod.prefabs || []).map((p) => p.root).filter(Boolean),
-      why: `室内扩张模块 lv_${lv}(等级来自 master 表,本仓没有 master:取产物里最高的一级)`,
-      level: lv,
-    });
+    if (!indoor) return out;
+    const levels = (idx.indoor || {}).levels || {};
+    const lv = this.activeLevel;
+    const level = lv ? levels[lv] : null;
+    if (!level) { this.errors.push(`${key}: indoor.levels 里没有等级 ${lv || '?'}`); return out; }
+    const fam = idx.families || {};
+
+    // 一、这一级的扩张模块 —— 它把套件的网格摆成一间房。
+    const mod = level.module || {};
+    const modFam = (fam.roomModule || []).find((f) => f.package === mod.package) || null;
+    if (modFam && modFam.geometry) {
+      out.push({
+        part: 'module', file: modFam.geometry, drawn: true, level: lv,
+        scenes: (mod.prefabs || []).map((x) => x.root).filter(Boolean),
+        package: mod.package, kit: this.kitPackage, from: `indoor.levels.${lv}.module`,
+        why: `扩张模块 lv_${lv} · 网格出自套件 ${this.kitPackage || '(套件包读不到)'}`,
+      });
+    } else {
+      this.errors.push(`${key}: 室内扩张模块的几何取不到(级 ${lv},包 ${mod.package || '?'})`);
+    }
+
+    // 二、这一级的可走面 —— `indoor.assembly` 把它算进「一个房间」里,所以照挂;
+    //     它是碰撞面,原版不画,这里挂上不画。
+    const walk = level.walkable || {};
+    const walkFam = (fam.roomNavModule || []).find((f) => f.package === walk.package) || null;
+    for (const surface of walk.surfaces || []) {
+      if (!surface) continue;
+      if (!surface.file || !walkFam) {
+        out.push({
+          part: 'walkable', skipped: true, level: lv, package: walk.package || null,
+          node: surface.node || null, from: `indoor.levels.${lv}.walkable`,
+          why: surface.reason || (walkFam ? '记录里没有可走面几何' : '可走面包不在 families 里'),
+        });
+        continue;
+      }
+      // 记录里的路径相对可走面包自己的目录;已经带上目录的就照用,不重复拼一层。
+      const rel = String(surface.file).startsWith(`${walkFam.directory}/`)
+        ? String(surface.file) : `${walkFam.directory}/${surface.file}`;
+      out.push({
+        part: 'walkable', file: rel, scenes: null, drawn: false, level: lv,
+        package: walk.package || null, node: surface.node || null,
+        from: `indoor.levels.${lv}.walkable`,
+        why: `可走面 ${surface.mesh || surface.node || '(未命名)'}(碰撞面,原版不画)`,
+      });
+    }
     return out;
   }
 
@@ -587,14 +946,27 @@ class SiteView {
     const inactive = doc ? doc.inactiveNodes || [] : [];
     const disabled = doc ? doc.disabledRenderers || [] : [];
     const files = [];
-    let meshes = 0, triangles = 0, hiddenMeshes = 0, unresolvedHides = 0;
+    let meshes = 0, triangles = 0, drawnTriangles = 0;
+    let hiddenMeshes = 0, hiddenTriangles = 0, unresolvedHides = 0;
     for (const step of plan) {
+      // 编排里点了名、但盘上没有几何的那一件。记录自己写明这是作者状态而不是查找失败,
+      // 所以照抄那句话记一笔,**不当成错误**、也不拿别的东西顶替。
+      if (step.skipped) {
+        files.push({
+          part: step.part, from: step.from, package: step.package, node: step.node || null,
+          file: null, why: step.why, ok: false, skipped: true, meshes: 0, triangles: 0,
+        });
+        continue;
+      }
       let gltf = null;
       try {
         gltf = await this.loader.loadAsync(`${this.root}/${step.file}`);
       } catch (e) {
         this.errors.push(`${step.file} → ${String(e).slice(0, 90)}`);
-        files.push({ file: step.file, why: step.why, ok: false, meshes: 0, triangles: 0 });
+        files.push({
+          part: step.part, from: step.from, package: step.package,
+          file: step.file, why: step.why, ok: false, meshes: 0, triangles: 0,
+        });
         continue;
       }
       const picked = step.scenes
@@ -603,16 +975,27 @@ class SiteView {
       if (step.scenes && picked.length !== step.scenes.length) {
         this.errors.push(`${step.file}: 点名的 ${step.scenes.length} 个 scene 只取到 ${picked.length} 个`);
       }
-      let m = 0, t = 0, h = 0;
+      let m = 0, t = 0, h = 0, ht = 0;
       for (const root of picked) {
-        // `inactiveNodes` 的路径相对**主根节点**,而 glTF scene 的孩子才是那个根节点。
-        if (!step.scenes) unresolvedHides += this._hide(root, inactive, disabled);
+        // `inactiveNodes` / `disabledRenderers` 是**场景文档**里的路径,只对场景包那一件有意义;
+        // 拿它去套模块或可走面会指不到任何节点,白记一堆「指不到」。
+        if (step.part === 'scene' && !step.scenes) {
+          unresolvedHides += this._hide(root, inactive, disabled);
+        }
+        // 原版不画的那一件:挂上,但不画。可见性一关,下面的计数自己会把它算进「隐藏」。
+        if (step.drawn === false) root.visible = false;
         const c = this._convert(root);
-        m += c.meshes; t += c.triangles; h += c.hidden;
+        m += c.meshes; t += c.triangles; h += c.hidden; ht += c.hiddenTriangles;
         this.group.add(root);
       }
-      meshes += m; triangles += t; hiddenMeshes += h;
-      files.push({ file: step.file, why: step.why, ok: true, scenes: picked.map((s) => s.name), meshes: m, triangles: t });
+      meshes += m; triangles += t; hiddenMeshes += h; hiddenTriangles += ht;
+      drawnTriangles += t - ht;
+      files.push({
+        part: step.part, from: step.from, package: step.package, kit: step.kit || null,
+        level: step.level || null, node: step.node || null,
+        file: step.file, why: step.why, ok: true, drawn: step.drawn !== false,
+        scenes: picked.map((x) => x.name), meshes: m, triangles: t, drawnTriangles: t - ht,
+      });
     }
 
     this.key = key;
@@ -625,11 +1008,22 @@ class SiteView {
       indoorFromIndex: fromIndex.indoor,
       indoorDisagree: fromSlot !== null && fromSlot !== fromIndex.indoor,
       footstepAgrees: fromIndex.footstepAgrees,
-      level: (plan.find((p) => p.level) || {}).level || null,
+      // 室内拼装:哪一级、这一级从哪儿来的、拼上去的每一件各自的出处与三角数。
+      level: indoor ? this.activeLevel : null,
+      levelSource: !indoor ? null
+        : (this.level
+          ? '面板下发(等级是 master 表的字段,本仓没有 master,所以做成旋钮)'
+          : '产物里最高的一级(等级是 master 表的字段,本仓没有 master)'),
+      levelsAvailable: indoor ? this.levels().map((x) => x.key) : [],
+      // 场景包之外的那几件 —— 就是 `indoor.assembly` 点名的那份编排。
+      assembly: files.filter((f) => f.part !== 'scene'),
       files,
       meshes,
       triangles,
+      // 真的画出来的三角数(总数里扣掉原版不画的那些:隐藏的节点、以及可走面这种碰撞面)。
+      drawnTriangles,
       hiddenMeshes,
+      hiddenTriangles,
       // 文档说不画、但路径指不到节点的条数。这一项不为零 = 画面上多画了这么多处。
       unresolvedHides,
       declaredHides: inactive.length + disabled.length,
@@ -700,7 +1094,7 @@ class SiteView {
 
   /** 逐网格换材质并计数。隐藏的网格照样计数 —— 它在场景里,只是不画。 */
   _convert(root) {
-    let meshes = 0, triangles = 0, hidden = 0;
+    let meshes = 0, triangles = 0, hidden = 0, hiddenTriangles = 0;
     const cache = new Map();
     root.updateMatrixWorld(true);
     root.traverse((o) => {
@@ -708,17 +1102,18 @@ class SiteView {
       meshes += 1;
       const idx = o.geometry.getIndex();
       const pos = o.geometry.getAttribute('position');
-      triangles += idx ? idx.count / 3 : (pos ? Math.floor(pos.count / 3) : 0);
+      const tris = idx ? idx.count / 3 : (pos ? Math.floor(pos.count / 3) : 0);
+      triangles += tris;
       // 可见性沿祖先链算:整条支路被关掉时,这一格也是不画的。
       let vis = true;
       for (let p = o; p; p = p.parent) if (!p.visible) { vis = false; break; }
-      if (!vis) hidden += 1;
+      if (!vis) { hidden += 1; hiddenTriangles += tris; }
       if (!o.geometry.getAttribute('normal')) o.geometry.computeVertexNormals();
       const src = Array.isArray(o.material) ? o.material[0] : o.material;
       if (!cache.has(src)) cache.set(src, this._materialFor(src));
       o.material = cache.get(src);
     });
-    return { meshes, triangles, hidden };
+    return { meshes, triangles, hidden, hiddenTriangles };
   }
 
   _materialFor(src) {
@@ -975,6 +1370,18 @@ export class Environment {
     this.skyMeshNote = '天空尚未装载';
     this.skyMaterial = null;     // 天空材质记录(渐变窗口的**唯一**出处,不另存两个数字)
     this.skyGradientSource = null;
+    // 附加色的**底值**:没有 clip 活着的那些拍就用它。来源是天空材质自带的那一项;
+    // 附加强度没有任何材质属性对应,底值只能是 0(不出力),这一条如实记在 notRestored 里。
+    this.skyAdditiveDefault = [0, 0, 0, 0];
+    this.skyAdditiveDefaultSource = null;
+    // 时间轴时钟。秒,按当前现象自己的 `duration` 循环;换现象时归零 —— 产物里那个空的
+    // 时间轴插槽写着 `initialTime: 0.0`,现象是运行时才被塞进去的,所以塞进去就是从头。
+    this.timelineTime = 0;
+    this.timelinePlaying = true;
+    this.timelineSample = null;    // 这一拍四条轨各算出什么(status 读它)
+    this.timelineApplied = null;   // 这一拍真的写出去的四项 + 叠加后的现象方向光色
+    this.timelineDataError = null; // 清单声明了时间轴却读不出文档时的如实记录
+    this.timelineNames = [];       // 清单里带时间轴的现象名(判据据此知道这是不是唯一一个)
   }
 
   // ---- 装载 ----
@@ -990,6 +1397,9 @@ export class Environment {
       for (const s of Object.keys(p.overrides || {})) sites.add(s);
     }
     this.overrideSite = [...sites].sort()[0] || null;
+    // 带时间轴的现象名。**从清单读**,不写死「只有打雷天有」——- 数据一变名单跟着变。
+    this.timelineNames = Object.keys(idx.phenomena || {})
+      .filter((n) => (idx.phenomena[n] || {}).timeline).sort();
     this.overrideSites = [...sites].sort();
     // 站点清单:面板的站点名单与室内判据都从这里来(几何要到 attach / 换站点时才装)。
     await this.siteView.load((url) => this._json(url));
@@ -1003,6 +1413,28 @@ export class Environment {
 
   /** 站点名单(面板下拉框直接用):键 + 室内与否 + 判据出处。 */
   siteScenes() { return this.siteView.scenes(); }
+
+  /** 室内等级名单(面板下发用)。等级本身是 master 表的字段,本仓没有 master。 */
+  siteLevels() { return this.siteView.levels(); }
+
+  /** 当前拼的是哪一级(室外时这一项没有意义,照样返回名单里的默认级)。 */
+  get siteLevel() { return this.siteView.activeLevel; }
+
+  /**
+   * 下发室内等级。等级由服务端的 master 表决定、本仓拿不到,所以按「服务端决定的做成面板
+   * 下发」处置:改了就重拼一遍(计划变了,得让 mount 真的再跑一次)。
+   */
+  async setSiteLevel(level) {
+    if (!this.siteView.index) return null;
+    const before = this.siteView.activeLevel;
+    const after = this.siteView.setLevel(level);
+    if (after === before && this.siteView.mounted) return this.siteView.mounted;
+    this.siteView.key = null;
+    const rec = await this.siteView.mount(this.site, (url) => this._json(url));
+    if (rec) this.siteIndoor = !!rec.indoor;
+    this.refreshSite();
+    return rec;
+  }
 
   /**
    * 把当前站点的几何挂上。**站点没装好之前不挂粒子也不画天空** —— 室内/室外要按产物判,
@@ -1037,6 +1469,14 @@ export class Environment {
     }
     this.skyMaterial = plan.material;
     this.skyGradientSource = plan.gradientSource;
+    // 材质自带的附加色 = 没有 clip 驱动它时的底值。当前这份材质里它是全零,所以画面上
+    // 看不出差别 —— 但读出来与不读是两件事,这里读。
+    const authored = (plan.material && plan.material.colors)
+      ? plan.material.colors[SKY_ADDITIVE_COLOR] : null;
+    this.skyAdditiveDefault = authored ? col4(authored, [0, 0, 0, 0]) : [0, 0, 0, 0];
+    this.skyAdditiveDefaultSource = authored
+      ? `材质 ${plan.materialName || '(未命名)'} 的 ${SKY_ADDITIVE_COLOR}`
+      : `${plan.gradientSource} 里没有 ${SKY_ADDITIVE_COLOR}:底值取零`;
     const win = skyGradientWindow(plan.material);
     if (!win) this.errors.push(`${plan.gradientSource}: 渐变窗口读不出`);
     await this.skyMeshLoader.preload([plan.url]);
@@ -1109,11 +1549,16 @@ export class Environment {
     if (!entry) { this.errors.push(`index.json 里没有 ${name}`); return null; }
     const rel = (p) => `${this.root}/${p}`;
     const declaredEmitters = entry.fx ? num(entry.fx.emitters) : 0;
-    const [config, profileDoc, fx] = await Promise.all([
+    const [config, profileDoc, fx, timelineDoc] = await Promise.all([
       this._json(rel(entry.config)),
       entry.postprocess ? this._json(rel(entry.postprocess)) : null,
       entry.fx && entry.fx.file ? this._json(rel(entry.fx.file)) : null,
+      entry.timeline && entry.timeline.file ? this._json(rel(entry.timeline.file)) : null,
     ]);
+    // 清单声明了时间轴却读不出文档 = **数据缺口**,不是「这个现象没有时间轴」。
+    if (entry.timeline && entry.timeline.file && !timelineDoc) {
+      this.timelineDataError = `${name}: 清单声明了时间轴 ${entry.timeline.file},但读不出来`;
+    }
     // 清单声明了发射器却读不出效果文档 = **数据缺口**,不是「这个现象没粒子」。
     // 如实记下来(面板与自检照实显示),不容错解析、不猜。
     if (declaredEmitters > 0 && !fx) {
@@ -1131,6 +1576,8 @@ export class Environment {
     }
     const rec = {
       name, entry, config, ramp, overrides,
+      timeline: timelineDoc ? new PhenomenonTimeline(timelineDoc) : null,
+      timelineDeclared: entry.timeline || null,
       profile: profileDoc ? flattenProfile(profileDoc) : null,
       fx: fx ? new EffectSet(fx, this.textureFor) : null,
       shapes: fx ? unmodelledShapes(fx) : null,
@@ -1188,6 +1635,9 @@ export class Environment {
     this.to = { name, rec, state: this._stateOf(rec) };
     this.fadeDuration = Math.max(0, num(seconds, CROSS_FADE_SECONDS));
     this.fadeElapsed = 0;
+    // 换现象 = 时间轴从头起。产物里那个空插槽写着 `initialTime: 0.0`,现象的时间轴是运行时
+    // 被赋给导演的,所以赋上去就是从 0 开始 —— 不是接着上一个现象的时钟往下跑。
+    if (!prev || prev.name !== name) this.timelineTime = 0;
     this.fade = (this.from && this.fadeDuration > 0) ? 0 : 1;
     this._fadeStart = (this.from && this.fadeDuration > 0) ? performance.now() : null;
     this._mountEffects();
@@ -1329,7 +1779,79 @@ export class Environment {
     // 缓存下来的那份会在材质改动之后继续算旧窗口,而且看不出来。
     this.sky.setGradientWindow(skyGradientWindow(this.skyMaterial), this.skyGradientSource);
     this.sky.setRamps(a.ramp, b.ramp, t);
+
+    // 时间轴写在最后:它叠在**现象方向光色**上,顺序反了就会被上面那次 envSet 覆盖掉。
+    this._applyTimeline();
   }
+
+  /**
+   * 时间轴这一拍写出去。四条轨各自的目标见「时间轴」段的注释。
+   *
+   * 换现象时两侧**各采一次样、按同一个淡化进度混合** —— 与光照九项、渐变、雾、后处理用的是
+   * 同一条淡化规矩,不给时间轴另开一条。没有时间轴的那一侧按「不出力」参与混合:附加色取
+   * 材质底值、附加强度取 0。
+   */
+  _applyTimeline() {
+    const t = this.from ? this.fade : 1;
+    const sTo = this._sampleTimeline(this.to);
+    const sFrom = this.from ? this._sampleTimeline(this.from) : null;
+    const pick = (side, key, dflt) => {
+      const v = side ? side[key] : null;
+      return (v === null || v === undefined) ? dflt : v;
+    };
+    const mix = (key, dflt) => {
+      const b = pick(sTo, key, dflt);
+      if (!sFrom) return b;
+      const a = pick(sFrom, key, dflt);
+      return Array.isArray(b) ? lerp4(a, b, t) : lerp(a, b, t);
+    };
+    const skyColor = mix('skyAdditiveColor', this.skyAdditiveDefault);
+    const skyIntensity = mix('skyAdditiveIntensity', 0);
+    const lightColor = mix('lightAdditiveColor', [0, 0, 0, 0]);
+    const lightIntensity = mix('lightAdditiveIntensity', 0);
+    this.sky.setAdditive(skyColor, skyIntensity);
+    // 光那一侧:叠在现象方向光色上再推出去。底色是 `_applyBlend` 算好的那一份(status 里
+    // `light.phenLightColor` 报的仍是**底色**,叠加后的值单独在 timeline.applied 里报)。
+    const base = this.light ? this.light.phenLightColor : null;
+    const lit = base ? addAdditiveColor(base, lightColor, lightIntensity) : null;
+    if (lit) envSet('envPhenLightColor', lit);
+    this.timelineSample = sTo;
+    this.timelineApplied = {
+      skyAdditiveColor: skyColor, skyAdditiveIntensity: skyIntensity,
+      lightAdditiveColor: lightColor, lightAdditiveIntensity: lightIntensity,
+      phenLightColorBase: base ? base.slice() : null,
+      phenLightColor: lit,
+    };
+  }
+
+  /** 一侧(淡入/淡出)的时间轴在当前时钟处的一拍;那一侧没有时间轴就是 null。 */
+  _sampleTimeline(side) {
+    const tl = side && side.rec ? side.rec.timeline : null;
+    return tl ? tl.sample(this.timelineTime) : null;
+  }
+
+  /** 当前现象的时间轴(没有就是 null)。 */
+  get timeline() { return this.to && this.to.rec ? this.to.rec.timeline : null; }
+
+  /** 时间轴:播 / 暂停。暂停之后时钟不走,画面停在这一拍(判据靠它定点观测)。 */
+  setTimelinePlaying(on) {
+    this.timelinePlaying = !!on;
+    this._applyTimeline();
+    return this.timelinePlaying;
+  }
+
+  /** 时间轴:定位到第几秒(按当前现象自己的 `duration` 取模)。 */
+  setTimelineTime(seconds) {
+    const tl = this.timeline;
+    const d = tl ? tl.duration : 0;
+    const v = num(seconds);
+    this.timelineTime = d > 0 ? ((v % d) + d) % d : 0;
+    this._applyTimeline();
+    return this.timelineTime;
+  }
+
+  /** 时间轴:复位到 0 秒。 */
+  resetTimeline() { return this.setTimelineTime(0); }
 
   /** 挂粒子:三族按语义挂,`site` 只挂当前站点(或对所有站点通用的那些)。 */
   _mountEffects() {
@@ -1522,6 +2044,13 @@ export class Environment {
         this.from = null;
       }
     }
+    // 时间轴按当前现象自己的 `duration` 循环。**闪光那一下就在这里**:四条轨这一拍算出来的
+    // 附加色/附加强度由 `_applyTimeline` 写给天空与现象方向光。
+    const tl = this.timeline;
+    if (tl && this.timelinePlaying && tl.duration > 0) {
+      this.timelineTime = (this.timelineTime + dt) % tl.duration;
+    }
+    this._applyTimeline();
     this.sky.follow(this.camera);
     this._applyCameraFollow();
     for (const e of this.effects) e.view.update(dt);
@@ -1732,8 +2261,10 @@ export class Environment {
         gradient: this.sky.gradient,
         meshLoad: this.skyMeshLoader.stats(),
         note: this.skyMeshNote,
+        // 这一拍真的写进天空材质的附加色与附加强度(时间轴驱动)。
+        additive: this.sky.additive,
         approximations: [
-          '附加色的缩放因子来源未知,默认 1',
+          '附加色与附加强度由现象时间轴驱动;没有 clip 活着时附加色回到材质自带的那一份、强度回到 0',
         ],
       },
       // 站点:真站点几何的读数。`meshes` / `triangles` 是**场景里真的挂着**的数量
@@ -1754,6 +2285,33 @@ export class Environment {
         available: this.siteView.scenes().map((x) => ({ key: x.key, indoor: x.indoor })),
         errors: this.siteView.errors.slice(0, 8),
       },
+      // 时间轴:声明与实到分开报(清单说有、文档读不出 = 数据缺口,不是「没有时间轴」),
+      // 这一拍四条轨算出什么、真的写出去什么、以及**没做的那几条轨**都在这里。
+      timeline: (() => {
+        const tl = rec ? rec.timeline : null;
+        return {
+          declared: rec ? rec.timelineDeclared : null,
+          has: !!tl,
+          name: tl ? tl.name : null,
+          duration: tl ? tl.duration : null,
+          frameRate: tl ? tl.frameRate : null,
+          frames: tl ? Math.round(tl.duration * tl.frameRate) : null,
+          playing: this.timelinePlaying,
+          time: +this.timelineTime.toFixed(4),
+          frame: tl ? Math.floor(this.timelineTime * tl.frameRate) : null,
+          trackCount: tl ? tl.tracks.length : 0,
+          clipCount: tl ? tl.clipCount : 0,
+          tracks: tl ? tl.trackSummary() : [],
+          sample: this.timelineSample,
+          applied: this.timelineApplied,
+          notModelled: tl ? tl.notModelled : [],
+          notModelledClips: tl ? tl.notModelledClips : 0,
+          skyAdditiveDefault: this.skyAdditiveDefault,
+          skyAdditiveDefaultSource: this.skyAdditiveDefaultSource,
+          dataError: this.timelineDataError,
+          phenomenaWithTimeline: this.timelineNames.slice(),
+        };
+      })(),
       post: this.post.status(),
       notRestored: NOT_RESTORED,
       errors: this.errors.slice(0, 8),
@@ -1775,16 +2333,22 @@ export class Environment {
  * 「原始数据不含」与「本示例未实现」是两件不同的事,分开写 —— 前者没人在等,后者是欠账。
  */
 export const NOT_RESTORED = [
-  '天空材质的附加色:材质记录里那一项(以及它的 alpha)本示例不读,附加色 uniform 恒为零。当前这份材质里它本来就是零,所以画面上看不出差别 —— 但那是数据碰巧,不是接上了',
-  '闪电时间轴:只有一个现象带时间轴资产,本示例不建模时间轴(它在产物里登记为未支持)',
+  '时间轴的两条 `ValueNoiseTrack`(共 5 个 clip):它们是两条强度轨的**子轨**,记录里带噪声强度、频率与强度曲线,但「噪声怎么并进父轨的值」产物一个字没说 —— **整条不做并计数**,不猜一条律出来。读数见 timeline.notModelled',
+  '时间轴的 `MarkerTrack`:标记轨在产物里是空的(0 个 clip),没有东西可播;它照实列在 timeline.notModelled 里,不假装它被消费了',
+  '光那一侧的附加色落在哪一盏灯:轨的目标名只说 `lightAdditiveColor` / `lightAdditiveIntensity`,产物没说它指的是现象方向光还是角色方向光。本示例叠在**现象方向光**上(那是站点材质的直射项,也是这套 `SiteEnvironment*Track` 所属的那一层),角色方向光不动 —— 这是取舍,不是读出来的',
+  '光那一侧附加色的合成律:天空那一侧着色器里写明是 gamma→线性→按 alpha 与强度缩放→回 gamma 的往返,光那一侧产物没有单独说,本示例照天空**同一形状**实现',
+  '附加强度的底值:天空材质里没有与 `AdditiveIntensity` 对应的属性,所以「没有 clip 活着」时的强度只能取 0(不出力);附加**色**的底值是读出来的(材质的 `_AdditiveColor`,当前是全零)',
+  'clip 的 `preExtrapolation` / `postExtrapolation` 与曲线的 `preInfinity` / `postInfinity`:当前内容里每条曲线的键都铺满 0..1、取样点也从不越界,这几项一次都没被走到,本示例照实不实现',
   '粒子模块:**提取侧已全部建模**(自定义数据/子发射器/碰撞/受力/噪声/拖尾都在产物里),但本示例的发射器引擎只实现了出生与基本运动 —— 曲线型自定义数据、子发射器、碰撞与拖尾在画面上还未生效;未实现项与未建模的发射形状逐项计数见 particles.unmodelledShapes',
   '发射形状 Box 等没有发射公式:这些形状的发射器**整条停发**,不退化成点发射(点发射会把本该铺开的粒子全堆在发射节点原点上)。「从网格表面发射」已按三角放置建模(面积加权选三角、三角内均匀取点、重心插值顶点法线当方向),但形状没解出网格的那几个照样停发。当前站点真的挂着几个、分别是什么形状,见 particles.suppressed / particles.suppressedShapes。renderMode=Mesh 是另一道渲染器能力缺口,单独见 particles.skipped.unsupported / unsupportedModes',
   '`renderer.maxParticleSize` / `minParticleSize` 是**视口比例**(默认 0.5 = 半个视口高),不是世界尺寸:本示例不按它截尺寸(拿视口比例去截米是单位错误,会把声明 100x60 米的云静默截成 0.5 米),而按视口比例截断的那条律本示例没有建模 —— 大件在近处会比运行时更大',
   '站点决定的那批全局着色量不在本包里,本示例按中性常量处理(它们随站点变而不随天气变)',
-  '站点的世界位置:`sitePosition` 与站点等级都只在 master 表里,产物里那张放置表是空的并写明「no master directory supplied」。所以本示例把当前站点摆在原点、室内取产物里最高的那一级 —— 前者不影响站点内部的相对关系,后者是**假定**,读数见 site.mounted.level',
+  '站点的世界位置:`sitePosition` 只在 master 表里,产物里那张放置表是空的并写明「no master directory supplied」,所以本示例把当前站点摆在原点 —— 一次只看一个站点,这不改变站点内部的相对关系',
+  '房间等级:等级同样是 master 表的字段,产物给不出「这间房现在是第几级」。所以它按「服务端决定的做成面板下发」处置 —— 面板上一个旋钮,默认取产物里最高的一级,读数见 site.mounted.level / levelSource,**不再是代码里写死的一个假定**',
+  '室内套件里没有被扩张模块摆出来的那几件(入口件 `mdl_site_entrance_common`、别的等级的地板与墙件、编辑器预览件):`indoor` 只说了「一级一个扩张模块 + 该级的可走面」,没有任何字段说入口摆在哪一格 —— 摆放要 master 表,本仓没有',
   '站点自己的着色器在另一个包里(场景包只带着材质名与属性块),所以本示例的站点材质是**近似**:基色贴图 + 现象量(直射/暗部/云影/落影/雾)。透明度按产物走(混合因子读材质 extras 的 Unity 枚举、遮罩阈值读 glTF 的 alphaCutoff、双面读 doubleSided),但法线贴图、顶点色、发光与风的顶点动画都没接',
   '落影仍是一个投影盘(不是阴影贴图):它现在落在真站点的表面上,按片元所在高度沿光向反投。两个权重是本示例加的近似 —— 朝上分量与「只投在角色下方」,产物里没有这两条',
-  '站点的碰撞面、导航网格与足音颜色表照实装在产物里,本示例都不消费(它没有行走与足音)',
+  '站点的碰撞面、导航网格与足音颜色表照实装在产物里,本示例都不消费(它没有行走与足音)。**室内那一份是例外**:`indoor.assembly` 把「该级的可走面」算进「一个房间」里,所以它按编排挂上,但照原版**不画**(它是 MeshCollider),读数见 site.mounted.assembly',
   '家具、房间皮肤与散布道具包不挂:场景包里没有家具(`semantics.fixtures`),这几族要 master 表说明摆哪些,本仓没有 master',
 ];
 

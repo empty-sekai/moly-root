@@ -95,6 +95,27 @@
         <select id="selEnvSite" class="field"
           title="换站点:真站点几何 + 站点粒子挂哪一站。室内/室外由站点产物判(室内不挂天气特效与天空)"></select>
       </div>
+      <!-- 室内等级:房间由套件按等级模块拼装。等级本身在 master 表里(本仓没有),
+           所以做成面板下发,默认取产物里最高的一级。 -->
+      <div class="controls">
+        <select id="selEnvLevel" class="field"
+          title="室内房间等级:房间 = 该级扩张模块摆出来的套件网格 + 该级的可走面。等级由 master 表决定,本仓拿不到,所以做成面板下发"></select>
+      </div>
+      <div class="hintline dim" id="envSiteHint">&nbsp;</div>
+      <!-- 现象时间轴:打雷天那一下亮就出自它(天空与光的附加色/附加强度)。
+           暂停 + 拖时刻 = 定点观测同一拍。 -->
+      <div class="controls">
+        <button id="bEnvTimeline" class="btn toggle on" type="button"
+          title="现象时间轴:按现象自己的时长循环播放(打雷天的闪光由它驱动);关掉 = 停在当前这一拍">时间轴</button>
+        <button id="bEnvTimelineReset" class="btn" type="button" title="时间轴复位到 0 秒">复位</button>
+      </div>
+      <div class="controls">
+        <label class="slider"><span class="k">时刻</span>
+          <input id="rEnvTimeline" type="range" min="0" max="1000" value="0" aria-label="时间轴时刻">
+          <output id="oEnvTimeline">—</output>
+        </label>
+      </div>
+      <div class="hintline dim" id="envTlHint">&nbsp;</div>
     </section>
 
     <section class="group">

@@ -223,7 +223,8 @@ function buildEnvList() {
   box.innerHTML = '';
   if (!environment) {
     box.innerHTML = `<div class="empty">${envErr ? `缺 phenomena 数据(${envErr})` : '无现象数据'}</div>`;
-    for (const id of ['bEnv', 'bEnvIndoor', 'bEnvParticles', 'bEnvPost', 'bEnvSky', 'bEnvGround', 'selEnvSite']) {
+    for (const id of ['bEnv', 'bEnvIndoor', 'bEnvParticles', 'bEnvPost', 'bEnvSky', 'bEnvGround',
+      'selEnvSite', 'selEnvLevel', 'bEnvTimeline', 'bEnvTimelineReset', 'rEnvTimeline']) {
       const el = $(id); if (el) el.disabled = true;
     }
     return;
@@ -256,6 +257,57 @@ function buildEnvList() {
     else if (list.length) sel.value = list[0].key;
     if (!list.length) sel.innerHTML = '<option value="">站点产物读不到</option>';
   }
+  const lvl = $('selEnvLevel');
+  if (lvl) {
+    // 等级名单从产物读(`indoor.levels`)。默认那一项标出来:它是「产物里最高的一级」,
+    // 不是读出来的当前等级 —— 当前等级在 master 表里,本仓没有。
+    const levels = environment.siteLevels();
+    lvl.innerHTML = levels.length
+      ? levels.map((x) => `<option value="${x.key}">室内等级:lv_${x.key}`
+        + `${x.key === environment.siteView.topLevel ? '(默认:产物最高级)' : ''}</option>`).join('')
+      : '<option value="">室内等级读不到</option>';
+    if (levels.length) lvl.value = environment.siteLevel || levels[levels.length - 1].key;
+  }
+}
+
+/** 时间轴那一行:当前时刻 / 第几帧 / 这一拍四条轨写出了什么。面板与判据看同一份读数。 */
+function syncTimelineUI() {
+  const slider = $('rEnvTimeline');
+  const out = $('oEnvTimeline');
+  const hint = $('envTlHint');
+  const btn = $('bEnvTimeline');
+  if (!slider || !out || !hint) return;
+  const st = (environment && envOn) ? environment.status() : null;
+  const T = st ? st.timeline : null;
+  const on = !!(T && T.has);
+  slider.disabled = !on;
+  if (btn) { btn.disabled = !on; btn.classList.toggle('on', !!(T && T.playing)); }
+  const rb = $('bEnvTimelineReset');
+  if (rb) rb.disabled = !on;
+  if (!on) {
+    out.textContent = '—';
+    hint.innerHTML = st
+      ? (T && T.dataError
+        ? `<span class="bad">${T.dataError}</span>`
+        : `<span class="dim">本现象无时间轴(带时间轴的:${(T && T.phenomenaWithTimeline || []).join('、') || '无'})</span>`)
+      : '&nbsp;';
+    return;
+  }
+  // 拖动中不回写滑块位置,否则手指会被时钟推着走。
+  if (document.activeElement !== slider) {
+    slider.value = String(Math.round((T.time / Math.max(T.duration, 1e-6)) * 1000));
+  }
+  out.textContent = `${T.time.toFixed(2)}s`;
+  const A = T.applied || {};
+  const f4 = (v) => (Array.isArray(v) ? v.map((x) => (+x).toFixed(2)).join(' ') : '—');
+  const flash = (+A.skyAdditiveIntensity > 1e-6) || (+A.lightAdditiveIntensity > 1e-6);
+  hint.innerHTML = `<span class="${flash ? 'ok' : 'dim'}">时间轴 ${T.time.toFixed(2)}/${T.duration.toFixed(2)}s`
+    + ` · 帧 ${T.frame}/${T.frames} · ${T.playing ? '播' : '停'}</span>`
+    + ` <span class="dim">${T.trackCount} 轨 ${T.clipCount} clip`
+    + `${T.notModelledClips || T.notModelled.length ? ` · 未做 ${T.notModelled.length} 轨/${T.notModelledClips} clip` : ''}</span>`
+    + `<br><span class="${flash ? 'ok' : 'dim'}">天空附加 ${(+A.skyAdditiveIntensity || 0).toFixed(3)}`
+    + ` [${f4(A.skyAdditiveColor)}] · 光附加 ${(+A.lightAdditiveIntensity || 0).toFixed(3)}`
+    + ` [${f4(A.lightAdditiveColor)}]</span>`;
 }
 
 function syncEnvUI() {
@@ -285,6 +337,19 @@ function syncEnvUI() {
         + `${st.usedOverride ? ' · 覆盖' : ''}${st.homeAngleUsed ? ' · 家园角' : ''}</span><br>${siteLine}`;
     }
   }
+  const sh = $('envSiteHint');
+  if (sh) {
+    // 室内拼装:哪一级、拼上去几件、各自多少三角。每一件的出处在 status().site.mounted.assembly 里。
+    const m = environment && envOn ? (environment.status().site.mounted || null) : null;
+    if (!m || !m.indoor) sh.innerHTML = '&nbsp;';
+    else {
+      const parts = (m.assembly || []).map((f) => `${f.part}${f.skipped ? '(无几何)' : ` ${f.triangles}`}`);
+      sh.innerHTML = `<span class="ok">室内 lv_${m.level}</span> <span class="dim">${m.levelSource}`
+        + ` · 场景 ${m.files.length} 件共 ${m.triangles} 三角(画 ${m.drawnTriangles})`
+        + `${parts.length ? ` · 拼装:${parts.join('、')}` : ''}</span>`;
+    }
+  }
+  syncTimelineUI();
   const lh = $('lightHint');
   if (lh) {
     lh.innerHTML = envOn
@@ -293,7 +358,7 @@ function syncEnvUI() {
   }
   const ib = $('bEnvIndoor');
   if (ib) ib.disabled = !environment || !envOn;
-  for (const id of ['bEnvParticles', 'bEnvPost', 'bEnvSky', 'bEnvGround', 'selEnvSite']) {
+  for (const id of ['bEnvParticles', 'bEnvPost', 'bEnvSky', 'bEnvGround', 'selEnvSite', 'selEnvLevel']) {
     const el = $(id); if (el) el.disabled = !environment || !envOn;
   }
 }
@@ -1091,6 +1156,31 @@ $('selEnvSite').onchange = async (e) => {
   await environment.setSite(e.target.value);   // 换站点 = 重挂几何 + 重判室内 + 重取两级查找
   syncEnvUI();
 };
+$('selEnvLevel').onchange = async (e) => {
+  if (!environment) return;
+  await environment.setSiteLevel(e.target.value);   // 室内等级下发 = 换扩张模块 + 换可走面,重拼
+  syncEnvUI();
+};
+$('bEnvTimeline').onclick = (e) => {
+  if (!environment) return;
+  const on = !e.target.classList.contains('on');
+  e.target.classList.toggle('on', on);
+  environment.setTimelinePlaying(on);           // 停下来才看得清同一拍(判据也靠它)
+  syncEnvUI();
+};
+$('bEnvTimelineReset').onclick = () => {
+  if (!environment) return;
+  environment.resetTimeline();
+  syncEnvUI();
+};
+$('rEnvTimeline').oninput = (e) => {
+  if (!environment) return;
+  const T = environment.status().timeline;
+  if (!T.has) return;
+  // 滑块是 0..1000 的整数格,换算成秒;拖动即定位(播放中拖也生效,松手后时钟从这里继续)。
+  environment.setTimelineTime((+e.target.value / 1000) * T.duration);
+  syncTimelineUI();
+};
 $('scnFilter').oninput = (e) => applyFilter('scenarios', 'scnCount', e.target.value);
 $('selPerfMode').onchange = (e) => {
   perfMode = e.target.value;
@@ -1133,6 +1223,8 @@ function refreshHud(dt) {
   hudT += dt;
   if (hudT < 0.25) return;
   fps = fpsN / Math.max(fpsAcc, 1e-6); fpsAcc = 0; fpsN = 0; hudT = 0;
+  // 时间轴那一行每 0.25 秒刷一次:它是**在跑的**,只在点面板时刷就永远看着像停着。
+  syncTimelineUI();
   if (!current) return;
   const info = lastFrameInfo;   // 上一帧的整帧统计(见 lastFrameInfo 的注释)
   const cs = current.cloth ? current.cloth.stats() : null;
@@ -1175,7 +1267,11 @@ function refreshHud(dt) {
         + `${st.site.key}${st.site.indoor ? '(室内)' : ''}${st.usedOverride ? ' 覆盖' : ''}`
         + `${st.fadingFrom ? ` 淡化 ${(st.fade * 100).toFixed(0)}%` : ''}`
         + ` · 雾 ${st.fog.enabled ? 'on' : 'off'} · 粒子 ${st.particles.live}/${st.particles.emitters} 发`
-        + `${st.post.enabled ? ` · 后处理 ${st.post.passes.length} 趟` : ' · 后处理关'}</span>${skipped}${sup}`;
+        + `${st.post.enabled ? ` · 后处理 ${st.post.passes.length} 趟` : ' · 后处理关'}`
+        + `${st.timeline.has
+          ? ` · 时间轴 ${st.timeline.time.toFixed(2)}s(帧 ${st.timeline.frame})`
+            + `${(st.timeline.applied && +st.timeline.applied.skyAdditiveIntensity > 1e-6) ? ' 闪' : ''}`
+          : ''}</span>${skipped}${sup}`;
     })())
   );
 }
