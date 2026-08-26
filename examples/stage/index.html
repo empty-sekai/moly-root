@@ -124,52 +124,49 @@
             <div><dt>家具目标</dt><dd id="fixture-name">—</dd></div>
             <div><dt>attach</dt><dd id="attach-name">—</dd></div>
             <div><dt>clip</dt><dd id="clip-count">0</dd></div>
-            <div><dt>材质</dt><dd id="material-facts">—</dd></div>
-            <div><dt>着色器路由</dt><dd id="shader-facts">—</dd></div>
-            <div><dt>通道上链</dt><dd id="binding-facts">—</dd></div>
-            <div><dt>身体通道</dt><dd id="body-facts">—</dd></div>
             <div><dt>对话</dt><dd id="talk-facts">—</dd></div>
             <div><dt>对话节奏</dt><dd id="talk-timing">—</dd></div>
-            <div><dt>外插</dt><dd id="extrapolation-facts">—</dd></div>
-            <div><dt>可播性</dt><dd id="playable-facts">—</dd></div>
             <div><dt>声音</dt><dd id="audio-facts">读取 phenomena/audio/…</dd></div>
             <div><dt>环境</dt><dd id="env-note">读取 phenomena/…</dd></div>
           </dl>
           <p class="muted" id="recommendation-note"></p>
         </section>
 
-        <section class="panel-section">
-          <div class="section-heading">
-            <h2>上链残差</h2>
-            <span class="muted">绑不上的通道 / 不可播的 clip</span>
-          </div>
+        <!-- 取证数字默认收起。它们不是产品表面，是判据面：要查的时候一定要在，
+             但不该在每个来看演出的人眼前占掉三分之一屏。 -->
+        <details class="panel-details">
+          <summary><h2>渲染与上链</h2><span class="muted">材质 · 着色器 · 通道</span></summary>
+          <dl class="facts">
+            <div><dt>材质</dt><dd id="material-facts">—</dd></div>
+            <div><dt>着色器路由</dt><dd id="shader-facts">—</dd></div>
+            <div><dt>通道上链</dt><dd id="binding-facts">—</dd></div>
+            <div><dt>身体通道</dt><dd id="body-facts">—</dd></div>
+            <div><dt>外插</dt><dd id="extrapolation-facts">—</dd></div>
+            <div><dt>可播性</dt><dd id="playable-facts">—</dd></div>
+          </dl>
+        </details>
+
+        <details class="panel-details">
+          <summary><h2>上链残差</h2><span class="muted">绑不上的通道 / 不可播的 clip</span></summary>
           <pre id="binding-detail" class="track-tree">等待选中演出…</pre>
-        </section>
+        </details>
 
-        <section class="panel-section">
-          <div class="section-heading">
-            <h2>轨树</h2>
-            <span class="muted">原始节点</span>
-          </div>
+        <details class="panel-details">
+          <summary><h2>轨树</h2><span class="muted">原始节点</span></summary>
           <pre id="track-tree" class="track-tree">等待数据…</pre>
-        </section>
+        </details>
 
-        <section class="panel-section selfcheck-section">
-          <div class="section-heading">
-            <h2>机械自检</h2>
-            <span id="selfcheck-summary" class="muted">进行中…</span>
-          </div>
+        <details class="panel-details" open>
+          <summary><h2>机械自检</h2><span id="selfcheck-summary" class="muted">进行中…</span></summary>
           <div id="selfcheck" aria-live="polite"></div>
-        </section>
-        <section class="panel-section export-section">
-          <div class="section-heading">
-            <h2>动图导出</h2>
-            <span id="export-summary" class="muted">待导出</span>
-          </div>
+        </details>
+
+        <details class="panel-details">
+          <summary><h2>动图导出</h2><span id="export-summary" class="muted">待导出</span></summary>
           <div id="export-meta" class="muted">透明采样点待导出</div>
           <div id="export-check" aria-live="polite"></div>
           <div id="export-downloads" class="export-downloads"></div>
-        </section>
+        </details>
       </aside>
     </main>
 
