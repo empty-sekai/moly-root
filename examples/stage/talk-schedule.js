@@ -125,3 +125,93 @@ export function textAt(schedule, time) {
   }
   return current;
 }
+
+/**
+ * 时钟 `time` 处生效的口型 / 眼型图案名。
+ *
+ * 数据里 `change_npc_mouth` 带 `pattern: "smile01"` 与 `alias:
+ * "LipSyncPresets.smile01"` —— **图案名是有的**。这与演出时间轴上那条路不同：
+ * 那边的 `ChangeLipSyncPreset` clip 只有 `m_Asset` 指针、产物里没有名字，所以逐 clip
+ * 的表情至今不接。**对话这条路有名字，所以能接。** 两条路不要混着说。
+ */
+export function facialAt(schedule, time) {
+  let mouth = null;
+  let eye = null;
+  for (const event of schedule?.events || []) {
+    if (event.at > time) break;
+    if (event.op === 'change_npc_mouth'
+        || event.op === 'change_fixture_character_mouth') mouth = event;
+    if (event.op === 'change_npc_eye'
+        || event.op === 'change_fixture_character_eye') eye = event;
+  }
+  return { mouth, eye };
+}
+
+/**
+ * 时钟 `time` 处有没有一句台词正在说 —— 口型动不动就看这个。
+ *
+ * `voice` 算子带 `cue` 与 `who`，**不带时长**，而语音 cue 也不在产物里
+ * （音频产物是 12 个 bgm 包 + 1 个 se 包，没有 voice 包）。所以说话窗口的**结束**
+ * 只能从时间表的结构推：一句台词说到该段的 `wait_click`（玩家点掉这一行）为止，
+ * 没有 `wait_click` 就说到下一个 `voice` 或表尾。
+ *
+ * **这是结构推导，不是编出来的时长**，而且 `wait_click` 自己的秒数是替身
+ * （`WAIT_CLICK_STAND_IN`），所以窗口长度里含替身成分 —— 界面必须照实说，
+ * 不能让「口型动了」看着像时长也对了。
+ */
+export function speakingAt(schedule, time) {
+  const events = schedule?.events || [];
+  let active = null;
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i];
+    if (event.op !== 'voice' && event.op !== 'fixture_voice') continue;
+    if (event.at > time) break;
+    let end = schedule.duration;
+    for (let j = i + 1; j < events.length; j += 1) {
+      const later = events[j];
+      if (later.op === 'wait_click' || later.op === 'voice'
+          || later.op === 'fixture_voice') { end = later.at; break; }
+    }
+    active = time < end ? { event, from: event.at, to: end } : null;
+  }
+  return active;
+}
+
+/**
+ * 时间表里每个算子有没有消费方 —— **这一张表是为了不让 `unscheduled` 变成假绿。**
+ *
+ * `unscheduled` 数的是「不在 `SCHEDULED_OPS` 词表里的算子」，而进了词表只意味着
+ * 它带时间戳落进了 `events`，**不意味着有人读它**。于是 talk #530 报
+ * `unscheduled: {}`，读起来像「全都编排了」，实际上九族算子里只有两族有消费方 ——
+ * 名字承诺过头，正是判据一。
+ *
+ * 消费方名单**逐条写死**，不用通配：写死了才能在加了新读者时必须来改这里，
+ * 也才能让「有几族没人读」是个数而不是沉默。
+ */
+export const CONSUMED_OPS = new Set([
+  'change_animation', 'play_animation',   // animationAt
+  'text',                                 // textAt
+  'change_npc_mouth', 'change_fixture_character_mouth',   // facialAt
+  'change_npc_eye', 'change_fixture_character_eye',       // facialAt
+  'voice', 'fixture_voice',               // speakingAt
+  'wait_time', 'wait_time_on_auto_mode', 'wait_click',    // 推进时钟
+]);
+
+export function consumerCoverage(schedule) {
+  const consumed = new Map();
+  const scheduledNoReader = new Map();
+  for (const event of schedule?.events || []) {
+    const bucket = CONSUMED_OPS.has(event.op) ? consumed : scheduledNoReader;
+    bucket.set(event.op, (bucket.get(event.op) || 0) + 1);
+  }
+  const total = (schedule?.events || []).length;
+  const read = [...consumed.values()].reduce((sum, n) => sum + n, 0);
+  return {
+    events: total,
+    consumed: read,
+    scheduledNoReader: total - read,
+    byOpConsumed: Object.fromEntries([...consumed].sort()),
+    byOpNoReader: Object.fromEntries([...scheduledNoReader].sort()),
+    unscheduled: schedule?.unscheduled || {},
+  };
+}

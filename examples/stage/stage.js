@@ -86,6 +86,9 @@ const state = {
   talkMissing: [],
   talkAction: null,
   talkMotion: '',
+  talkFacialKey: '',
+  talkFacialRows: null,
+  talkSpeaking: false,
   talkStatus: '未读取',
   env: { environment: null, on: false, error: '', failed: false, name: '' },
 };
@@ -681,6 +684,39 @@ function updateTalkMotion() {
   const family = wanted ? state.talkFamilies.get(wanted) : null;
   if (!family) return;
   state.talkSegments.playFamily(family);
+}
+
+/**
+ * 时钟处的口型与眼型：图案由 `change_npc_mouth` / `change_npc_eye` 给，
+ * 「有没有在说话」由 `voice` 给。
+ *
+ * 这两步以前都没有消费方，于是嘴永远停在**闭格**：`FacialController` 的静止律
+ * 是 `if (!this.speaking) { _setMouth(row.close); return; }` —— 驱动那一步一直在，
+ * 也一直被调用，只是**没人告诉它有人在说话**，所以它每次都正确地取闭格。
+ * 全仓 `setSpeaking` 原来只有 viewer 的两个调用点，stage 一个都没有。
+ */
+function updateTalkFacial() {
+  const facial = state.character?.facial;
+  if (!facial || !state.talkSchedule) return;
+  const tables = state.tables;
+  const { mouth, eye } = Talk.facialAt(state.talkSchedule, state.timelineTime);
+  const key = `${mouth?.pattern || ''}|${eye?.pattern || ''}`;
+  if (key !== state.talkFacialKey && tables) {
+    state.talkFacialKey = key;
+    const unitId = state.character.unitId;
+    const rows = Facial.patternsFor(unitId, tables, {
+      eye: eye?.pattern || (state.character.rig && state.character.rig.defaultEye),
+      mouth: mouth?.pattern || (state.character.rig && state.character.rig.defaultMouth),
+    });
+    facial.setPatterns(rows.eyeRow, rows.lipRow);
+    state.talkFacialRows = rows;
+  }
+  const speaking = Talk.speakingAt(state.talkSchedule, state.timelineTime);
+  const on = !!speaking;
+  if (on !== state.talkSpeaking) {
+    state.talkSpeaking = on;
+    facial.setSpeaking(on);
+  }
 }
 
 /** 对话行与头顶 tweet：形态一只有 HUD，形态二有底部对话窗。 */
@@ -1301,6 +1337,7 @@ function updateOverlay() {
   // timeline 上的 TextTrack 名字，并说明那只是轨名不是台词。
   if (state.talkSchedule) {
     updateTalkOverlay();
+    updateTalkFacial();
     return;
   }
   $('tweet-hud').textContent = `${performance.entry.timeline} · ${state.timelineTime.toFixed(2)} s`;
@@ -1661,6 +1698,83 @@ window.__stageProbe = {
    * 而一个各分量都 <1 的乘法**不可能**让像素变亮。那说明量错了搜索空间：
    * **要测的是家具，就只动家具那一路。**
    */
+  /**
+   * 口型到底动没动 —— 判据是**格号在整条对话上取到几个不同值**，不是「我接了线」。
+   * 接线之前这个数恒为 1（永远闭格）。同时报出说话窗口与图案切换次数，
+   * 好把「没说话」「说了但格号不变」「格号在变」三种分开。
+   */
+  mouthSweep(steps = 120) {
+    const facial = state.character?.facial;
+    const schedule = state.talkSchedule;
+    if (!facial || !schedule) return null;
+    const was = state.timelineTime;
+    // 状态机的开合节拍走**真实时钟**（`performance.now()`），而这个扫描是紧循环，
+    // 真实时钟几乎不走 —— 于是相位永远翻不到「开」，扫出来的两个格号
+    // **全是闭格**（`normal02.close = 1`、`smile01.close = 5`），看着像通了其实没张嘴。
+    // 差一点就报成假绿。律是按时间的，探针就得供时间：把实例的 `now` 换成跟着
+    // 时间轴走的虚拟钟，扫完还回去。
+    const realNow = facial.now;
+    const sweep = (drive) => {
+      const cells = new Map();
+      let speakingFrames = 0;
+      let virtualMs = 0;
+      facial.now = () => virtualMs;
+      if (!drive) { facial.setSpeaking(false); state.talkSpeaking = false; }
+      for (let i = 0; i <= steps; i += 1) {
+        virtualMs = (schedule.duration * 1000 * i) / steps;
+        state.timelineTime = (schedule.duration * i) / steps;
+        if (drive) updateTalkFacial();
+        facial.update();
+        cells.set(facial.currentMouthIndex,
+                  (cells.get(facial.currentMouthIndex) || 0) + 1);
+        if (facial.speaking) speakingFrames += 1;
+      }
+      facial.now = realNow;
+      return { cells, speakingFrames };
+    };
+    const control = sweep(false);
+    const driven = sweep(true);
+    const patterns = new Set();
+    for (let i = 0; i <= steps; i += 1) {
+      const { mouth } = Talk.facialAt(schedule, (schedule.duration * i) / steps);
+      if (mouth?.pattern) patterns.add(mouth.pattern);
+    }
+    // 开格/闭格的格号从表里取，不从观测里猜 —— 「看到两个不同格号」和「张开过」
+    // 是两回事：`normal02.close = 1` 与 `smile01.close = 5` 就是两个不同的闭格。
+    const tables = state.tables;
+    const openCells = new Set();
+    const closeCells = new Set();
+    for (const name of patterns) {
+      const row = tables?.lip?.get(name);
+      if (!row) continue;
+      openCells.add(row.open);
+      closeCells.add(row.close);
+    }
+    state.timelineTime = was;
+    updateTalkFacial();
+    return {
+      duration: schedule.duration,
+      samples: steps + 1,
+      // 判据不是「取到几个不同格号」——两个闭格也是两个。**要点名开格出现过。**
+      // 对照（驱动关掉）必须落在 1 且那 1 个是闭格。
+      distinctMouthCells: driven.cells.size,
+      cellHistogram: Object.fromEntries([...driven.cells].sort((a, b) => a[0] - b[0])),
+      openCellsSeen: [...driven.cells.keys()].filter((c) => openCells.has(c)),
+      closeCellsSeen: [...driven.cells.keys()].filter((c) => closeCells.has(c)),
+      speakingSamples: driven.speakingFrames,
+      controlDistinctCells: control.cells.size,
+      controlHistogram: Object.fromEntries([...control.cells].sort((a, b) => a[0] - b[0])),
+      controlOpenCellsSeen: [...control.cells.keys()].filter((c) => openCells.has(c)),
+      controlSpeakingSamples: control.speakingFrames,
+      patterns: [...patterns],
+      patternCells: Object.fromEntries([...patterns].map((name) => {
+        const row = tables?.lip?.get(name);
+        return [name, row ? { open: row.open, close: row.close } : null];
+      })),
+      lipRow: state.talkFacialRows?.lipRow || null,
+      coverage: Talk.consumerCoverage(schedule),
+    };
+  },
   setUsePhenomena(value) {
     const materials = (state.fixture?.report?.materials) || [];
     let touched = 0;
