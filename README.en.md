@@ -10,6 +10,14 @@
 
 The AssetBundleInfoNew package manifest must be supplied by the user. This repository neither bundles nor distributes any game data.
 
+## Live preview
+
+<https://chara.mizore.art/> is a hosted build of `examples/viewer/`: open it in a browser to look at characters, the shared motion library, facial expressions, overhead emotes and the weather phenomena without running an extraction locally first.
+
+That page runs against **already-extracted output**, prepared by whoever deploys it. **This repository neither bundles nor distributes game data**; the preview is hosted separately from the repository.
+
+`examples/stage/` (the performance preview) **has no hosted instance** — run it locally with the steps below.
+
 ## Install
 
 ```sh
