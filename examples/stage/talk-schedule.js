@@ -148,6 +148,87 @@ export function facialAt(schedule, time) {
 }
 
 /**
+ * 时钟 `time` 处生效的演出时间轴表情预设。
+ *
+ * 每个 clip 的 `m_Start` 是相对整条时间轴的绝对秒数；预设行不在 clip 内，
+ * 而是在同一文档的 `assets[assetRef].fields` 中。时间窗严格是 `[start, end)`，
+ * 多条重叠时取开始时间最大的那条，和动画覆盖语义一致。
+ */
+export function timelineFacialAt(clipsDoc, trackClass, time) {
+  if (trackClass !== 'ChangeLipSyncPresetTrack'
+      && trackClass !== 'ChangeEyePresetTrack') return null;
+  const now = Number(time);
+  if (!Number.isFinite(now)) return null;
+  const tracks = Array.isArray(clipsDoc?.tracks) ? clipsDoc.tracks : [];
+  let active = null;
+  for (const track of tracks) {
+    if (track?.class !== trackClass || !Array.isArray(track.clips)) continue;
+    for (const clip of track.clips) {
+      const clipStart = Number(clip?.m_Start);
+      const clipDuration = Number(clip?.m_Duration);
+      if (!Number.isFinite(clipStart) || !Number.isFinite(clipDuration)
+          || clipDuration <= 0 || now < clipStart
+          || now >= clipStart + clipDuration) continue;
+      if (!active || clipStart >= active.clipStart) {
+        active = { clip, clipStart, clipDuration };
+      }
+    }
+  }
+  if (!active) return null;
+
+  const assetRef = Number(active.clip.assetRef);
+  if (!Number.isInteger(assetRef) || assetRef < 0
+      || !Array.isArray(clipsDoc?.assets)) return null;
+  const asset = clipsDoc.assets[assetRef];
+  const fields = asset?.fields;
+  if (!fields || typeof fields !== 'object') return null;
+  const listKey = trackClass === 'ChangeLipSyncPresetTrack'
+    ? 'LipSyncDataList' : 'EyeDataList';
+  const rows = fields[listKey];
+  const rowIndex = Number(fields.SelectIndex);
+  if (!Array.isArray(rows) || !Number.isInteger(rowIndex)
+      || rowIndex < 0 || rowIndex >= rows.length) return null;
+  const source = rows[rowIndex];
+  if (!source || typeof source !== 'object') return null;
+
+  const numberOf = (value) => {
+    const number = Number(value);
+    return Number.isInteger(number) ? number : null;
+  };
+  let row;
+  if (trackClass === 'ChangeLipSyncPresetTrack') {
+    const open = numberOf(source.OpenLipSyncIndex ?? source.open);
+    const middleIndex = numberOf(source.MiddleLipSyncIndex ?? source.middle ?? -1);
+    const close = numberOf(source.CloseLipSyncIndex ?? source.close);
+    if (open === null || middleIndex === null || close === null) return null;
+    row = {
+      name: source.Name ?? source.name ?? '',
+      open,
+      middle: middleIndex === -1 ? null : middleIndex,
+      close,
+    };
+  } else {
+    const open = numberOf(source.OpenEyeIndex ?? source.open);
+    const close = numberOf(source.CloseEyeIndex ?? source.close);
+    if (open === null || close === null) return null;
+    row = {
+      pattern: source.PatternName ?? source.pattern ?? source.name ?? '',
+      open,
+      close,
+      blink: !!(source.BlinkEnabled ?? source.blink),
+    };
+  }
+  return {
+    row,
+    rowIndex,
+    clipStart: active.clipStart,
+    clipDuration: active.clipDuration,
+    assetRef,
+    assetName: active.clip.assetName ?? asset.assetName ?? null,
+  };
+}
+
+/**
  * 时钟 `time` 处有没有一句台词正在说 —— 口型动不动就看这个。
  *
  * `voice` 算子带 `cue` 与 `who`，**不带时长**，而语音 cue 也不在产物里
