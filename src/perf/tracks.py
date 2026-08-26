@@ -35,6 +35,12 @@ UnityPy.config.FALLBACK_UNITY_VERSION = "2022.3.62f3"
 TIMELINE_CLASS = "TimelineAsset"
 GROUP_CLASS = "GroupTrack"
 
+# ``TimelineAsset``'s own serialised settings, as opposed to its track list.
+# Named explicitly: ``m_Tracks`` and ``m_MarkerTrack`` are pointers and are
+# traversed instead, and a wildcard here would swallow them.
+TIMELINE_SETTING_FIELDS = ("m_Version", "m_DurationMode", "m_FixedDuration",
+                           "m_EditorSettings")
+
 
 def _is_track(tree):
     """True when a MonoBehaviour's typetree carries the TrackAsset base fields."""
@@ -139,6 +145,20 @@ def _walk_package(store, name, out):
     for trecord, tpid in timelines:
         ttree = trecord.tree(tpid)
         timeline = {"name": ttree.get("m_Name", ""), "tracks": [], "marker": None}
+        # The asset's own settings, not just its track list.  `m_DurationMode`
+        # is the one that decides what a timeline's length *is*: BasedOnClips=0
+        # takes it from the clip extents, FixedLength=1 takes it from
+        # `m_FixedDuration`, and a consumer computing length from clips is only
+        # right in the first case.  Measured over this corpus: 774 of 774 are
+        # BasedOnClips and none is FixedLength, so computing from clips happens
+        # to be correct here -- **but that is a fact about the data, not a
+        # property of the format**, and it was being assumed rather than read.
+        # Carrying it means a corpus that does use a fixed length cannot pass
+        # unnoticed.
+        settings = {key: value for key, value in ttree.items()
+                    if key in TIMELINE_SETTING_FIELDS}
+        if settings:
+            timeline["settings"] = settings
         for pointer in ttree.get("m_Tracks") or []:
             target = _resolve(store, trecord, pointer)
             if target is None:
