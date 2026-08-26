@@ -221,8 +221,8 @@ function updateTalkFacts() {
     ? `图案 ${row.name}（开 ${row.open} / 闭 ${row.close}）· 当前格 `
       + `${facial.currentMouthIndex}`
       + ` · ${speaking ? '说话中' : '静止'}`
-      + ' · ⚠ 开合走真实时钟，而游戏用时间轴 clip 切、不读时钟：'
-      + '**是另一种机制，不是近似**（那些 clip 的字段尚未提取）'
+      + ' · ⚠ 开合由定时相位推动；游戏读**音频振幅**（CriAtomExOutputAnalyzer）。'
+      + '驱动源不同,不是精度差别 —— 语音 cue 不在产物里,没有波形就没有振幅。'
     : '未驱动');
 }
 
@@ -709,14 +709,21 @@ function updateTalkMotion() {
  * 也一直被调用，只是**没人告诉它有人在说话**，所以它每次都正确地取闭格。
  * 全仓 `setSpeaking` 原来只有 viewer 的两个调用点，stage 一个都没有。
  *
- * ⚠ **开合的节拍是另一种机制，不是近似。** 游戏用时间轴上的
- * `ChangeLipSyncStateClip` / `ChangeLipSyncPresetClip` 切口型，**不读任何时钟**
- * （`LipSync` 那族源文件读时钟的 0 个，同空间阳性对照 266 个文件读时钟）；
- * 走真实时钟的是**眨眼**。这里借用 `FacialController` 的真实时钟相位机把嘴推开，
- * 是因为那 3060 个 `ChangeLipSyncPresetClip` 的 `LipSyncDataList` / `SelectIndex`
- * **产物一个字段都没提**（逐类比对：值字段 3、携带 0），所以时间轴那条路无从驱动。
- * ⇒ 写成「精度略差」是错的：**机制不同**，嘴会动但动的时机与游戏无关。
- * 界面上照此标明，补齐提取后替掉。
+ * ⚠ **开合的驱动源与游戏不同，不是精度差别。** 游戏的口型开合读**音频振幅**：
+ * `FixtureController.StartLipSync(CriAtomExOutputAnalyzer)` →
+ * `MotionController.UpdateLipSync()` 每帧从 CriWare 的输出分析器取电平算张口量。
+ * 所以 `ChangeLipSyncStateTrack` 在本语料里 606 条轨、0 个 clip —— **那个 0 是对的**，
+ * 开合不是作者写在时间轴上的东西。（同一个 `MotionController` 里**眨眼**才读真实时钟，
+ * `realtimeSinceStartup` 5 处全在眨眼方法里：一个控制器两种驱动源，别用一套套两件事。）
+ *
+ * 本页用定时相位把嘴推开，是因为**语音 cue 不在产物里**（音频产物是 12 个 bgm 包 + 1 个
+ * se 包，没有 voice 包），没有波形就没有振幅。
+ * ⇒ 推论要说清：**游戏里没人说话时嘴本来就不动**，所以「嘴不动」有可能是忠实的。
+ * 本页选择让它动，是为了让「对话在推进」在画面上看得见，**代价是驱动源与游戏不同**。
+ * 忠实路径需要两样：语音音频进产物 + 一个振幅分析器。
+ *
+ * 另：预设表里 `MiddleLipSyncIndex` 常为 `-1`，**别当索引用**；它是否被游戏消费尚未定
+ * （伪码里字段名不可见，按名字搜三个索引全 0 命中，那是搜索方法的限制不是结论）。
  */
 function updateTalkFacial() {
   const facial = state.character?.facial;
@@ -942,7 +949,16 @@ function placeCharacter(attach) {
 }
 
 // 取景方向（单位向量，斜上前方）与留白系数。距离**不**用固定倍数算，见下。
-const FRAME_DIR = new THREE.Vector3(0.62, 0.38, 0.83).normalize();
+//
+// 仰角必须**小于竖直半视场角**，否则地平线掉出画外。这条是算术不是审美：
+// 相机从 `center + dir*distance` 看向 `center`，视轴因此俯视 `asin(dir.y/|dir|)`；
+// 地平线在视轴上方同样的角度处，而画面上下各只有 `fov/2 = 17.5°`。
+// 头一版 `dir.y = 0.38` ⇒ 仰角 **20.1° > 17.5°** ⇒ **地平线恒在画外**，
+// 于是天空只从地形缝隙里漏出 1559 个像素（视口的 0.40%），看起来像「没有天空」。
+// 现在 `dir.y = 0.22` ⇒ 仰角 **12.1° < 17.5°**，地平线落在画面上三分之一处。
+//
+// ⚠ 改 `camera.fov` 就得重算这个数：两者是同一个不等式的两端。
+const FRAME_DIR = new THREE.Vector3(0.62, 0.22, 0.83).normalize();
 const FRAME_MARGIN = 1.12;
 
 /** 上一次取景的包围盒与包围球，供 `framingExtent()` 复核。 */
@@ -970,12 +986,69 @@ function frameObject(...objects) {
   const distance = (radius / Math.sin(Math.min(half, halfH))) * FRAME_MARGIN;
   camera.position.copy(center).addScaledVector(FRAME_DIR, distance);
   camera.near = Math.max(0.01, distance / 200);
-  camera.far = Math.max(100, distance * 20);
+  // 远平面必须装得下**天空穹顶**，而穹顶的尺度与被摄主体无关。
+  // 原来是 `max(100, distance*20)`：家具只有一米上下 ⇒ distance≈3.7 ⇒ 远平面 100，
+  // 而穹顶包围球半径实测 **612.56** 且圆心就在相机上 ⇒ **整个天空落在远平面之外被裁掉**。
+  // 画面上的表现是「天空只从地形缝隙里漏出 0.4% 的像素」，看起来像缺件。
+  // 所以远平面从场景里取：有穹顶就按它的半径给，没有才回落到主体尺度。
+  const sky = state.env.environment?.sky?.mesh;
+  let reach = distance * 20;
+  if (sky?.geometry) {
+    sky.geometry.computeBoundingSphere();
+    const sphere = sky.geometry.boundingSphere;
+    if (sphere) {
+      const scale = Math.max(sky.scale.x, sky.scale.y, sky.scale.z) || 1;
+      const centre = sky.getWorldPosition(new THREE.Vector3());
+      reach = Math.max(reach,
+                       centre.distanceTo(camera.position) + sphere.radius * scale);
+    }
+  }
+  camera.far = Math.max(100, reach * 1.2);
   camera.updateProjectionMatrix();
   controls.target.copy(center);
   controls.update();
   framedSphere = new THREE.Sphere(center, radius);
   framedBox = box.clone();
+}
+
+/**
+ * 取景两档：**主体**（贴住家具与角色）与**全景**（退到能看见站点与天空）。
+ *
+ * 为什么需要两档，是量出来的：从贴住主体的机位隐藏天空只改变 **1.50%** 的像素，
+ * 把相机抬到 (80,220,80) 平视再隐藏，改变 **72.46%** —— 同一场景、同一帧，只动了相机。
+ * ⇒ 「缺天空」不是缺件、不是远平面裁剪、也不是雾，**是站在一米高的沙发旁看不见天**。
+ * 演出预览默认该看演出，所以主体档是默认；要看环境就切全景。
+ */
+const VIEW_MODES = ['subject', 'panorama'];
+let viewMode = 'subject';
+
+function frameSite() {
+  const sky = state.env.environment?.sky?.mesh;
+  const target = new THREE.Vector3(0, 0, 0);
+  let radius = 40;
+  if (sky?.geometry) {
+    sky.geometry.computeBoundingSphere();
+    const sphere = sky.geometry.boundingSphere;
+    if (sphere) radius = Math.max(radius, sphere.radius * 0.22);
+  }
+  // 全景是**看向地平线**，不是俯瞰：仰角压到 6°，让天空占住画面上半。
+  const dir = new THREE.Vector3(0.70, 0.11, 0.70).normalize();
+  camera.position.copy(target).addScaledVector(dir, radius);
+  camera.position.y = Math.max(camera.position.y, radius * 0.10);
+  camera.near = Math.max(0.05, radius / 500);
+  camera.far = Math.max(camera.far, radius * 30);
+  camera.updateProjectionMatrix();
+  controls.target.copy(target);
+  controls.update();
+}
+
+function setViewMode(mode) {
+  viewMode = VIEW_MODES.includes(mode) ? mode : 'subject';
+  for (const button of document.querySelectorAll('[data-view]')) {
+    button.classList.toggle('is-active', button.dataset.view === viewMode);
+  }
+  if (viewMode === 'panorama') frameSite();
+  else frameObject(state.fixture?.root, state.character?.root);
 }
 
 /**
@@ -1028,6 +1101,7 @@ async function bootEnvironment() {
   // 取证用：天空/站点的状态归 Environment 管，本页不自己建。暴露它才能在无头
   // 驱动里问「没天空」是哪一种：站点没加载 / 室内（合法不画）/ 网格缺失。
   window.__stageEnv = environment;
+  window.__stageCam = camera;
   const select = $('env-select');
   if (select) {
     select.innerHTML = '';
@@ -1260,7 +1334,8 @@ async function applyLane(lane) {
   );
   state.performance.attach = attach;
   const placement = placeCharacter(attach);
-  frameObject(state.fixture?.root, state.character?.root);
+  if (viewMode === 'panorama') frameSite();
+  else frameObject(state.fixture?.root, state.character?.root);
   // 动作库要绑到角色骨架上，所以放在角色就位、mixer 建好之后。
   await applyTalk(state.talkPick || null);
   if (token !== state.runToken) return;
@@ -1540,6 +1615,9 @@ async function boot() {
     state.audio?.stop();
     audioReadout();
   });
+  for (const button of document.querySelectorAll('[data-view]')) {
+    button.addEventListener('click', () => setViewMode(button.dataset.view));
+  }
   $('audio-volume')?.addEventListener('input', (event) => {
     state.audio?.setVolume(event.target.value);
   });
@@ -1696,6 +1774,7 @@ window.__stageProbe = {
     return state.timelineTime;
   },
   framing: () => framingExtent(),
+  viewMode: (mode) => { if (mode) setViewMode(mode); return viewMode; },
   /**
    * 现象光照通道通了没有 —— **这条不能用眼睛判**。
    * 游戏自己的家具暗部很轻（29 个现象实例实测：最暗 0.703、中位约 0.86），

@@ -135,10 +135,13 @@ class _Walker:
         Deduplicated on the field payload **excluding** ``m_Name``: the shipped
         names are ``ChangeLipSyncPresetClip(Clone)(Clone)...`` with a different
         number of suffixes per clip, so including it would make every payload
-        unique and defeat the sharing entirely -- measured 381 objects collapsing
-        to 31 payloads, 1254 KiB to 102 KiB.  The name is not dropped: it rides
-        on the clip as ``assetName``, so nothing is lost and the table still
-        shares.
+        unique and defeat the sharing entirely -- 3060 lip-sync clips would
+        collapse to 3060 entries instead of 590, and 8067 eye clips to 8067
+        instead of 1013.
+
+        **Taking a field out of the equality key is not dropping it.** The name
+        rides on the clip as ``assetName``, one per clip, so every name the
+        asset carried is still in the product and the table still shares.
         """
         if not pointer or not pointer.get("m_PathID"):
             return None, None
