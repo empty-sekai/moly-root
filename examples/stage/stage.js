@@ -16,6 +16,7 @@ import { OrbitControls } from '../viewer/OrbitControls.js';
 import * as Shading from '../viewer/shading.js';
 import * as Facial from '../viewer/facial.js';
 import { Environment, CROSS_FADE_SECONDS } from '../viewer/environment.js';
+import { ENV_GLOBALS, envSet } from '../viewer/envglobals.js';
 import { buildCharacter, updateCharacter } from './character.js';
 import { applyFixtureMaterials, applyPhenomenaLight } from './fixture-materials.js';
 import * as Bind from './anim-bind.js';
@@ -1545,6 +1546,45 @@ window.__stageProbe = {
     return state.timelineTime;
   },
   framing: () => framingExtent(),
+  /**
+   * 现象光照通道通了没有 —— **这条不能用眼睛判**。
+   * 游戏自己的家具暗部很轻（29 个现象实例实测：最暗 0.703、中位约 0.86），
+   * 接对了肉眼多半觉得「没变」，而那正是对的。所以判据是数值的：
+   * 把 `envPhenShadeColor` 强制成单位白（恒等），两态各截一帧，同一像素求比值。
+   * 恒为 1.000 ⇒ 全局量没到；落在 0.70–1.00 ⇒ 通道通了。
+   */
+  phenomenaShade(force) {
+    const materials = (state.fixture?.report?.materials) || [];
+    const readout = materials.map((material) => ({
+      family: material.userData?.stageFamily || '',
+      usePhenomena: material.uniforms?.mUsePhenomenaLighting?.value ?? null,
+      shadeUniform: material.uniforms?.envPhenShadeColor?.value?.toArray?.() ?? null,
+    }));
+    if (Array.isArray(force)) envSet('envPhenShadeColor', force);
+    return {
+      materials: readout,
+      shadeNow: ENV_GLOBALS.envPhenShadeColor?.value?.toArray?.() ?? null,
+    };
+  },
+  /**
+   * 只掐家具那一路的现象光照门（`_UsePhenomenaLighting`），**不动全局量**。
+   *
+   * 为什么不用改全局量来测：`envPhenShadeColor` 是全局的，地面、树、后处理都吃它，
+   * 把它改成白会整幅画一起变，于是比值里混进了后处理的非线性 —— 实测出现过 >1 的比值，
+   * 而一个各分量都 <1 的乘法**不可能**让像素变亮。那说明量错了搜索空间：
+   * **要测的是家具，就只动家具那一路。**
+   */
+  setUsePhenomena(value) {
+    const materials = (state.fixture?.report?.materials) || [];
+    let touched = 0;
+    for (const material of materials) {
+      const uniform = material.uniforms?.mUsePhenomenaLighting;
+      if (!uniform) continue;
+      uniform.value = Number(value);
+      touched += 1;
+    }
+    return { touched, of: materials.length };
+  },
   /** 选片器现在长什么样：分组数、可见条数、筛选后剩几条。 */
   picker(filterText) {
     const select = $('performance-select');
