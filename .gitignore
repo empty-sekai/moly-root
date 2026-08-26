@@ -9,3 +9,10 @@ build/
 
 # Extracted game data (user-provided, never committed)
 local-data/
+
+# Forensics lanes belong to the private outer repo, never here.
+# A subagent whose cwd is this repo will write a *relative* lane path and land it
+# in the wrong tree; one such report carried internal workspace codenames and
+# host paths. Ignoring it here is defence in depth, not the fix -- lane paths
+# must be absolute.
+blueprint/
