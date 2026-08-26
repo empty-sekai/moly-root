@@ -219,9 +219,16 @@ export async function buildCharacter({ gltf, rigRaw, tables, unit, stencilIndex 
     cloth = new Cloth.ClothSystem(root, rig, nodeByIndex);
   }
 
-  // 表情：默认脸 + 眨眼。演出时间轴上的 ChangeEyePreset / ChangeLipSyncPreset clip 只带
-  // m_Asset 指针，产物里没有预设名，所以逐 clip 的表情**不接**（界面照实说明），
-  // 这里只挂默认脸与眨眼，避免一张死脸。
+  // 表情：默认脸 + 眨眼；对话步骤驱动的口型/眼型见 stage.js 的 `updateTalkFacial`。
+  //
+  // 演出**时间轴**上的 `ChangeEyePreset` / `ChangeLipSyncPreset` clip 至今不接,原因要说准:
+  // 不是资产里没有预设名——`ChangeLipSyncPresetClip.LipSyncDataList` 里整张表都在
+  // (实测逐行 `{Name:"smile01", Open:7, Middle:-1, Close:5}`),`ChangeEyePresetClip.EyeDataList`
+  // 同样。**是我们的产物没有提取 clip asset 的字段**:逐类比对 32879 个 MonoBehaviour 后,
+  // 这两类各 3060 / 8067 个对象、值字段 3 个、产物携带 **0**。
+  //
+  // ⇒ 这是**提取缺口**,不是游戏侧缺口。两者排产方向相反,所以措辞不能含糊:
+  // 「产物里没有」写成「资产里没有」会让人去找一个不存在的游戏侧缺陷。
   const unitId = (rig && rig.unitId) || (unit >= 100 ? unit - 100 : unit);
   const { eyeRow, lipRow } = Facial.patternsFor(
     unitId, tables, rig ? { eye: rig.defaultEye, mouth: rig.defaultMouth } : null,

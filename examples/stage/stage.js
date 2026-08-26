@@ -210,6 +210,20 @@ function updateTalkFacts() {
   const missing = body.filter(([, count]) => count === 0).map(([bone]) => bone);
   setText('body-facts', body.map(([bone, count]) => `${bone} ${count}`).join(' · ')
     + (missing.length ? ` · 缺 ${missing.join('/')}` : ''));
+  // 口型：图案与说话窗口都来自数据，**开合节拍是替身** —— 游戏用时间轴 clip 切口型、
+  // 不读时钟，而那些 clip 的字段产物没提。所以这一行必须把「替身」写出来:
+  // 嘴动了就说「接上了」是过头的话。
+  const facial = state.character?.facial;
+  const speaking = state.talkSchedule
+    ? Talk.speakingAt(state.talkSchedule, state.timelineTime) : null;
+  const row = state.talkFacialRows?.lipRow;
+  setText('mouth-facts', facial && row
+    ? `图案 ${row.name}（开 ${row.open} / 闭 ${row.close}）· 当前格 `
+      + `${facial.currentMouthIndex}`
+      + ` · ${speaking ? '说话中' : '静止'}`
+      + ' · ⚠ 开合走真实时钟，而游戏用时间轴 clip 切、不读时钟：'
+      + '**是另一种机制，不是近似**（那些 clip 的字段尚未提取）'
+    : '未驱动');
 }
 
 function updateRenderFacts() {
@@ -694,6 +708,15 @@ function updateTalkMotion() {
  * 是 `if (!this.speaking) { _setMouth(row.close); return; }` —— 驱动那一步一直在，
  * 也一直被调用，只是**没人告诉它有人在说话**，所以它每次都正确地取闭格。
  * 全仓 `setSpeaking` 原来只有 viewer 的两个调用点，stage 一个都没有。
+ *
+ * ⚠ **开合的节拍是另一种机制，不是近似。** 游戏用时间轴上的
+ * `ChangeLipSyncStateClip` / `ChangeLipSyncPresetClip` 切口型，**不读任何时钟**
+ * （`LipSync` 那族源文件读时钟的 0 个，同空间阳性对照 266 个文件读时钟）；
+ * 走真实时钟的是**眨眼**。这里借用 `FacialController` 的真实时钟相位机把嘴推开，
+ * 是因为那 3060 个 `ChangeLipSyncPresetClip` 的 `LipSyncDataList` / `SelectIndex`
+ * **产物一个字段都没提**（逐类比对：值字段 3、携带 0），所以时间轴那条路无从驱动。
+ * ⇒ 写成「精度略差」是错的：**机制不同**，嘴会动但动的时机与游戏无关。
+ * 界面上照此标明，补齐提取后替掉。
  */
 function updateTalkFacial() {
   const facial = state.character?.facial;
@@ -1002,6 +1025,9 @@ async function bootEnvironment() {
     return null;
   }
   state.env.environment = environment;
+  // 取证用：天空/站点的状态归 Environment 管，本页不自己建。暴露它才能在无头
+  // 驱动里问「没天空」是哪一种：站点没加载 / 室内（合法不画）/ 网格缺失。
+  window.__stageEnv = environment;
   const select = $('env-select');
   if (select) {
     select.innerHTML = '';
