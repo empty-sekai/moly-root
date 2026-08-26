@@ -6,9 +6,9 @@ from them.
 
 The planted-violation tests are built on **removing or corrupting the decoded
 data / the resolved hierarchy**, not on "not doing a step" — so they stay red
-even if the exporter later gains a lazy-loading or fallback path (the AGENTS.md
-rule: a control built on "the data is not there" survives a fallback; one built
-on "do not call this" dies under it).  Each red condition answers "**what input
+even if the exporter later gains a lazy-loading or fallback path: a control built
+on "the data is not there" survives a fallback; one built on "do not call this"
+dies under it.  Each red condition answers "**what input
 makes it red**", and each is asserted red before the corresponding fidelity fix
 is applied.
 """

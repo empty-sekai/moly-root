@@ -21,9 +21,8 @@ packed into one integer, which is what bounds a site: 127 cells is 31.75 units f
 the origin, and the closest two sites in the horizontal plane are 200 units apart,
 so no two sites can overlap.
 
-All of this is measured; the anchors are in the repository's forensics notes for
-the site coordinate space, and the numbers are restated in the extracted table so a
-consumer never has to re-derive them.
+All of this is measured rather than assumed, and the numbers are restated in the
+extracted table so a consumer never has to re-derive them.
 """
 
 # Measured constants of the site space.  These are the game's own
