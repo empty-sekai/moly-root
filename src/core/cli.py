@@ -75,6 +75,11 @@ def main(argv=None):
     x.add_argument("--master-url", nargs="?", const="", default=None,
                     help="base URL to append <table>.json to; no value uses the public default base")
     x.add_argument("--master-cache", help="where fetched tables are cached")
+    x.add_argument("--fixture-meshes", action="store_true",
+                   help="also write furniture geometry (fixture-models/), one "
+                        "glTF binary per package; without it that pass is "
+                        "skipped and the passes that need the geometry report "
+                        "it as a missing dependency")
     x.add_argument("--vgmstream", help="path to the external audio decoder "
                                        "(vgmstream-cli), or the directory holding it")
     x.add_argument("--ffmpeg", help="path to ffmpeg, used only to write a compressed copy of each decoded sound")
@@ -186,6 +191,7 @@ def main(argv=None):
         source, cache = _master_source(args)
         report = extract_manifest(args.manifest, args.bundles, args.out, args.unity_version,
                                   master=source, master_cache=cache,
+                                  fixture_meshes=args.fixture_meshes,
                                   vgmstream=args.vgmstream, ffmpeg=args.ffmpeg)
         if args.json:
             print(json.dumps(report, ensure_ascii=False))

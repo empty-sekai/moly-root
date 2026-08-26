@@ -33,6 +33,14 @@ h2 { font-size: 14px; font-weight: 650; }
 
 .toolbar { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; padding: 14px 0; }
 .field-label { display: grid; gap: 4px; min-width: min(620px, 100%); color: var(--muted); font-size: 11px; }
+.picker-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.picker-count { color: var(--accent); font: 11px var(--mono); }
+.picker-row { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 6px; }
+.picker-filter { min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px;
+                 background: var(--panel); color: var(--text); font: inherit; }
+.picker-filter:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.picker-filter::placeholder { color: var(--muted); opacity: .75; }
+.picker-count.is-empty { color: var(--bad); }
 .field-label.compact { min-width: 94px; }
 .field-label.toggle-label { min-width: 64px; }
 .field-label.toggle-label input { min-height: 34px; accent-color: var(--accent); }

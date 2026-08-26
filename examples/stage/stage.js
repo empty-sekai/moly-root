@@ -880,21 +880,71 @@ function placeCharacter(attach) {
   return `按 attach-points 变换摆位（${name || '无节点名'}）`;
 }
 
+// 取景方向（单位向量，斜上前方）与留白系数。距离**不**用固定倍数算，见下。
+const FRAME_DIR = new THREE.Vector3(0.62, 0.38, 0.83).normalize();
+const FRAME_MARGIN = 1.12;
+
+/** 上一次取景的包围盒与包围球，供 `framingExtent()` 复核。 */
+let framedBox = null;
+let framedSphere = null;
+
 function frameObject(...objects) {
   const box = new THREE.Box3();
   for (const object of objects) {
     if (object) box.expandByObject(object);
   }
   if (box.isEmpty()) return;
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-  const radius = Math.max(size.length() * 0.65, 1.2);
-  camera.position.set(center.x + radius * 0.9, center.y + radius * 0.55, center.z + radius * 1.2);
-  camera.near = Math.max(0.01, radius / 100);
-  camera.far = Math.max(100, radius * 20);
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const center = sphere.center.clone();
+  const radius = Math.max(sphere.radius, 0.6);
+  // 距离按视锥解，不用固定倍数。竖直半角是 `fov/2`，水平半角由 aspect 推出，
+  // 两者取**小**的那个（它先切到边），距离 = 半径 / sin(半角)。
+  //
+  // 固定倍数在这里错得很具体：原来的 `radius*(0.9,0.55,1.2)` 距离约 1.6 倍半径，
+  // 而 35° 视场要装下一个球需要 1/sin(17.5°) ≈ 3.33 倍 —— 差了两倍，家具于是被切在
+  // 画外。这不是审美问题：**构图让人以为渲染坏了，和真坏在验收里是一样的成本。**
+  const aspect = Number.isFinite(camera.aspect) && camera.aspect > 0 ? camera.aspect : 1;
+  const half = THREE.MathUtils.degToRad(camera.fov) / 2;
+  const halfH = Math.atan(Math.tan(half) * aspect);
+  const distance = (radius / Math.sin(Math.min(half, halfH))) * FRAME_MARGIN;
+  camera.position.copy(center).addScaledVector(FRAME_DIR, distance);
+  camera.near = Math.max(0.01, distance / 200);
+  camera.far = Math.max(100, distance * 20);
   camera.updateProjectionMatrix();
   controls.target.copy(center);
   controls.update();
+  framedSphere = new THREE.Sphere(center, radius);
+  framedBox = box.clone();
+}
+
+/**
+ * 取景到底装下了没有 —— 把**包围盒**八个角投到 NDC 上量，返回最大的 |x| 与 |y|。
+ * ≤1 就是在画内。**「我改了取景公式」不是证据，这两个数才是。**
+ *
+ * 量的是包围盒的角，不是包围球外接立方体的角。头一版量错了正是这一点：球半径 r 的
+ * 外接立方体，角在 r√3 处，于是一个**装得下**的取景被量成 maxY≈1.64（1.64/√3≈0.95），
+ * 判据自己造出一个不存在的红。量真实几何的角，这个偏差就不存在。
+ */
+function framingExtent() {
+  if (!framedBox || framedBox.isEmpty()) return null;
+  const { min, max } = framedBox;
+  let maxX = 0;
+  let maxY = 0;
+  let behind = 0;
+  for (let i = 0; i < 8; i += 1) {
+    const corner = new THREE.Vector3(
+      (i & 1) ? max.x : min.x,
+      (i & 2) ? max.y : min.y,
+      (i & 4) ? max.z : min.z,
+    );
+    const view = corner.clone().applyMatrix4(camera.matrixWorldInverse);
+    if (view.z > -camera.near) behind += 1;
+    const ndc = corner.project(camera);
+    maxX = Math.max(maxX, Math.abs(ndc.x));
+    maxY = Math.max(maxY, Math.abs(ndc.y));
+  }
+  return { maxX: +maxX.toFixed(4), maxY: +maxY.toFixed(4), behind,
+           fits: maxX <= 1 && maxY <= 1 && behind === 0 };
 }
 
 // ---------------------------------------------------------------- 现象环境（天空/地面/粒子/后处理）
@@ -1002,28 +1052,107 @@ function markLabel(packageName) {
   return hit ? `${hit.mark} ` : '';
 }
 
-function populateCatalog(catalog) {
+// 包名里两族各有一段固定前缀，774 条里每一条都以它开头 —— 也就是说它一个字都不用来
+// 区分谁是谁，却占掉标签的前 30 个字符，把真正能区分的部分挤到看不见的地方。列表里
+// 去掉它，完整包名仍在右栏与 title 上。
+//
+// **只剥认得的前缀**：形状不认得的名字原样显示，不硬切。切错了不会报错，只会让人看着
+// 一个残缺的名字以为产物坏了。
+const PACKAGE_PREFIXES = ['mysekai__fixture_timeline__mdl_', 'mysekai__cut_scene__'];
+
+function shortPackageName(packageName) {
+  for (const prefix of PACKAGE_PREFIXES) {
+    if (packageName.startsWith(prefix)) return packageName.slice(prefix.length);
+  }
+  return packageName;
+}
+
+// 分组键取自 timeline 自己的名字，不是我们贴的分类：`loop_timeline` 383 条、
+// `oneshot_timeline` 109 条、`initialize` 4 条、`template` 59 条，其余 189 个名字各自
+// 具名。所以「循环/单次/初始化/模板/具名」这五档是数据本来的形状，不是硬分的。
+const TIMELINE_KINDS = [
+  { id: 'named', label: '具名演出', test: () => true },
+  { id: 'loop', label: '循环', test: (name) => name === 'loop_timeline' },
+  { id: 'oneshot', label: '单次', test: (name) => name === 'oneshot_timeline' },
+  { id: 'template', label: '模板', test: (name) => name === 'template' },
+  { id: 'initialize', label: '初始化', test: (name) => name === 'initialize' },
+];
+
+function timelineKind(name) {
+  for (const kind of TIMELINE_KINDS) {
+    if (kind.id !== 'named' && kind.test(name)) return kind;
+  }
+  return TIMELINE_KINDS[0];
+}
+
+/** 一条演出在列表里显示成什么，以及拿什么去匹配筛选词。 */
+function pickerEntry(entry) {
+  const short = shortPackageName(entry.package);
+  const tracks = (entry.track?.tracks || []).length;
+  const mark = markLabel(entry.package);
+  const kind = timelineKind(entry.timeline);
+  return {
+    entry,
+    kind,
+    mark,
+    label: `${mark}${short} · ${entry.timeline}${tracks ? `  ${tracks} 轨` : ''}`,
+    // 筛选跟着完整包名走,不跟着缩短后的显示名 —— 否则被剥掉的前缀就搜不到了,
+    // 而使用者不知道界面剥过它。
+    haystack: `${entry.package} ${entry.timeline} ${entry.familyLabel || ''}`.toLowerCase(),
+  };
+}
+
+function renderPicker(filterText = '') {
   const select = $('performance-select');
+  const items = state.pickerItems || [];
+  const needle = filterText.trim().toLowerCase();
+  const shown = needle ? items.filter((item) => item.haystack.includes(needle)) : items;
+  const previous = select.value;
   select.innerHTML = '';
-  // 建议组置顶，其余按**族**分组 —— 两族是两个宿主，界面上不混成一张平表。
+
   const recommended = document.createElement('optgroup');
   recommended.label = '选片建议（先看这些）';
-  const groups = new Map();
-  for (const result of catalog.families || []) {
-    const group = document.createElement('optgroup');
-    group.label = `${result.family.label} · ${result.family.dir}/`;
-    groups.set(result.family.id, group);
+  const buckets = new Map();
+  for (const family of state.catalog?.families || []) {
+    for (const kind of TIMELINE_KINDS) {
+      buckets.set(`${family.family.id}::${kind.id}`, {
+        family: family.family, kind, options: [],
+      });
+    }
   }
-  for (const entry of catalog.entries) {
+  for (const item of shown) {
     const option = document.createElement('option');
-    option.value = entry.key;
-    const mark = markLabel(entry.package);
-    option.textContent = `${mark}${entry.package} / ${entry.timeline}`;
-    (mark ? recommended : groups.get(entry.family) || recommended).appendChild(option);
+    option.value = item.entry.key;
+    option.textContent = item.label;
+    option.title = `${item.entry.package} / ${item.entry.timeline}`;
+    if (item.mark) { recommended.appendChild(option); continue; }
+    const bucket = buckets.get(`${item.entry.family}::${item.kind.id}`);
+    if (bucket) bucket.options.push(option); else recommended.appendChild(option);
   }
   if (recommended.children.length) select.appendChild(recommended);
-  for (const group of groups.values()) if (group.children.length) select.appendChild(group);
-  select.disabled = catalog.entries.length === 0;
+  for (const bucket of buckets.values()) {
+    if (!bucket.options.length) continue;
+    const group = document.createElement('optgroup');
+    group.label = `${bucket.family.label} · ${bucket.kind.label} · ${bucket.options.length} 条`;
+    for (const option of bucket.options) group.appendChild(option);
+    select.appendChild(group);
+  }
+
+  select.disabled = shown.length === 0;
+  if (shown.some((item) => item.entry.key === previous)) select.value = previous;
+  const count = $('performance-count');
+  if (count) {
+    count.textContent = needle
+      ? `${shown.length} / ${items.length} 条`
+      : `${items.length} 条`;
+    count.classList.toggle('is-empty', needle !== '' && shown.length === 0);
+  }
+  return shown.length;
+}
+
+function populateCatalog(catalog) {
+  state.pickerItems = catalog.entries.map(pickerEntry);
+  renderPicker($('performance-filter')?.value || '');
   const missing = (catalog.families || [])
     .filter((result) => !result.listing?.ok)
     .map((result) => `${result.family.dir}/tracks/ 读不到`);
@@ -1261,6 +1390,9 @@ async function boot() {
   resize();
 
   $('performance-select').addEventListener('change', (event) => selectPerformance(event.target.value));
+  $('performance-filter')?.addEventListener('input', (event) => {
+    renderPicker(event.target.value);
+  });
   $('lane-select')?.addEventListener('change', (event) => selectLane(event.target.value));
   $('talk-select')?.addEventListener('change', async (event) => {
     const talk = state.talkChoices.find((item) => String(item.talkId) === event.target.value);
@@ -1411,6 +1543,23 @@ window.__stageProbe = {
     state.timelineTime = Math.max(0, Math.min(Number(time) || 0, state.totalDuration));
     stepFrame(0);
     return state.timelineTime;
+  },
+  framing: () => framingExtent(),
+  /** 选片器现在长什么样：分组数、可见条数、筛选后剩几条。 */
+  picker(filterText) {
+    const select = $('performance-select');
+    if (typeof filterText === 'string') renderPicker(filterText);
+    const groups = [...select.querySelectorAll('optgroup')];
+    return {
+      total: (state.pickerItems || []).length,
+      visible: select.querySelectorAll('option').length,
+      groups: groups.length,
+      groupLabels: groups.map((group) => group.label),
+      longestLabel: [...select.querySelectorAll('option')]
+        .reduce((max, option) => Math.max(max, option.textContent.length), 0),
+      sample: [...select.querySelectorAll('option')].slice(0, 4)
+        .map((option) => option.textContent),
+    };
   },
 };
 

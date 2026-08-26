@@ -18,10 +18,18 @@
 
     <section class="toolbar" aria-label="演出选择与播放控制">
       <label class="field-label" for="performance-select">
-        <span>选择演出</span>
-        <select id="performance-select" disabled>
-          <option>读取 cutscene-timeline/ 与 fixture-timeline/…</option>
-        </select>
+        <span class="picker-head">
+          <span>选择演出</span>
+          <span class="picker-count" id="performance-count">—</span>
+        </span>
+        <span class="picker-row">
+          <input id="performance-filter" class="picker-filter" type="search"
+                 placeholder="筛选：家具名 / 演出名，如 sofa、egg1、nod、oneshot" autocomplete="off"
+                 aria-label="筛选演出" aria-controls="performance-select">
+          <select id="performance-select" disabled>
+            <option>读取 cutscene-timeline/ 与 fixture-timeline/…</option>
+          </select>
+        </span>
       </label>
       <button class="icon-button" id="play-button" type="button" title="播放选中的演出" aria-label="播放选中的演出">▶</button>
       <button class="icon-button" id="stop-button" type="button" title="停止并回到起点" aria-label="停止并回到起点">■</button>
