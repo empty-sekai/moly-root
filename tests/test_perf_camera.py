@@ -252,3 +252,121 @@ def test_missing_path_is_reported_never_empty(tmp_path):
     assert report["packages"] == [{"package": "mysekai__camera__gone",
                                    "missing": True}]
     assert list((Path(tmp_path / "out")).glob("*.json")) == []
+
+
+# -- timeline-owned Cinemachine components ------------------------------------
+
+
+def _cinemachine_bundle():
+    """One synthetic instance of each timeline-owned Cinemachine class."""
+    bundle = _Bundle()
+    scripts = {
+        name: bundle.add("MonoScript", {"m_ClassName": name})
+        for name in (
+            "CinemachineVirtualCamera", "CinemachinePipeline",
+            "CinemachineTransposer", "CinemachineComposer")
+    }
+    bundle.add("MonoBehaviour", {
+        "m_Name": "ShotCamera",
+        "m_Script": {"m_FileID": 0, "m_PathID": scripts["CinemachineVirtualCamera"]},
+        "m_LegacyBlendHint": 2,
+        "m_Lens": {
+            "Dutch": 3.5, "FarClipPlane": 500.0, "FieldOfView": 42.0,
+            "FocusDistance": 7.0, "GateFit": 1,
+            "LensShift": {"x": 0.1, "y": -0.2}, "ModeOverride": 0,
+            "NearClipPlane": 0.03, "OrthographicSize": 5.0,
+            "m_SensorSize": {"x": 36.0, "y": 24.0},
+        },
+        "m_Priority": 20, "m_StandbyUpdate": 1,
+        "m_ComponentOwner": {"m_FileID": 0, "m_PathID": 700},
+        "m_Follow": {"m_FileID": 0, "m_PathID": 701},
+        "m_LookAt": {"m_FileID": 0, "m_PathID": 702},
+        "m_ExcludedPropertiesInInspector": ["m_Priority"],
+        "m_LockStageInInspector": 1,
+        "m_StreamingVersion": 13,
+    })
+    bundle.add("MonoBehaviour", {
+        "m_Name": "FollowRig",
+        "m_Script": {"m_FileID": 0, "m_PathID": scripts["CinemachineTransposer"]},
+        "m_AngularDamping": 0.5, "m_AngularDampingMode": 1,
+        "m_BindingMode": 2, "m_FollowOffset": {"x": 1.0, "y": 2.0, "z": -3.0},
+        "m_PitchDamping": 0.6, "m_RollDamping": 0.7,
+        "m_XDamping": 0.8, "m_YDamping": 0.9, "m_YawDamping": 1.0,
+        "m_ZDamping": 1.1,
+    })
+    bundle.add("MonoBehaviour", {
+        "m_Name": "ComposerRig",
+        "m_Script": {"m_FileID": 0, "m_PathID": scripts["CinemachineComposer"]},
+        "m_BiasX": 0.1, "m_BiasY": -0.1, "m_CenterOnActivate": 1,
+        "m_DeadZoneHeight": 0.2, "m_DeadZoneWidth": 0.3,
+        "m_HorizontalDamping": 0.4, "m_LookaheadIgnoreY": 1,
+        "m_LookaheadSmoothing": 0.5, "m_LookaheadTime": 0.6,
+        "m_ScreenX": 0.7, "m_ScreenY": 0.8,
+        "m_SoftZoneHeight": 0.9, "m_SoftZoneWidth": 1.0,
+        "m_TrackedObjectOffset": {"x": 1.1, "y": 1.2, "z": 1.3},
+        "m_VerticalDamping": 1.4,
+    })
+    bundle.add("MonoBehaviour", {
+        "m_Name": "PipelineRig",
+        "m_Script": {"m_FileID": 0, "m_PathID": scripts["CinemachinePipeline"]},
+    })
+    return bundle
+
+
+def test_cinemachine_components_export_values_pointers_and_editor_fields(
+        tmp_path, monkeypatch):
+    """Every requested Cinemachine class keeps values in its own record."""
+    _, package, out = _read(tmp_path, monkeypatch, _cinemachine_bundle())
+    doc = _load_doc(out)
+
+    assert len(doc["cinemachineVirtualCameras"]) == 1
+    assert len(doc["cinemachinePipelines"]) == 1
+    assert len(doc["cinemachineTransposers"]) == 1
+    assert len(doc["cinemachineComposers"]) == 1
+
+    virtual = doc["cinemachineVirtualCameras"][0]
+    assert set(virtual["fields"]) == {
+        "m_LegacyBlendHint", "m_Lens", "m_Name", "m_Priority",
+        "m_StandbyUpdate"}
+    assert virtual["fields"]["m_LegacyBlendHint"] == 2
+    assert virtual["fields"]["m_Lens"]["FieldOfView"] == 42.0
+    assert virtual["fields"]["m_Lens"]["m_SensorSize"] == {
+        "x": 36.0, "y": 24.0}
+    assert virtual["fields"]["m_Priority"] == 20
+    assert virtual["pointers"]["m_Follow"]["m_PathID"] == 701
+    assert set(virtual["editorOnly"]) == {
+        "m_ExcludedPropertiesInInspector", "m_LockStageInInspector",
+        "m_StreamingVersion"}
+    assert "m_Follow" not in virtual["fields"]
+    assert "m_StreamingVersion" not in virtual["fields"]
+
+    transposer = doc["cinemachineTransposers"][0]
+    assert set(transposer["fields"]) == {
+        "m_AngularDamping", "m_AngularDampingMode", "m_BindingMode",
+        "m_FollowOffset", "m_Name", "m_PitchDamping", "m_RollDamping",
+        "m_XDamping", "m_YDamping", "m_YawDamping", "m_ZDamping"}
+    assert transposer["fields"]["m_FollowOffset"] == {
+        "x": 1.0, "y": 2.0, "z": -3.0}
+    assert transposer["fields"]["m_ZDamping"] == 1.1
+    composer = doc["cinemachineComposers"][0]
+    assert set(composer["fields"]) == {
+        "m_BiasX", "m_BiasY", "m_CenterOnActivate", "m_DeadZoneHeight",
+        "m_DeadZoneWidth", "m_HorizontalDamping", "m_LookaheadIgnoreY",
+        "m_LookaheadSmoothing", "m_LookaheadTime", "m_Name", "m_ScreenX",
+        "m_ScreenY", "m_SoftZoneHeight", "m_SoftZoneWidth",
+        "m_TrackedObjectOffset", "m_VerticalDamping"}
+    assert composer["fields"]["m_ScreenX"] == 0.7
+    assert composer["fields"]["m_TrackedObjectOffset"]["z"] == 1.3
+    assert composer["fields"]["m_VerticalDamping"] == 1.4
+    assert doc["cinemachinePipelines"][0]["fields"] == {
+        "m_Name": "PipelineRig"}
+
+    assert package["cinemachine"] == {
+        "CinemachineComposer": {"total": 1, "nonEmptyNames": 1},
+        "CinemachinePipeline": {"total": 1, "nonEmptyNames": 1},
+        "CinemachineTransposer": {"total": 1, "nonEmptyNames": 1},
+        "CinemachineVirtualCamera": {"total": 1, "nonEmptyNames": 1},
+    }
+    assert package["editorOnly"]["m_StreamingVersion"]["reason"] == (
+        "is a serialized Cinemachine/editor version marker rather than runtime camera behavior")
+    assert package["editorOnly"]["m_StreamingVersion"]["instances"] == 1

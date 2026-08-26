@@ -51,6 +51,57 @@ UnityPy.config.FALLBACK_UNITY_VERSION = "2022.3.62f3"
 CAMERA_PARAM_CLASS = "CameraParam"
 CAMERA_SETTING_CLASS = "CameraSetting"
 
+CINEMACHINE_CLASSES = (
+    "CinemachineVirtualCamera",
+    "CinemachinePipeline",
+    "CinemachineTransposer",
+    "CinemachineComposer",
+)
+
+CINEMACHINE_OUTPUTS = {
+    "CinemachineVirtualCamera": "cinemachineVirtualCameras",
+    "CinemachinePipeline": "cinemachinePipelines",
+    "CinemachineTransposer": "cinemachineTransposers",
+    "CinemachineComposer": "cinemachineComposers",
+}
+
+# These fields describe references to Unity objects.  They remain in the
+# product as pointers, but are not ordinary runtime values for field coverage.
+CINEMACHINE_POINTER_FIELDS = frozenset({
+    "m_ComponentOwner", "m_Follow", "m_LookAt",
+})
+
+# These fields control the editor inspector or serialized editor version, not
+# runtime camera behavior, so reports keep them in a separate bucket.
+CINEMACHINE_EDITOR_FIELDS = {
+    "m_ExcludedPropertiesInInspector":
+        "controls which properties are shown or excluded in the editor inspector",
+    "m_LockStageInInspector":
+        "controls editor inspector/stage locking behavior",
+    "m_StreamingVersion":
+        "is a serialized Cinemachine/editor version marker rather than runtime camera behavior",
+}
+
+CINEMACHINE_VALUE_FIELDS = {
+    "CinemachineVirtualCamera": frozenset({
+        "m_LegacyBlendHint", "m_Lens", "m_Name", "m_Priority",
+        "m_StandbyUpdate",
+    }),
+    "CinemachinePipeline": frozenset({"m_Name"}),
+    "CinemachineTransposer": frozenset({
+        "m_AngularDamping", "m_AngularDampingMode", "m_BindingMode",
+        "m_FollowOffset", "m_Name", "m_PitchDamping", "m_RollDamping",
+        "m_XDamping", "m_YDamping", "m_YawDamping", "m_ZDamping",
+    }),
+    "CinemachineComposer": frozenset({
+        "m_BiasX", "m_BiasY", "m_CenterOnActivate", "m_DeadZoneHeight",
+        "m_DeadZoneWidth", "m_HorizontalDamping", "m_LookaheadIgnoreY",
+        "m_LookaheadSmoothing", "m_LookaheadTime", "m_Name", "m_ScreenX",
+        "m_ScreenY", "m_SoftZoneHeight", "m_SoftZoneWidth",
+        "m_TrackedObjectOffset", "m_VerticalDamping",
+    }),
+}
+
 CURVE_FIELDS = (
     "_distance",
     "_yaw",
@@ -186,14 +237,68 @@ def _camera_setting_entry(tree, path, counts):
     }
 
 
+def _cinemachine_entry(record, path_id, path, class_name, counts):
+    """One timeline-owned Cinemachine component, grouped by field role.
+
+    Value fields retain their serialized values.  References are kept verbatim
+    in ``pointers`` because they identify Unity objects rather than ordinary
+    runtime values.  Inspector/version metadata is kept in ``editorOnly`` and
+    counted separately from runtime fields.  Unknown non-engine keys remain in
+    ``extraFields`` so a newer serialized component cannot lose data silently.
+    """
+    tree = record.tree(path_id) or {}
+    values = {field: tree[field]
+              for field in CINEMACHINE_VALUE_FIELDS[class_name]
+              if field in tree}
+    pointers = {field: tree[field]
+                for field in CINEMACHINE_POINTER_FIELDS if field in tree}
+    editor_only = {field: tree[field]
+                   for field in CINEMACHINE_EDITOR_FIELDS if field in tree}
+    known = (set(values) | set(pointers) | set(editor_only) |
+             {"m_GameObject", "m_Enabled", "m_Script", "m_ObjectHideFlags",
+              "m_CorrespondingSourceObject", "m_PrefabInstance",
+              "m_PrefabAsset"})
+    extra = {field: value for field, value in tree.items()
+             if field not in known}
+
+    name = tree.get("m_Name", "")
+    census = counts["cinemachine"][class_name]
+    census["total"] += 1
+    if name:
+        census["nonEmptyNames"] += 1
+    for field in editor_only:
+        counts["editorOnly"][field]["instances"] += 1
+
+    entry = {
+        "class": class_name,
+        "name": name,
+        "container": path,
+        "pathId": str(path_id),
+        "fields": values,
+        "pointers": pointers,
+        "editorOnly": editor_only,
+    }
+    if extra:
+        entry["extraFields"] = extra
+    return entry
+
+
 def _walk_package(store, name, out):
-    """One package: its CameraParam/CameraSetting instances, exported."""
+    """One package: camera assets and timeline-owned Cinemachine instances."""
     package = store.package(name)
     document = {"package": name, "cameraParams": [], "cameraSettings": []}
+    for output in CINEMACHINE_OUTPUTS.values():
+        document[output] = []
     counts = {"package": name, "missing": False, "packageObjects": 0,
               "cameraParam": 0, "cameraSetting": 0, "keyframes": {},
               "emptyCurves": 0, "distance": [], "distanceMissing": 0,
-              "fieldIssues": [], "readButNotExported": 0}
+              "fieldIssues": [], "readButNotExported": 0,
+              "cinemachine": {
+                  class_name: {"total": 0, "nonEmptyNames": 0}
+                  for class_name in CINEMACHINE_CLASSES},
+              "editorOnly": {
+                  field: {"reason": reason, "instances": 0}
+                  for field, reason in CINEMACHINE_EDITOR_FIELDS.items()}}
 
     container = _container_map(store, package)
     for record in package.files:
@@ -211,8 +316,12 @@ def _walk_package(store, name, out):
                 counts["cameraSetting"] += 1
                 document["cameraSettings"].append(
                     _camera_setting_entry(record.tree(path_id), path, counts))
+            elif cls in CINEMACHINE_OUTPUTS:
+                document[CINEMACHINE_OUTPUTS[cls]].append(
+                    _cinemachine_entry(record, path_id, path, cls, counts))
 
-    if document["cameraParams"] or document["cameraSettings"]:
+    if (document["cameraParams"] or document["cameraSettings"] or
+            any(document[output] for output in CINEMACHINE_OUTPUTS.values())):
         write_json(out / f"{name}.json", document)
     return counts
 
