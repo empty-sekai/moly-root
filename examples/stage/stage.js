@@ -17,6 +17,7 @@ import * as Shading from '../viewer/shading.js';
 import * as Facial from '../viewer/facial.js';
 import { Environment, CROSS_FADE_SECONDS } from '../viewer/environment.js';
 import { ENV_GLOBALS, envSet } from '../viewer/envglobals.js';
+import { StageAudio, audioCatalog } from './stage-audio.js';
 import { buildCharacter, updateCharacter } from './character.js';
 import { applyFixtureMaterials, applyPhenomenaLight } from './fixture-materials.js';
 import * as Bind from './anim-bind.js';
@@ -1383,6 +1384,79 @@ function animate(now) {
   drawScene();
 }
 
+// ---------------------------------------------------------------- 声音
+//
+// cue 名寻址，循环点按采样数算。界面上把「有多少条流」「循环点是多少」「解码后与产物记的
+// 差几个采样」都摆出来，因为**能不能听见不是这一层能验的** —— 浏览器要用户手势才允许出声，
+// 无头驱动里点不了。所以判据落在能验的那一半：产物里的循环点被原样配进了播放节点，
+// 且解码后的采样数与产物记的差是个**具名的数**，而不是一句「应该没问题」。
+//
+// 默认选中取 `siteBgms` 映射的第一条 —— 那是游戏自己的 (siteId, brightnessType) → cue 寻址。
+// 产物里**没有「现象 → cue」这一层**，所以这里不编一个。
+
+async function bootAudio() {
+  const select = $('audio-select');
+  const base = params.get('base') || '../../local-data';
+  try {
+    const index = await fetchJson(`${base}/phenomena/index.json`);
+    const catalog = audioCatalog(index);
+    state.audio = new StageAudio(`${base}/`).attach(catalog);
+    select.innerHTML = '';
+    const byPackage = new Map();
+    for (const [cue, stream] of catalog.cues) {
+      if (!byPackage.has(stream.package)) byPackage.set(stream.package, []);
+      byPackage.get(stream.package).push({ cue, stream });
+    }
+    for (const [pkg, rows] of byPackage) {
+      const group = document.createElement('optgroup');
+      group.label = `${pkg.replace(/^mysekai__sound__/, '')} · ${rows.length} 条`;
+      for (const { cue, stream } of rows) {
+        const option = document.createElement('option');
+        option.value = cue;
+        option.textContent = `${cue}  ${(Number(stream.durationSeconds) || 0).toFixed(1)}s`
+          + (stream.loop ? ' · 循环' : ' · 不循环');
+        group.appendChild(option);
+      }
+      select.appendChild(group);
+    }
+    select.disabled = catalog.cues.size === 0;
+    const looping = [...catalog.cues.values()].filter((s) => s.loop).length;
+    setText('audio-count', `${catalog.cues.size} 条`);
+    setText('audio-facts', `流 ${catalog.streams} · 可选 ${catalog.cues.size} · `
+      + `循环 ${looping} · 站点 BGM 映射 ${catalog.siteBgms.length}`
+      + (catalog.multiSubsong.length
+        ? ` · 一名多曲 ${catalog.multiSubsong.length}` : '')
+      + (catalog.namedButAbsent.length
+        ? ` · 映射点名但产物没有 ${catalog.namedButAbsent.length}` : ''));
+    const first = catalog.siteBgms.find((row) => catalog.cues.has(String(row.cue)));
+    if (first) select.value = String(first.cue);
+  } catch (error) {
+    select.innerHTML = '<option>读不到 phenomena/audio/</option>';
+    setText('audio-count', '0 条');
+    setText('audio-facts', `读不到：${String(error).slice(0, 80)}`);
+  }
+}
+
+function audioReadout() {
+  const report = state.audio?.report?.();
+  if (!report) return;
+  const row = report.rows.find((item) => item.cue === report.playing)
+    || report.rows[report.rows.length - 1];
+  if (!row) {
+    setText('audio-facts', `cue ${report.cues} · 循环 ${report.looping} · 未解码`);
+    return;
+  }
+  setText('audio-facts', `${row.cue} · `
+    + (row.loop
+      ? `循环 ${row.loopStartSamples}–${row.loopEndSamples} 采样`
+        + `（${row.loopStartSeconds.toFixed(6)}–${row.loopEndSeconds.toFixed(6)} s）`
+      : '不循环')
+    + ` · 重采样 ${row.fileRate}→${row.contextRate} Hz`
+    + ` · 余差 ${row.residualSamples} 采样（时长差 ${row.secondsError} s）`
+    + ` · ${report.contextState}`
+    + (report.lastError ? ` · ${report.lastError}` : ''));
+}
+
 async function boot() {
   setText('base-path', params.get('base') || '../../local-data');
   setForm('spontaneous');
@@ -1393,6 +1467,18 @@ async function boot() {
   $('performance-select').addEventListener('change', (event) => selectPerformance(event.target.value));
   $('performance-filter')?.addEventListener('input', (event) => {
     renderPicker(event.target.value);
+  });
+  $('audio-play')?.addEventListener('click', async () => {
+    const cue = $('audio-select')?.value;
+    if (cue) await state.audio?.play(cue);
+    audioReadout();
+  });
+  $('audio-stop')?.addEventListener('click', () => {
+    state.audio?.stop();
+    audioReadout();
+  });
+  $('audio-volume')?.addEventListener('input', (event) => {
+    state.audio?.setVolume(event.target.value);
   });
   $('lane-select')?.addEventListener('change', (event) => selectLane(event.target.value));
   $('talk-select')?.addEventListener('change', async (event) => {
@@ -1430,6 +1516,7 @@ async function boot() {
     if (!unit) throw new Error('manifest 没有角色条目');
     await loadCharacter(unit.unit);
     await bootEnvironment();
+    await bootAudio();
     state.catalog = await loadTrackCatalog();
     populateCatalog(state.catalog);
     if (!state.catalog.entries.length) throw new Error('cutscene-timeline/tracks/ 与 fixture-timeline/tracks/ 都没有可选 timeline');
@@ -1584,6 +1671,20 @@ window.__stageProbe = {
       touched += 1;
     }
     return { touched, of: materials.length };
+  },
+  /**
+   * 声音取证：解码但**不播放**。
+   * 出不出声要用户手势，无头驱动点不了，所以这里只验能验的那一半 ——
+   * 循环点原样进了播放节点、解码后的采样数与产物记的差是多少。
+   */
+  async audio(cue) {
+    const audio = state.audio;
+    if (!audio) return null;
+    const wanted = cue || [...(audio.catalog?.cues.keys() || [])][0];
+    if (wanted) await audio.decode(wanted);
+    const report = audio.report();
+    audioReadout();
+    return report;
   },
   /** 选片器现在长什么样：分组数、可见条数、筛选后剩几条。 */
   picker(filterText) {

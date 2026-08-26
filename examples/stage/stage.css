@@ -41,6 +41,8 @@ h2 { font-size: 14px; font-weight: 650; }
 .picker-filter:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
 .picker-filter::placeholder { color: var(--muted); opacity: .75; }
 .picker-count.is-empty { color: var(--bad); }
+.picker-row.audio-row { grid-template-columns: minmax(0, 1fr) 36px 36px 96px; }
+.audio-volume { align-self: center; width: 100%; accent-color: var(--accent); }
 .field-label.compact { min-width: 94px; }
 .field-label.toggle-label { min-width: 64px; }
 .field-label.toggle-label input { min-height: 34px; accent-color: var(--accent); }

@@ -27,25 +27,55 @@ export function loopWindow(stream) {
   };
 }
 
-/** 把 index.json 里的音频账读成一张按 cue 名索引的表。 */
+/** 把 index.json 里的音频账读成一张按「cue + 子曲号」索引的表。
+ *
+ * **不能只按 cue 名索引**：实测 31 条流里 `se_shooring_star` 一个名字底下有 6 条子曲，
+ * 按名字建 Map 会让后 5 条静默盖掉前 5 条，界面上只剩 26 条而没有一个字说少了 5 条。
+ * 所以键带上子曲号，并把「一名多曲」的条数单独记出来。
+ */
 export function audioCatalog(index) {
   const audio = index?.audio || {};
   const cues = new Map();
+  const byName = new Map();
+  let streams = 0;
   for (const pkg of audio.packages || []) {
     for (const stream of pkg.streams || []) {
-      cues.set(String(stream.cue), { ...stream, package: pkg.package });
+      streams += 1;
+      const name = String(stream.cue);
+      const subsong = Number(stream.subsong) || 0;
+      const list = byName.get(name) || [];
+      list.push(subsong);
+      byName.set(name, list);
+      // 同名多曲时键上带子曲号，单曲的键就是 cue 名本身 —— 映射表点名的是 cue 名。
+      cues.set(list.length > 1 || subsong > 1 ? `${name}#${subsong}` : name,
+               { ...stream, package: pkg.package, cueName: name, subsong });
     }
+  }
+  // 第一条同名流当初用的是裸名字；若它后来发现有兄弟，补一个带号的别名，
+  // 让「按 cue 名找得到」和「六条都在」同时成立。
+  for (const [name, subsongs] of byName) {
+    if (subsongs.length <= 1) continue;
+    const bare = cues.get(name);
+    if (bare) cues.set(`${name}#${bare.subsong}`, bare);
   }
   const siteBgms = (index?.siteBgms || []).map((row) => ({ ...row }));
   const fallbacks = (index?.siteSoundFallbacks || []).map((row) => ({ ...row }));
+  const resolvable = (cue) => cues.has(String(cue))
+    || [...cues.values()].some((s) => s.cueName === String(cue));
   return {
     cues,
     siteBgms,
     fallbacks,
+    streams,
+    // 一个 cue 名底下不止一条流的，记出来：这是产物的形状，不是错误，
+    // 但如果不记，界面上的条数就会比产物少而没人知道少在哪。
+    multiSubsong: [...byName.entries()]
+      .filter(([, list]) => list.length > 1)
+      .map(([name, list]) => ({ cue: name, subsongs: list.length })),
     // 映射里点名了但产物里没有这条流 —— 这是缺口，不能在界面上装作没有。
     namedButAbsent: [...siteBgms, ...fallbacks]
       .map((row) => String(row.cue))
-      .filter((cue) => !cues.has(cue)),
+      .filter((cue) => !resolvable(cue)),
     decoderPresent: !!audio.decoderPresent,
     transcoderPresent: !!audio.transcoderPresent,
   };
@@ -103,15 +133,25 @@ export class StageAudio {
     // 在解码后的缓冲里偏了几个采样。
     const claimed = Number(stream.samples) || 0;
     const got = buffer.length;
+    const fileRate = Number(stream.sampleRate) || 0;
+    // 解码后的采样数与产物记的差要**分解**，不能当成一个数报。
+    // AudioContext 有自己的采样率（实测 44100 的文件进 48000 的上下文），重采样本身
+    // 就会改变采样数 —— 那部分是预期的，不是缺陷。减掉它剩下的才是编解码器的前导/补齐。
+    // 混在一起报会让一个正常的重采样看着像 286208 个采样的错。
+    // 循环点用**秒**配给播放节点，而秒对重采样不变，所以这一项不影响循环正确性。
+    const expected = fileRate
+      ? Math.round(claimed * (context.sampleRate / fileRate)) : claimed;
     this.decoded.set(cue, {
       buffer,
       claimedSamples: claimed,
       decodedSamples: got,
-      driftSamples: got - claimed,
+      expectedSamples: expected,
+      resampleDelta: expected - claimed,
+      residualSamples: got - expected,
       claimedSeconds: Number(stream.durationSeconds) || 0,
       decodedSeconds: buffer.duration,
       contextRate: context.sampleRate,
-      fileRate: Number(stream.sampleRate) || 0,
+      fileRate,
       format: this.format,
     });
     return buffer;
@@ -171,13 +211,18 @@ export class StageAudio {
         loopEndSeconds: window_ ? +window_.end.toFixed(9) : null,
         claimedSamples: info.claimedSamples,
         decodedSamples: info.decodedSamples,
-        driftSamples: info.driftSamples,
+        expectedSamples: info.expectedSamples,
+        resampleDelta: info.resampleDelta,
+        residualSamples: info.residualSamples,
+        secondsError: +(info.decodedSeconds - info.claimedSeconds).toFixed(6),
         fileRate: info.fileRate,
         contextRate: info.contextRate,
       });
     }
     return {
       cues: this.catalog ? this.catalog.cues.size : 0,
+      streams: this.catalog ? this.catalog.streams : 0,
+      multiSubsong: this.catalog ? this.catalog.multiSubsong : [],
       looping: this.catalog
         ? [...this.catalog.cues.values()].filter((s) => s.loop).length : 0,
       siteBgms: this.catalog ? this.catalog.siteBgms.length : 0,

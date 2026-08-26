@@ -63,6 +63,21 @@
         <span>环境层</span>
         <input id="env-toggle" type="checkbox" checked>
       </label>
+      <label class="field-label" for="audio-select">
+        <span class="picker-head">
+          <span>声音（cue）</span>
+          <span class="picker-count" id="audio-count">—</span>
+        </span>
+        <span class="picker-row audio-row">
+          <select id="audio-select" disabled>
+            <option>读取 phenomena/audio/…</option>
+          </select>
+          <button class="icon-button" id="audio-play" type="button" title="播放选中的 cue" aria-label="播放选中的 cue">♪</button>
+          <button class="icon-button" id="audio-stop" type="button" title="停止" aria-label="停止">■</button>
+          <input id="audio-volume" class="audio-volume" type="range" min="0" max="1" step="0.01" value="0.7"
+                 aria-label="音量">
+        </span>
+      </label>
       <label class="field-label compact" for="export-frame-count">
         <span>导出帧数</span>
         <input id="export-frame-count" type="number" min="1" max="120" step="1" value="24">
@@ -117,6 +132,7 @@
             <div><dt>对话节奏</dt><dd id="talk-timing">—</dd></div>
             <div><dt>外插</dt><dd id="extrapolation-facts">—</dd></div>
             <div><dt>可播性</dt><dd id="playable-facts">—</dd></div>
+            <div><dt>声音</dt><dd id="audio-facts">读取 phenomena/audio/…</dd></div>
             <div><dt>环境</dt><dd id="env-note">读取 phenomena/…</dd></div>
           </dl>
           <p class="muted" id="recommendation-note"></p>
