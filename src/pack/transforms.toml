@@ -1,0 +1,33 @@
+# Content transform recipes. This is the only place a transform's parameters
+# live -- pack/build.py reads this file and copies its content verbatim into
+# the manifest's `transforms` field; pack/transform_glb.mjs reads it for the
+# actual bit widths and topology switches it runs gltf-transform with. Neither
+# of those two files hardcodes a number: change a value here and both the
+# produced bytes and the manifest description of them change together.
+#
+# `tool` / `tool_version` / `params` mirror manifest.schema.json's
+# meshoptRecipe $def exactly -- see F:\mysekai\moly\moly\web\manifest.schema.json
+# (read-only, authoritative). The six `params` keys are all required there;
+# the three quantize_* widths are 1..16, the three switches are booleans.
+#
+# weld / simplify / reorder are false: this recipe only snaps existing vertex
+# attributes onto a smaller grid (quantize) and repacks the result with
+# EXT_meshopt_compression. It does not merge vertices, decimate geometry, or
+# reorder them for locality. transform_glb.mjs refuses to run (exits nonzero)
+# if any of the three is ever set true, rather than silently ignoring the
+# request -- this round supports only the all-false path.
+#
+# quantize_texcoord = 16 is the ceiling for a normalised integer TEXCOORD
+# accessor; asking for more cannot encode more precision.
+
+[meshopt]
+tool = "gltf-transform quantize + EXT_meshopt_compression"
+tool_version = "4.4.2"
+
+[meshopt.params]
+quantize_position = 16
+quantize_normal = 12
+quantize_texcoord = 16
+weld = false
+simplify = false
+reorder = false

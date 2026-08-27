@@ -27,6 +27,7 @@ import argparse
 import json
 import sys
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +37,28 @@ from .hashing import sha256_bytes
 
 SCHEMA_ID = "moly-asset-manifest/1"
 DEFAULT_BLOB_PREFIX = "blobs/"
+DEFAULT_TRANSFORMS_PATH = Path(__file__).with_name("transforms.toml")
+
+
+def load_transform_recipe(xf_name: str, transforms_path=None) -> dict:
+    """Reads transforms.toml (or *transforms_path*) and returns the recipe
+    recorded for *xf_name*, verbatim: {"tool", "tool_version", "params"},
+    exactly the shape manifest.schema.json's meshoptRecipe/genericRecipe
+    $defs require. This function only carries those three values into the
+    manifest -- it does not choose, validate, or default any of them; a
+    missing or malformed recipe is an error here rather than a value this
+    module invents on its behalf.
+    """
+    path = Path(transforms_path) if transforms_path else DEFAULT_TRANSFORMS_PATH
+    with open(path, "rb") as fh:
+        doc = tomllib.load(fh)
+    if xf_name not in doc:
+        raise ValueError(f"transforms.toml ({path}) has no [{xf_name}] table for --xf-name {xf_name!r}")
+    table = doc[xf_name]
+    missing = [k for k in ("tool", "tool_version", "params") if k not in table]
+    if missing:
+        raise ValueError(f"transforms.toml ({path}) [{xf_name}] is missing required key(s): {missing}")
+    return {"tool": table["tool"], "tool_version": table["tool_version"], "params": table["params"]}
 
 
 def iter_files(root: Path):
@@ -47,7 +70,8 @@ def iter_files(root: Path):
 
 def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_PREFIX,
           progress=None, xf_overlay=None, xf_name=None,
-          xf_overlay_expect_files=None, xf_overlay_expect_bytes=None) -> dict:
+          xf_overlay_expect_files=None, xf_overlay_expect_bytes=None,
+          transforms_path=None) -> dict:
     """Pack *src* into *out*/blobs/ + *out*/manifest.json. Returns a report dict."""
     src = Path(src)
     out = Path(out)
@@ -200,6 +224,17 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
     content_bytes = sum(content_len for _rel, _blob_len, _sha, content_len in blob_cache.values())
     logical_bytes = sum(e["bytes"] for e in entries)
 
+    # transforms: how each xf value appearing on an entry was produced.
+    # Recorded only for a transform that was actually applied to at least one
+    # entry -- an xf_name given with an overlay that (somehow) touched zero
+    # entries would otherwise leave a recipe in the manifest describing a
+    # transform nothing uses, which is exactly the stale-record case the
+    # schema's bidirectional invariant (entries' xf values <-> transforms
+    # keys) exists to catch.
+    transforms_out: dict = {}
+    if xf_overlay is not None and overlay_applied > 0:
+        transforms_out[xf_name] = load_transform_recipe(xf_name, transforms_path)
+
     manifest = {
         "schema": SCHEMA_ID,
         "version": version,
@@ -209,6 +244,7 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
         "resident_bytes": resident_bytes,
         "content_bytes": content_bytes,
         "logical_bytes": logical_bytes,
+        "transforms": transforms_out,
         "entries": entries,
     }
 
@@ -235,6 +271,7 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
         "content_bytes": content_bytes,
         "logical_bytes": logical_bytes,
         "dedup_saved_bytes": dedup_saved_bytes,
+        "transforms": transforms_out,
         "xf_overlay": str(xf_overlay) if xf_overlay is not None else None,
         "xf_name": xf_name,
         "xf_overlay_files": len(overlay_index),
@@ -266,6 +303,9 @@ def main(argv=None):
                      help="fail before packing unless --xf-overlay contains exactly this many files")
     ap.add_argument("--xf-overlay-expect-bytes", type=int, default=None,
                      help="fail before packing unless --xf-overlay files total exactly this many bytes")
+    ap.add_argument("--transforms", default=None,
+                     help="alternate transforms.toml (default: the bundled one); read only when "
+                          "--xf-overlay is given and applies to at least one entry")
     args = ap.parse_args(argv)
 
     t0 = time.time()
@@ -274,7 +314,8 @@ def main(argv=None):
                     progress=args.progress or None,
                     xf_overlay=args.xf_overlay, xf_name=args.xf_name,
                     xf_overlay_expect_files=args.xf_overlay_expect_files,
-                    xf_overlay_expect_bytes=args.xf_overlay_expect_bytes)
+                    xf_overlay_expect_bytes=args.xf_overlay_expect_bytes,
+                    transforms_path=args.transforms)
     report["wall_seconds"] = round(time.time() - t0, 3)
 
     if args.json:
@@ -288,6 +329,7 @@ def main(argv=None):
         print(f"  logical_bytes  {report['logical_bytes']:>12d}")
         print(f"  dedup saved    {report['dedup_saved_bytes']:>12d} bytes "
               f"({report['entries']} entries -> {report['unique_blobs']} blobs on disk)")
+        print(f"  transforms: {json.dumps(report['transforms'], ensure_ascii=False)}")
         if report["xf_overlay"] is not None:
             print(f"  xf overlay: {report['xf_overlay']} (xf={report['xf_name']}), "
                   f"{report['xf_overlay_files']} files / {report['xf_overlay_bytes']} bytes, "

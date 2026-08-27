@@ -33,6 +33,13 @@ mask the rest:
   7. http_encoding == 'br' implies codec == 'identity'
   8. the blobs directory contains no file that is not referenced by any
      entry
+  9. the set of non-null `xf` values across entries equals the set of keys
+     in `transforms`, in both directions -- schema.json cannot express this
+     (it has no way to compare an array of sibling objects against a
+     property's key set), so it is arithmetic performed here instead. A
+     transform used by an entry but absent from `transforms` means the pack
+     cannot be reproduced; one present in `transforms` but used by no entry
+     is a stale record of a build that no longer happens.
 """
 from __future__ import annotations
 
@@ -179,6 +186,7 @@ def verify(manifest_path, blobs_dir, schema_path) -> tuple[list[str], dict]:
     # manifest itself is internally inconsistent.
     blob_info: dict[str, dict] = {}
     logical_bytes_sum = 0
+    xf_values_used: set[str] = set()
 
     for i, e in enumerate(entries):
         if not isinstance(e, dict):
@@ -256,6 +264,10 @@ def verify(manifest_path, blobs_dir, schema_path) -> tuple[list[str], dict]:
         if isinstance(content_bytes, int):
             logical_bytes_sum += content_bytes
 
+        xf = e.get("xf")
+        if xf is not None:
+            xf_values_used.add(xf)
+
         if isinstance(blob, str):
             this_info = {
                 "blob_bytes": blob_bytes,
@@ -293,6 +305,26 @@ def verify(manifest_path, blobs_dir, schema_path) -> tuple[list[str], dict]:
         stated = manifest.get(field)
         if stated != computed:
             errors.append(f"totals: manifest {field}={stated!r} but recomputed sum is {computed!r}")
+
+    # (9) entries' non-null xf values, as a set, must equal transforms' key
+    # set, in both directions. Schema-blind by construction (JSON Schema
+    # cannot compare sibling values), so this is the only place either
+    # direction of this equality is ever checked.
+    transforms_obj = manifest.get("transforms")
+    if isinstance(transforms_obj, dict):
+        transforms_keys = set(transforms_obj.keys())
+        used_but_undescribed = sorted(xf_values_used - transforms_keys)
+        described_but_unused = sorted(transforms_keys - xf_values_used)
+        for xf in used_but_undescribed:
+            errors.append(
+                f"transforms: xf={xf!r} is used by at least one entry but transforms has no "
+                f"{xf!r} recipe -- the pack cannot be reproduced")
+        for xf in described_but_unused:
+            errors.append(
+                f"transforms: transforms has a {xf!r} recipe but no entry has xf={xf!r} -- "
+                f"stale record of a build that no longer happens")
+    # else: schema validation above already reported `transforms` missing or
+    # not an object; nothing further to check here without one.
 
     # (8) no blob on disk that nothing references
     if blobs_dir.is_dir():
