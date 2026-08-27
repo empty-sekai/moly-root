@@ -1,0 +1,70 @@
+# Default per-extension packing rules: codec / http_encoding / xf.
+#
+# This table is a placeholder default, not a conclusion. Two separate
+# measurement lanes are determining which class should get which treatment
+# (brotli vs gzip vs identity; client-side codec vs origin http_encoding);
+# when a lane lands a verdict, edit the [extensions.*] rows below. Nothing
+# in pack/build.py branches on an extension name -- it only calls
+# CategoryTable.classify(), so a new row here is the entire change.
+#
+# Fields per rule:
+#   codec         "identity" | "gzip" | "brotli"   (client-side decode step)
+#   http_encoding "identity" | "br"                 (origin Content-Encoding)
+#   xf            "meshopt" | "draco" | "ktx2"       (omit the key for null)
+#
+# http_encoding = "br" and codec != "identity" together is invalid (the
+# manifest schema's allOf forbids double-compressing) -- never set both.
+#
+# An extension not listed here falls back to [default].
+
+[default]
+codec = "identity"
+http_encoding = "identity"
+
+# Text classes: kept compressed on disk as well as on the wire, so the
+# client decodes the codec itself rather than letting the browser strip it.
+# gzip, not brotli: measured on 1229 deduped text blobs (145,744,168 raw
+# bytes), brotli-q9 wins only 2,045,441 bytes (0.70% of total download) over
+# gzip-9 once the brotli wasm decoder's own transfer cost is included, and
+# that decoder sits on the cold-start critical path (nothing decodes until it
+# lands) while gzip decodes via the browser's native DecompressionStream.
+[extensions.json]
+codec = "gzip"
+http_encoding = "identity"
+
+[extensions.js]
+codec = "gzip"
+http_encoding = "identity"
+
+[extensions.html]
+codec = "gzip"
+http_encoding = "identity"
+
+[extensions.css]
+codec = "gzip"
+http_encoding = "identity"
+
+[extensions.txt]
+codec = "gzip"
+http_encoding = "identity"
+
+# Geometry: compressed only in transfer, decoded by the browser, so it lands
+# on disk at full size. A content transform (meshopt/draco/ktx2) is the only
+# thing that would shrink the resident copy, and none is applied by default.
+[extensions.glb]
+codec = "identity"
+http_encoding = "br"
+
+# Already-compressed formats: brotli buys little to nothing, so nothing is
+# applied in either direction.
+[extensions.png]
+codec = "identity"
+http_encoding = "identity"
+
+[extensions.ogg]
+codec = "identity"
+http_encoding = "identity"
+
+[extensions.bin]
+codec = "identity"
+http_encoding = "identity"
