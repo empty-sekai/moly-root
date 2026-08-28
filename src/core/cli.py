@@ -80,6 +80,20 @@ def main(argv=None):
                         "glTF binary per package; without it that pass is "
                         "skipped and the passes that need the geometry report "
                         "it as a missing dependency")
+    x.add_argument("--fixture-particles", action="store_true",
+                   help="also write furniture particle emitters "
+                        "(fixture-particles/), one document per package "
+                        "across the fixture-interface, cutscene-timeline and "
+                        "fixture-timeline families; without it that pass is "
+                        "skipped")
+    x.add_argument("--builtin-resources", action="append", default=[],
+                   metavar="PATH",
+                   help="the engine's own built-in resource container, or a "
+                        "directory holding it; some particle-system "
+                        "renderers draw a copy of a built-in primitive mesh "
+                        "and no package ships those. Repeatable. Without it "
+                        "those mesh slots stay listed as unresolved in "
+                        "fixture-particles/, exactly as before")
     x.add_argument("--vgmstream", help="path to the external audio decoder "
                                        "(vgmstream-cli), or the directory holding it")
     x.add_argument("--ffmpeg", help="path to ffmpeg, used only to write a compressed copy of each decoded sound")
@@ -188,10 +202,14 @@ def main(argv=None):
         return apk.main(forwarded)
     if args.cmd == "extract":
         from .extract import extract_manifest
+        from .assets.packages import builtin_archive_paths
         source, cache = _master_source(args)
         report = extract_manifest(args.manifest, args.bundles, args.out, args.unity_version,
                                   master=source, master_cache=cache,
                                   fixture_meshes=args.fixture_meshes,
+                                  fixture_particles=args.fixture_particles,
+                                  builtin_resources=builtin_archive_paths(
+                                      args.builtin_resources),
                                   vgmstream=args.vgmstream, ffmpeg=args.ffmpeg)
         if args.json:
             print(json.dumps(report, ensure_ascii=False))

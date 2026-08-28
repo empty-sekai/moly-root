@@ -65,6 +65,35 @@ def _rule_from_row(row: dict) -> Rule:
     )
 
 
+def _assert_no_brotli(default: Rule, extensions: dict[str, Rule]) -> None:
+    """Construction-time tripwire on the BUNDLED default table only (never on
+    a caller-supplied ``--categories`` override -- see load_categories).
+
+    web/src/codec.ts ships zero third-party runtime dependencies, so the
+    shipped web client has no bundled brotli decoder: its default fallback
+    loader throws unless something has called setBrotliFallbackLoader()
+    first (see codec.ts's defaultBrotliFallbackLoader). The client's own
+    correctness therefore depends on this table never assigning
+    codec='brotli' -- a manifest that did would decode fine in this
+    process's own round-trip check (build.py encodes AND decodes locally)
+    but fail at runtime on any browser lacking native
+    DecompressionStream('brotli') support (Chrome, at this writing).
+
+    This does not forbid codec='brotli' outright -- a caller who points
+    --categories at a different table, paired with a client build that has
+    actually injected a decoder, is untouched by this check.
+    """
+    offenders = [ext for ext, rule in extensions.items() if rule.codec == "brotli"]
+    if default.codec == "brotli":
+        offenders = ["[default]"] + offenders
+    if offenders:
+        raise ValueError(
+            f"the bundled default categories table ({DEFAULT_TABLE_PATH}) assigns codec='brotli' "
+            f"to: {', '.join(offenders)} -- the shipped web client has no bundled brotli decoder "
+            "(web/src/codec.ts ships zero third-party runtime dependencies); either remove this "
+            "from the default table, or ship a brotli decoder with the client first")
+
+
 def load_categories(path=None) -> CategoryTable:
     """Load a category table from a TOML file (default: the bundled one)."""
     table_path = Path(path) if path else DEFAULT_TABLE_PATH
@@ -75,4 +104,6 @@ def load_categories(path=None) -> CategoryTable:
         str(ext): _rule_from_row(row)
         for ext, row in doc.get("extensions", {}).items()
     }
+    if path is None:
+        _assert_no_brotli(default, extensions)
     return CategoryTable(default=default, by_extension=extensions)

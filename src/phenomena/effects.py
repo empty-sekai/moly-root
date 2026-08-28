@@ -33,6 +33,7 @@ camera-attached effect, and that rule is **not uniform** — see ``effectiveRota
 """
 from core.particles import (TRAIL_MATERIAL_SLOT, decode_renderer,  # noqa: F401
                             decode_system)
+from core.assets.packages import pairs
 
 # Components these prefabs use.  Anything else on a node is reported.
 MODELLED_COMPONENTS = ("Transform", "RectTransform", "ParticleSystem",
@@ -129,6 +130,37 @@ def _component_ids(tree):
             pointer = entry.get("component", entry)
             yield (pointer or {}).get("m_PathID", 0)
 
+
+
+# The pass tag that puts a material's output into the effect buffer.  The keys
+# in the serialized form are upper case; the tag values are not normalized, so
+# any comparison must be case-insensitive (one package writes MysekaiEffect,
+# another MysekaiObject, and a shader carries SHADOWCASTER beside them).
+LIGHTMODE_TAG = "LIGHTMODE"
+
+
+def light_modes(parsed):
+    """The LightMode tag of each pass of a shader's parsed form, in pass order.
+
+    One entry per pass, flattened subshader after subshader as serialized, with
+    the pass's LIGHTMODE tag value or None where the tag is absent.  The
+    tags live under m_State, not on the pass: a pass's own m_Tags is
+    empty on every shader in these packages, so reading it would yield a
+    well-formed list of Nones that says nothing.  Values are kept verbatim.
+
+    承诺：声明了哪些 LightMode。不承诺：实际执行哪个 pass、MysekaiEffect 与
+    UniversalForward 两个 pass 的颜色是否等价、keyword 变体、fallback 链、
+    主画面行为、以及 env 域以外的任何情形。
+    """
+    modes = []
+    for subshader in parsed.get("m_SubShaders") or []:
+        for passes in subshader.get("m_Passes") or []:
+            state = passes.get("m_State") or {}
+            tags = {}
+            for key, value in pairs((state.get("m_Tags") or {}).get("tags")):
+                tags[str(key)] = value
+            modes.append(tags.get(LIGHTMODE_TAG))
+    return modes
 
 def hierarchy(root_id, kinds, trees):
     """Node tree rooted at one prefab's game object, parents first.

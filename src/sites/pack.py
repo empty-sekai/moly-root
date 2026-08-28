@@ -245,7 +245,7 @@ def extract_sites(bundles, out_dir, bundle_root=None, master=None, master_cache=
             totals["scenes"] += 1
             index["scenes"][key] = {
                 "package": name, "directory": prefix,
-                "document": f"{prefix}/{_stem(key)}.json",
+                "document": document.get("file") or f"{prefix}/{_stem(key)}.json",
                 "geometry": None if not geometry else f"{prefix}/{geometry['file']}",
                 "rootComponent": next((script for script in
                                        ("MysekaiSiteView", "DeliverySiteView")
@@ -273,7 +273,7 @@ def extract_sites(bundles, out_dir, bundle_root=None, master=None, master_cache=
             for socket in document.get("timelineSockets") or [])
         index["families"].setdefault(kind, []).append(
             {"key": key, "package": name, "directory": prefix,
-             "document": f"{prefix}/{_stem(key)}.json",
+             "document": document.get("file") or f"{prefix}/{_stem(key)}.json",
              "geometry": None if not geometry else f"{prefix}/{geometry['file']}"})
 
     index["indoor"] = indoor_document(documents)

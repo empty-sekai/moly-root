@@ -67,6 +67,7 @@ UnityPy.config.FALLBACK_UNITY_VERSION = "2022.3.62f3"
 from core.assets.router import route
 from core.jsonio import write_json
 from core.particles import TRAIL_MATERIAL_SLOT, decode_renderer, decode_system
+from phenomena import texarray
 
 TRANSFORMS = ("Transform", "RectTransform")
 
@@ -161,13 +162,40 @@ class _Images:
         self.written = {}
         self.failed = []
 
+    def _array(self, record, path_id, tree, name, stem):
+        """Write every layer of a texture array, in layer order."""
+        reference = {"name": name, "kind": "Texture2DArray",
+                     "width": tree.get("m_Width"), "height": tree.get("m_Height"),
+                     "layers": tree.get("m_Depth"),
+                     "graphicsFormat": tree.get("m_Format"),
+                     "colorSpace": tree.get("m_ColorSpace"),
+                     "mipCount": tree.get("m_MipCount"), "files": []}
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            layers = list(record.objects[path_id].read().images)
+            for index, image in enumerate(layers):
+                file_name = f"{stem}.{index}.png"
+                image.save(self.directory / file_name)
+                reference["files"].append(file_name)
+            if len(layers) != reference["layers"]:
+                self.failed.append({"image": name,
+                                    "reason": f"{len(layers)} layers decoded but the "
+                                              f"asset declares {reference['layers']}"})
+        except Exception as exc:              # unreadable texture format
+            self.failed.append({"image": name,
+                                "reason": f"{type(exc).__name__}: {exc}"})
+            reference["files"] = []
+        return reference
+
     def reference(self, target):
         """Write the image a pointer resolves to and return how to find it.
 
         Returns ``None`` when the pointer resolves to nothing.  The file name is
         qualified by the package that owns the image, because texture names
         repeat across packages and a flat name would let one package overwrite
-        another's image.
+        another's image.  A ``Texture2DArray`` is written one file per layer and
+        reported with ``files`` instead of ``file``, so a caller can keep it
+        apart from a single-image binding.
         """
         if target is None:
             return None
@@ -178,6 +206,10 @@ class _Images:
         tree = record.tree(path_id)
         name = str(tree.get("m_Name", "") or "image")
         kind = record.kinds.get(path_id)
+        if kind == "Texture2DArray":
+            self.written[key] = self._array(record, path_id, tree, name,
+                                            f"{record.bundle}__{name}")
+            return dict(self.written[key])
         if kind != "Texture2D":
             self.failed.append({"image": name,
                                 "reason": f"{kind} is not a single image"})
@@ -210,10 +242,22 @@ class _Materials:
         self.cache = {}
 
     def _decode(self, record, path_id):
-        """Material name, shader, queue, texture bindings, and scalars."""
+        """Material name, shader, queue, texture bindings, and scalars.
+
+        Texture arrays are kept in their own map: they are sampled with a layer
+        coordinate, so putting them next to single-image bindings would let a
+        consumer treat one as the other.  Their sampling parameters are resolved
+        here (:mod:`phenomena.texarray`) so the consumer does not have to know
+        the encoding.
+        """
         tree = record.tree(path_id)
         properties = tree.get("m_SavedProperties") or {}
+        keywords = [str(word) for word in tree.get("m_ValidKeywords") or []]
+        floats = {name: round(float(value), 6)
+                  for name, value in _pairs(properties.get("m_Floats"))
+                  if isinstance(value, (int, float))}
         textures = {}
+        arrays = {}
         scale_offset = {}
         for name, value in _pairs(properties.get("m_TexEnvs")):
             entry = value or {}
@@ -225,6 +269,12 @@ class _Materials:
                                   round(float(offset.get("y", 0.0)), 6)]
             reference = self.images.reference(
                 self.store.follow(record, entry.get("m_Texture") or {}))
+            if reference is not None and "files" in reference:
+                prefix = texarray.slot_prefix(str(name)) or str(name)
+                arrays[name] = dict(reference,
+                                    sampling=texarray.sampling(prefix, floats,
+                                                              keywords))
+                continue
             if reference is not None:
                 textures[name] = reference
         shader = None
@@ -242,10 +292,9 @@ class _Materials:
             "shader": shader,
             "renderQueue": tree.get("m_CustomRenderQueue", -1),
             "textures": textures,
+            "textureArrays": arrays,
             "textureScaleOffset": scale_offset,
-            "floats": {name: round(float(value), 6)
-                       for name, value in _pairs(properties.get("m_Floats"))
-                       if isinstance(value, (int, float))},
+            "floats": floats,
             "colors": {name: [round(value.get(component, 0.0), 6)
                               for component in "rgba"]
                        for name, value in _pairs(properties.get("m_Colors"))
@@ -630,6 +679,13 @@ def extract_from_store(store, out_dir):
             "textures": ("image files are written once per image under a "
                          "package-qualified name, because texture names repeat "
                          "across packages"),
+            "textureArrays": ("a Texture2DArray reference is written one file "
+                              "per layer, in layer order, and is reported under "
+                              "a material's ``textureArrays`` rather than its "
+                              "``textures``, because a consumer must sample it "
+                              "with a layer coordinate; ``sampling`` is resolved "
+                              "the same way :mod:`phenomena.texarray` resolves "
+                              "it for the effect packages"),
             "summary": ("per package: ``emitters`` is the number of "
                         "ParticleSystem objects, ``renderers`` the number of "
                         "ParticleSystemRenderer objects, ``materials`` the "

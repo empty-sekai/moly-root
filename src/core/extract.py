@@ -16,6 +16,18 @@ FIXTURE_MESHES_SKIPPED = ("furniture geometry was not requested; it is one glb "
                           "per package over the whole fixture family, so the "
                           "pass is opt-in via fixture_meshes=True")
 
+# The particle-emitter pass is second-order (it reads the ParticleSystem and
+# ParticleSystemRenderer components of packages whose attach points are read
+# for anything else) and its documents and texture copies are large in number
+# even if small in bytes, so it is opt-in for the same reason the geometry
+# pass is: off by default, its entry is reported ``skipped`` with this reason
+# rather than left out.
+FIXTURE_PARTICLES_SKIPPED = ("furniture particle emitters were not requested; "
+                             "the pass is second-order over the fixture-"
+                             "interface, cutscene-timeline and fixture-"
+                             "timeline families, so it is opt-in via "
+                             "fixture_particles=True")
+
 # The version a bundle whose header carries none is read against.  Several
 # extractor modules assign this at import, which is enough when the caller comes
 # through the command line and nothing else, but the jobs that run before any of
@@ -210,6 +222,7 @@ FIXED_ARTIFACT_PATHS = (
     "fixture-interface/attach-points.json",
     "fixture-interface/areas.json",
     "fixture-models/",
+    "fixture-particles/index.json",
     "fixture-talks/talks.json",
     "cutscene-timeline/tracks/",
     "cutscene-timeline/clips/",
@@ -230,6 +243,26 @@ def _bundle_path(bundles, logical_name):
         if candidate.exists():
             return candidate
     raise FileNotFoundError(f"bundle not found: {logical_name}")
+
+
+def _optional_pass_status(asked, skipped_reason, error, counts):
+    """One caller-gated pass's status: ``skipped``/``failed``/``succeeded``.
+
+    A pass the caller did not ask for is reported ``skipped`` with the reason
+    (never omitted, so a reader can tell "nobody asked" from "this artifact
+    does not exist").  Asked for and raising is ``failed`` with the exception.
+    Asked for, raising nothing, but producing an empty *counts* is *also*
+    ``failed`` -- that shape is what a pass whose call was silently skipped
+    (or removed) looks like from the report alone, so it must not read as a
+    success just because nothing raised.
+    """
+    if not asked:
+        return "skipped", skipped_reason
+    if error:
+        return "failed", error
+    if not counts:
+        return "failed", "pass produced no counts"
+    return "succeeded", ""
 
 
 def _unit_id(bundle_name):
@@ -489,6 +522,8 @@ def write_pack_manifest(out):
 def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                      player_data=None,
                      fixture_meshes=False,
+                     fixture_particles=False,
+                     builtin_resources=None,
                      master_cache=None, vgmstream=None, ffmpeg=None,
                      accept_input_gaps=()):
     """Extract every logical bundle in *manifest* and write a JSON report.
@@ -520,6 +555,19 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
     is off by default because that is the heaviest artifact the pipeline makes;
     off, its entry is reported ``skipped`` with the reason, never omitted, so a
     reader can tell "nobody asked for it" from "this domain does not exist".
+
+    *fixture_particles* asks for the furniture particle-emitter pass, which
+    writes one document per particle-emitting package of the fixture-interface,
+    cutscene-timeline and fixture-timeline families into ``fixture-particles/``.
+    It is off by default for the same reason as the geometry pass; off, its
+    entry is likewise reported ``skipped`` with the reason, never omitted.
+
+    *builtin_resources* names the engine's own built-in resource containers (a
+    container file, or a directory holding one), resolved with
+    :func:`core.assets.packages.builtin_archive_paths` by the caller.  Some
+    particle-system renderers of the fixture/cut-scene family draw a copy of a
+    built-in primitive mesh that no package ships; without this, those mesh
+    slots are reported unresolved rather than left unparsed.
 
     *unity_version* is the version to read a bundle whose header carries none
     against.  It is applied here, for the whole run, rather than being left to
@@ -645,6 +693,8 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
     fixture_store = None
     fixture_mesh_result = None
     fixture_mesh_error = None
+    fixture_particle_result = None
+    fixture_particle_error = None
     if fixture_paths:
         try:
             from core.assets.packages import PackageStore
@@ -676,6 +726,69 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                     fixture_store, str(out / "fixture-models"))
             except Exception as exc:
                 fixture_mesh_error = f"{type(exc).__name__}: {exc}"
+        # Particle emitters are a second-order read over three domains --
+        # fixture-interface, cutscene-timeline and fixture-timeline -- because
+        # a package's ParticleSystem and ParticleSystemRenderer components are
+        # read across the same families whose attach points, tracks and clips
+        # are each read as their own job elsewhere in this function.  The
+        # ``fixture_store`` opened above only holds the fixture-interface
+        # family, so it is not reused here; a second, wider store is opened
+        # instead, which pays the fixture-interface packages' read cost a
+        # second time.  fixtures.particles.extract_from_store does its own
+        # per-domain filtering and counting once every package of the three
+        # domains is in the store, so this driver only gathers their paths
+        # rather than re-implementing that filtering.  The domain stays
+        # ``fixture-interface`` in the report (its subject is the routing that
+        # gates this whole job), the same reason the geometry entry keeps it.
+        if fixture_particles:
+            try:
+                from core.assets.packages import PackageStore
+                from fixtures.interface import extract_particles
+                particle_domains = ("fixture-interface", "cutscene-timeline",
+                                    "fixture-timeline")
+                particle_paths = dict(fixture_paths)
+                for name in names:
+                    if name in particle_paths:
+                        continue
+                    target = route(name)
+                    if target is None or target.domain not in particle_domains:
+                        continue
+                    try:
+                        particle_paths[name] = _bundle_path(bundles, name)
+                    except Exception:
+                        pass
+                # A renderer's material slots, and a mesh-drawn renderer's own
+                # mesh, commonly point into a companion package this domain's
+                # own selection never names on its own: an
+                # ``mysekai__effect__*`` package supplies the fixture and
+                # cut-scene family's materials and meshes, and the shared
+                # ``mysekai__shader`` package supplies their shaders.  The
+                # router does not assign either to one of this pass's three
+                # domains, and discovery may not have selected them into
+                # *names* at all, so the bundle directory is scanned by name
+                # directly; every match is loaded to serve as a pointer
+                # target and is never itself extracted as a target package.
+                supply_paths = {}
+                try:
+                    for entry in sorted(os.listdir(bundles)):
+                        if entry in particle_paths:
+                            continue
+                        candidate = Path(bundles) / entry
+                        if not candidate.is_file():
+                            continue
+                        if entry.startswith("mysekai__effect__") or entry == "mysekai__shader":
+                            supply_paths[entry] = str(candidate)
+                except OSError:
+                    pass
+                particle_store = PackageStore(
+                    [str(path) for path in particle_paths.values()]
+                    + list(supply_paths.values())
+                    + list(builtin_resources or []),
+                    root=bundles)
+                fixture_particle_result = extract_particles(
+                    particle_store, str(out / "fixture-particles"))
+            except Exception as exc:
+                fixture_particle_error = f"{type(exc).__name__}: {exc}"
     # The dialogue-camera domain is one package today, but the reader takes a
     # family and reports per package, so it is driven exactly like the other
     # shared-read domains rather than being special-cased on today's count.
@@ -820,13 +933,25 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 if facial:
                     from chara.characters import facial_tables
                     facial_data = facial_tables(str(_bundle_path(bundles, facial)))
+                # Every character material's m_Shader is an external PPtr into
+                # the one shared shader package (verified: all 95 materials
+                # across the 31 real character bundles resolve through the
+                # single CAB that package supplies) -- without it as an aux
+                # bundle, extract_character can only report the shader as an
+                # unresolved external, never its name.
+                aux_bundles = []
+                try:
+                    aux_bundles.append(str(_bundle_path(bundles, "mysekai__shader")))
+                except FileNotFoundError:
+                    pass  # not supplied: shader stays reported as external, honestly
                 # Pack artifacts are named after the character (sd_<unit>),
                 # matching the viewer contract, not after the model bundle.
                 stem = name.split("__")[-1]
                 parts = stem.split("_")
                 if len(parts) >= 3 and parts[0] == "mdl":
                     stem = f"{parts[1]}_{parts[2]}"
-                result = extract_character(str(bundle), str(out), stem, sampled=sampled, facial=facial_data)
+                result = extract_character(str(bundle), str(out), stem, sampled=sampled,
+                                           facial=facial_data, aux=tuple(aux_bundles))
             elif target.domain == "motion":
                 from chara.motion_library import export_motion_library
                 reference = next((n for n in names if route(n) and route(n).domain == "character"), None)
@@ -1027,23 +1152,37 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                        if isinstance(v, int)},
             "error": fixture_error or ""})
         # Always present, never omitted: skipped-with-a-reason when the caller
-        # did not ask for geometry, otherwise the outcome of the pass.
-        if not fixture_meshes:
-            geometry_status = "skipped"
-            geometry_error = FIXTURE_MESHES_SKIPPED
-        elif fixture_mesh_error:
-            geometry_status = "failed"
-            geometry_error = fixture_mesh_error
-        else:
-            geometry_status = "succeeded"
-            geometry_error = ""
+        # did not ask for geometry, otherwise the outcome of the pass -- and a
+        # pass that raised nothing but produced no counts at all is reported
+        # failed, not succeeded, since that shape is indistinguishable from a
+        # call that was never made (see ``_optional_pass_status``).
+        geometry_counts = {k: v for k, v in (fixture_mesh_result or {}).items()
+                           if isinstance(v, int)}
+        geometry_status, geometry_error = _optional_pass_status(
+            fixture_meshes, FIXTURE_MESHES_SKIPPED, fixture_mesh_error,
+            geometry_counts)
         report["derived"].append({
             "artifact": "fixture-models/",
             "domain": "fixture-interface",
             "status": geometry_status,
-            "counts": {k: v for k, v in (fixture_mesh_result or {}).items()
-                       if isinstance(v, int)},
+            "counts": geometry_counts,
             "error": geometry_error})
+        # Always present, never omitted, for the same reason as the geometry
+        # entry above: skipped-with-a-reason when the caller did not ask for
+        # the particle-emitter pass, otherwise the outcome of the pass -- and
+        # the same failed-not-succeeded shape for a pass that produced no
+        # counts at all (see ``_optional_pass_status``).
+        particle_counts = {k: v for k, v in (fixture_particle_result or {}).items()
+                           if isinstance(v, int)}
+        particle_status, particle_error = _optional_pass_status(
+            fixture_particles, FIXTURE_PARTICLES_SKIPPED, fixture_particle_error,
+            particle_counts)
+        report["derived"].append({
+            "artifact": "fixture-particles/index.json",
+            "domain": "fixture-interface",
+            "status": particle_status,
+            "counts": particle_counts,
+            "error": particle_error})
     if fixture_talks_asked:
         report["derived"].append({
             "artifact": "fixture-talks/talks.json",

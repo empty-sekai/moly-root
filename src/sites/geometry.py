@@ -230,6 +230,16 @@ def shader_reference(store, record, tree):
             "fallback": parsed.get("m_FallbackName") or None}
 
 
+def valid_keywords(tree):
+    """A material's enabled shader keyword set, as declared strings.
+
+    Shared with the character domain (:mod:`chara.characters`) so the one
+    reading of ``m_ValidKeywords`` serves both; legally empty (a material can
+    enable no keywords), so an empty list here is not itself a defect.
+    """
+    return [str(word) for word in tree.get("m_ValidKeywords") or []]
+
+
 def material_document(store, record, path_id, textures):
     """One material: its shader, its texture bindings and its property block."""
     tree = record.tree(path_id)
@@ -261,7 +271,7 @@ def material_document(store, record, path_id, textures):
     return {"name": str(tree.get("m_Name", "")),
             "shader": shader_reference(store, record, tree),
             "renderQueue": tree.get("m_CustomRenderQueue", -1),
-            "keywords": [str(word) for word in tree.get("m_ValidKeywords") or []],
+            "keywords": valid_keywords(tree),
             "textures": slots, "textureArrays": arrays,
             "textureScaleOffset": scale_offset,
             "floats": floats, "colors": colors}

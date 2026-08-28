@@ -33,6 +33,7 @@ from UnityPy.helpers.MeshHelper import MeshHandler
 
 from core.quat import trs_matrix, mat_mul, mat_inv
 from core.gltf import GLB, unity_to_gltf_pos, unity_to_gltf_quat, flip_winding
+from sites.geometry import shader_reference, valid_keywords
 from .mecanim import Rig, rig_doc, pose_bone, pose_root, sample_frames
 from .mecanim.traits import GAME_TO_HUMAN
 from . import cloth as cloth_mod
@@ -185,6 +186,51 @@ def _texenv_map(mat_tt):
             {k: v for k, v in (props.get("m_TexEnvs") or [])})
 
 
+class _ShaderRecord:
+    """Adapts one resolved UnityPy object to the ``record`` half of the
+    ``(store, record)`` contract :func:`sites.geometry.shader_reference`
+    expects: a ``.tree(path_id)`` reader and a ``.bundle`` label."""
+
+    def __init__(self, obj):
+        self._obj = obj
+        self.bundle = str(getattr(obj.assets_file, "name", "") or "")
+
+    def tree(self, path_id):
+        return self._obj.read_typetree()
+
+
+class _ShaderStore:
+    """Adapts :meth:`CharacterAssets.deref` to the ``store`` half of the same
+    contract, so the one shader-tag reader in this repo (``sites.geometry``)
+    also resolves character materials' shaders — this domain has no
+    :class:`core.assets.packages.PackageStore` of its own, only ``deref``'s
+    pointer-relative-to-owner-object resolution, which this wraps rather than
+    reimplementing."""
+
+    def __init__(self, assets):
+        self._assets = assets
+
+    def follow(self, owner, pointer):
+        try:
+            target = self._assets.deref(owner, pointer or {})
+        except (LookupError, KeyError):
+            return None
+        if target is None:
+            return None
+        return _ShaderRecord(target), target.path_id
+
+    def archive_of(self, owner, pointer):
+        pointer = pointer or {}
+        index = pointer.get("m_FileID", 0) - 1
+        af = owner.assets_file
+        if index < 0:
+            return str(getattr(af, "name", "") or "")
+        externals = af.externals
+        if 0 <= index < len(externals):
+            return str(getattr(externals[index], "path", "") or externals[index])
+        return None
+
+
 def _canonical_material(name, floats):
     """Map a material to its canonical role the way the runtime does: face
     materials are found by name substring, the remaining ones are body (and,
@@ -221,6 +267,8 @@ def read_materials(assets, renderers):
                 if tex_obj is not None:
                     textures[prop] = tex_obj
             out[canon] = {"name": tt["m_Name"], "pathId": mo.path_id,
+                          "shader": shader_reference(_ShaderStore(assets), mo, tt),
+                          "keywords": valid_keywords(tt),
                           "floats": floats,
                           "colors": {k: [v["r"], v["g"], v["b"], v["a"]]
                                      for k, v in colors.items()},
@@ -683,6 +731,21 @@ def extract_character(bundle, out_dir, name, sampled=None, aux=(),
     glb_path = os.path.join(out_dir, f"{name}.glb")
     glb.save(glb_path)
 
+    # The same PNG bytes already embedded in the .glb (above) are also
+    # written to disk beside it, one file per decoded texture name, so the
+    # sidecar's top-level ``textures[]`` (relative paths, the shape
+    # moly-render's loader expects) names files that actually exist. This
+    # duplicates the bytes on disk deliberately -- the .glb stays a complete,
+    # self-contained artifact for the already-verified glTF-loader viewer
+    # (which never reads the sidecar for images), while the sidecar gets a
+    # real path per texture for consumers that go by material texture slots.
+    tex_paths = {}
+    for tex_name in sorted(pngs):
+        tex_file = f"{tex_name}.png"
+        with open(os.path.join(out_dir, tex_file), "wb") as fh:
+            fh.write(pngs[tex_name])
+        tex_paths[tex_name] = tex_file
+
     # ---- rig sidecar ----
     cloth_rig = None
     cloth_summary = None
@@ -724,10 +787,14 @@ def extract_character(bundle, out_dir, name, sampled=None, aux=(),
         "mouthAtlas": _atlas_doc(mouth_tex.m_Width, mouth_tex.m_Height, atlas_cell),
         "cloth": cloth_rig,
         "anchors": read_anchors(assets, tr_index, nodes),
-        "materials": {canon: {"name": m["name"], "floats": m["floats"],
-                              "colors": m["colors"],
-                              "textures": tex_refs[canon],
-                              "renderQueue": m["renderQueue"]}
+        "textures": [tex_paths[n] for n in sorted(pngs)],
+        "materials": {canon: {"name": m["name"], "shader": m["shader"],
+                              "renderQueue": m["renderQueue"],
+                              "keywords": m["keywords"],
+                              "textures": {prop: tex_paths[tex_name]
+                                           for prop, tex_name in tex_refs[canon].items()},
+                              "floats": m["floats"],
+                              "colors": m["colors"]}
                       for canon, m in materials.items()},
     }
     rig_path = os.path.join(out_dir, f"{name}.rig.json")

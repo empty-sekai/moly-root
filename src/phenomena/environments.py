@@ -33,7 +33,7 @@ from . import meshes as meshes_module
 from . import texarray
 from .audio import Library, archive_bytes
 from .config import flatten_config, volume_profile
-from .effects import decode_effect
+from .effects import decode_effect, light_modes
 from .timeline import TIMELINE_SCRIPT, decode_timeline
 
 # Script classes that identify the authored assets inside a package.
@@ -272,7 +272,9 @@ class _Images:
 
 
 def _material(store, record, path_id, images):
-    """Material name, shader, queue, texture bindings, and scalar properties.
+    """Material name, shader, queue, texture bindings, light modes, and scalars.
+
+    Light modes are read from the shader's parsed form, pass by pass; light_modes states what is promised and what is not.
 
     Texture arrays are kept in their own map: they are sampled with a layer
     coordinate, so putting them next to single-image bindings would let a consumer
@@ -309,13 +311,27 @@ def _material(store, record, path_id, images):
                                 sampling=texarray.sampling(prefix, scalars, keywords))
             continue
         textures[name] = reference["file"] if reference else None
-    shader = None
     shader_target = store.follow(record, tree.get("m_Shader") or {})
-    if shader_target is not None:
-        shader_record, shader_id = shader_target
-        parsed = shader_record.tree(shader_id).get("m_ParsedForm") or {}
-        shader = str(parsed.get("m_Name")) if parsed.get("m_Name") else None
+    if shader_target is None:
+        # A material that names no shader, or a shader no supplied package
+        # holds, leaves the pass list unreadable.  An empty list would claim
+        # "this shader declares nothing" -- a fact about the shader, not about
+        # our ability to read it -- so this stays visible as a hard failure
+        # instead of coming out empty.
+        raise ValueError(
+            f"material {tree.get('m_Name')!r} names a shader no supplied "
+            f"package holds; its pass list cannot be read and its light modes "
+            f"must not silently come out empty")
+    shader_record, shader_id = shader_target
+    parsed = shader_record.tree(shader_id).get("m_ParsedForm")
+    if parsed is None:
+        raise ValueError(
+            f"shader of material {tree.get('m_Name')!r} has no parsed form; "
+            f"its pass list cannot be read and its light modes must not "
+            f"silently come out empty")
+    shader = str(parsed.get("m_Name")) if parsed.get("m_Name") else None
     return {"name": tree.get("m_Name"), "shader": shader,
+            "lightModes": light_modes(parsed),
             "renderQueue": tree.get("m_CustomRenderQueue", -1),
             "keywords": keywords,
             "textures": textures,
