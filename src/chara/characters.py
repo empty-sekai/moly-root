@@ -788,14 +788,24 @@ def extract_character(bundle, out_dir, name, sampled=None, aux=(),
         "cloth": cloth_rig,
         "anchors": read_anchors(assets, tr_index, nodes),
         "textures": [tex_paths[n] for n in sorted(pngs)],
-        "materials": {canon: {"name": m["name"], "shader": m["shader"],
-                              "renderQueue": m["renderQueue"],
-                              "keywords": m["keywords"],
-                              "textures": {prop: tex_paths[tex_name]
-                                           for prop, tex_name in tex_refs[canon].items()},
-                              "floats": m["floats"],
-                              "colors": m["colors"]}
-                      for canon, m in materials.items()},
+        # materials[i].name's contract is "the glTF material's own name",
+        # matching the site domain's convention (there it holds the real
+        # Unity material name because the glTF material does too). For
+        # characters the glTF material name is the canon role string
+        # (see the `gm = {"name": canon, ...}` build above), so name is
+        # canon here as well -- the contract is uniform, only its content
+        # differs by domain. The real Unity material name is not lost; it
+        # lives in unityName. role duplicates canon for callers that want
+        # it without relying on name's domain-specific content.
+        "materials": [{"role": canon, "name": canon, "unityName": m["name"],
+                       "shader": m["shader"],
+                       "renderQueue": m["renderQueue"],
+                       "keywords": m["keywords"],
+                       "textures": {prop: tex_paths[tex_name]
+                                    for prop, tex_name in tex_refs[canon].items()},
+                       "floats": m["floats"],
+                       "colors": m["colors"]}
+                      for canon, m in materials.items()],
     }
     rig_path = os.path.join(out_dir, f"{name}.rig.json")
     with open(rig_path, "w", encoding="utf-8", newline="\n") as fh:
