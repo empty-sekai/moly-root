@@ -91,12 +91,12 @@ def loop_document(meta):
     start, end = meta.get("loopStart"), meta.get("loopEnd")
     looped = start is not None and end is not None
     return {"loop": looped,
-            "loopStartSeconds": round(start / rate, 6) if looped and rate else None,
-            "loopEndSeconds": round(end / rate, 6) if looped and rate else None,
+            "loopStartSeconds": start / rate if looped and rate else None,
+            "loopEndSeconds": end / rate if looped and rate else None,
             "loopStartSamples": start, "loopEndSamples": end,
             "sampleRate": meta.get("sampleRate"), "channels": meta.get("channels"),
             "samples": samples,
-            "durationSeconds": round(samples / rate, 6) if rate else None,
+            "durationSeconds": samples / rate if rate else None,
             "encoding": meta.get("encoding")}
 
 

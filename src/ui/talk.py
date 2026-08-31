@@ -873,7 +873,7 @@ def compare_hand_vs_typetree(obj, hand_fields):
     gv, hv = list(generic.values()), list(hand.values())
 
     def norm(seq):
-        return [round(x, 6) if isinstance(x, float) else x for x in seq]
+        return [x if isinstance(x, float) else x for x in seq]
 
     return norm(hv) == norm(gv), hv, gv
 

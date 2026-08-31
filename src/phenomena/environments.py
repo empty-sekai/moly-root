@@ -55,8 +55,8 @@ def _gradient_end(gradient):
         return None
     colour = gradient.get(f"key{colours - 1}") or {}
     alpha = gradient.get(f"key{max(0, alphas - 1)}") or {}
-    return [round(float(colour.get(channel, 0.0)), 6) for channel in "rgb"] + [
-        round(float(alpha.get("a", 1.0)), 6)]
+    return [float(colour.get(channel, 0.0)) for channel in "rgb"] + [
+        float(alpha.get("a", 1.0))]
 
 # Effect placement, as told by the prefab name.
 EFFECT_KINDS = (("fx_env_sky_", "sky"), ("fx_env_camera_", "camera"),
@@ -297,10 +297,10 @@ def _material(store, record, path_id, images):
         entry = value or {}
         scale = entry.get("m_Scale") or {}
         offset = entry.get("m_Offset") or {}
-        scale_offset[name] = [round(float(scale.get("x", 1.0)), 6),
-                              round(float(scale.get("y", 1.0)), 6),
-                              round(float(offset.get("x", 0.0)), 6),
-                              round(float(offset.get("y", 0.0)), 6)]
+        scale_offset[name] = [float(scale.get("x", 1.0)),
+                              float(scale.get("y", 1.0)),
+                              float(offset.get("x", 0.0)),
+                              float(offset.get("y", 0.0))]
         pointer = entry.get("m_Texture") or {}
         if not pointer.get("m_PathID", 0):
             continue
@@ -337,7 +337,7 @@ def _material(store, record, path_id, images):
             "textures": textures,
             "textureArrays": arrays,
             "textureScaleOffset": scale_offset,
-            "floats": {name: round(float(value), 6)
+            "floats": {name: float(value)
                        for name, value in scalars.items()},
             "colors": {n: [v.get(c, 0.0) for c in "rgba"]
                        for n, v in _pairs(properties.get("m_Colors"))

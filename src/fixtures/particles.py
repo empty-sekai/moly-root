@@ -253,7 +253,7 @@ class _Materials:
         tree = record.tree(path_id)
         properties = tree.get("m_SavedProperties") or {}
         keywords = [str(word) for word in tree.get("m_ValidKeywords") or []]
-        floats = {name: round(float(value), 6)
+        floats = {name: float(value)
                   for name, value in _pairs(properties.get("m_Floats"))
                   if isinstance(value, (int, float))}
         textures = {}
@@ -263,10 +263,10 @@ class _Materials:
             entry = value or {}
             scale = entry.get("m_Scale") or {}
             offset = entry.get("m_Offset") or {}
-            scale_offset[name] = [round(float(scale.get("x", 1.0)), 6),
-                                  round(float(scale.get("y", 1.0)), 6),
-                                  round(float(offset.get("x", 0.0)), 6),
-                                  round(float(offset.get("y", 0.0)), 6)]
+            scale_offset[name] = [float(scale.get("x", 1.0)),
+                                  float(scale.get("y", 1.0)),
+                                  float(offset.get("x", 0.0)),
+                                  float(offset.get("y", 0.0))]
             reference = self.images.reference(
                 self.store.follow(record, entry.get("m_Texture") or {}))
             if reference is not None and "files" in reference:
@@ -295,7 +295,7 @@ class _Materials:
             "textureArrays": arrays,
             "textureScaleOffset": scale_offset,
             "floats": floats,
-            "colors": {name: [round(value.get(component, 0.0), 6)
+            "colors": {name: [value.get(component, 0.0)
                               for component in "rgba"]
                        for name, value in _pairs(properties.get("m_Colors"))
                        if isinstance(value, dict)},

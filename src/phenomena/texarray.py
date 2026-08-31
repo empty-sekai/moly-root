@@ -98,7 +98,7 @@ def sampling(prefix, floats, keywords):
     out = {}
     for suffix, name in SAMPLING_FIELDS:
         value = floats.get(f"{prefix}{suffix}")
-        out[name] = None if value is None else round(float(value), 6)
+        out[name] = None if value is None else float(value)
     keyword = mode_keyword(prefix)
     out["arrayMode"] = out["mode"] == ARRAY_MODE
     out["keyword"] = keyword

@@ -219,10 +219,33 @@ def test_a_code_or_suffix_mismatch_is_reported(tmp_path, monkeypatch):
     assert entries[1]["suffix"] == "02"
 
 
-def test_transforms_are_rounded_to_six_decimals(tmp_path, monkeypatch):
-    """Red when floats are written verbatim: the exact float the editor stored
-    (e.g. ``0.3499999940395355``) is an approximation artifact and must round to
-    the authored decimal; a tiny epsilon must become zero, not negative zero."""
+def test_transforms_keep_the_float_the_engine_reads(tmp_path, monkeypatch):
+    """Red when a transform float is rounded: the value written must be the one
+    the engine reads, bit for bit.
+
+    This reverses an earlier position, which is recorded here so the next reader
+    can see it was weighed rather than missed.  That position was: the exact
+    float the editor stored (``0.3499999940395355``) is an approximation
+    artifact, so the product should carry the decimal the author typed
+    (``-0.35``), and a tiny epsilon should collapse to zero.
+
+    It is overturned because it restores the wrong target.  The game never sees
+    ``-0.35``; it reads the f32 and computes with it, epsilon and all.  A
+    product carrying ``-0.35`` hands the renderer a number that does not occur
+    in the game, and the acceptance line is whether we match the game, not
+    whether we match what the author typed.  The ``cos(pi/2)`` residue in the
+    rotation below is the same case: the engine carries that residue too, so
+    keeping it reproduces the engine's arithmetic rather than preserving noise.
+
+    The cost is deliberate and is the reason this docstring exists: editor
+    approximation artifacts now appear verbatim in the product, and a consumer
+    that wants the authored decimal has to round for itself -- which it can do,
+    while the reverse (recovering the engine's float from a rounded one) is not
+    possible.
+
+    One half of the old position was not overturned and is not covered here:
+    whether writing floats verbatim can produce ``-0.0``, and whether any
+    consumer behaves differently on it.  That is measured separately."""
     pkg = _Package("mysekai__fixture__mdl_rounding")
     pkg.script()
     a = pkg.attach_node("loc_start013", position=(-0.3499999940395355, 0.0, -0.47))
@@ -232,8 +255,11 @@ def test_transforms_are_rounded_to_six_decimals(tmp_path, monkeypatch):
     pkg.fixture_view([(a, b)])
     _result, document = _run(tmp_path, monkeypatch, {pkg.name: pkg.finish()})
     entry = document["packages"]["mysekai__fixture__mdl_rounding"]["entries"][0]
-    assert entry["start"]["transform"]["position"] == [-0.35, 0.0, -0.47]
-    assert entry["end"]["transform"]["rotation"] == [0.0, 1.0, 0.0, 0.0]
+    assert entry["start"]["transform"]["position"] == [
+        -0.3499999940395355, 0.0, -0.47]
+    assert entry["end"]["transform"]["rotation"] == [
+        6.123234262925839e-17, 1.0, -6.123234262925839e-17,
+        -6.123234262925839e-17]
 
 
 def test_a_dangling_pointer_is_reported(tmp_path, monkeypatch):

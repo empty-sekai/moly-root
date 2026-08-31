@@ -118,7 +118,7 @@ def constants_document():
         "fixtureTouchSizeY": FIXTURE_TOUCH_SIZE_Y,
         "warpDelayTime": WARP_DELAY_TIME,
         "gridAxis": {"min": GRID_AXIS_MIN, "max": GRID_AXIS_MAX,
-                     "halfExtentUnits": round(GRID_AXIS_MAX * TILE_SIZE, 6)},
+                     "halfExtentUnits": GRID_AXIS_MAX * TILE_SIZE},
         "worldFromGrid": "world = sitePosition + grid * tileSize",
     }
 
@@ -189,9 +189,9 @@ def placement_document(rows, scene_names=()):
                     "cells": {"width": layout.get("width"),
                               "height": layout.get("height"),
                               "depth": layout.get("depth")},
-                    "units": {"width": round((layout.get("width") or 0) * TILE_SIZE, 6),
-                              "height": round((layout.get("height") or 0) * TILE_SIZE, 6),
-                              "depth": round((layout.get("depth") or 0) * TILE_SIZE, 6)},
+                    "units": {"width": (layout.get("width") or 0) * TILE_SIZE,
+                              "height": (layout.get("height") or 0) * TILE_SIZE,
+                              "depth": (layout.get("depth") or 0) * TILE_SIZE},
                     "unavailableZones": [
                         {"id": zone.get("id"),
                          "start": _row_numbers(zone, "startX", "startY", "startZ"),

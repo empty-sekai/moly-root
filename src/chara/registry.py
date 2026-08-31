@@ -53,7 +53,7 @@ def _derive(row):
     out = {}
     for stored, (runtime, _unit) in DERIVED.items():
         value = row.get(stored)
-        out[runtime] = None if value is None else round(float(value) / MILLI, 6)
+        out[runtime] = None if value is None else float(value) / MILLI
     return out
 
 

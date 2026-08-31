@@ -156,7 +156,7 @@ def _extract_one(package):
             except Exception as exc:  # pragma: no cover - depends on the asset
                 return _empty(True, f"{READ_FAILED}: {exc}")
             out = {"hasMeta": True, "readError": None,
-                   "stackHeight": round(float(tree.get("stackHeight", 0.0)), 4)}
+                   "stackHeight": float(tree.get("stackHeight", 0.0))}
             for key in ARRAY_KEYS:
                 out[key] = _grid(tree.get(key))
             return out

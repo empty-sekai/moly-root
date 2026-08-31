@@ -66,7 +66,7 @@ SEMANTICS = {
 def _vector(tree, keys, channels):
     """One rounded vector, with negative-zero written as zero."""
     source = next((tree.get(key) for key in keys if tree.get(key)), {}) or {}
-    out = [round(float(source.get(channel, 0.0) or 0.0), 6) for channel in channels]
+    out = [float(source.get(channel, 0.0) or 0.0) for channel in channels]
     return [value if value else 0.0 for value in out]
 
 

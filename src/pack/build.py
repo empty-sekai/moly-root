@@ -316,7 +316,7 @@ def main(argv=None):
                     xf_overlay_expect_files=args.xf_overlay_expect_files,
                     xf_overlay_expect_bytes=args.xf_overlay_expect_bytes,
                     transforms_path=args.transforms)
-    report["wall_seconds"] = round(time.time() - t0, 3)
+    report["wall_seconds"] = time.time() - t0
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False))

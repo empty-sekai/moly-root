@@ -93,7 +93,7 @@ def _effector(tree):
     particles finish their lives while the incoming one is already emitting.
     """
     rotation = tree.get("_initializeRotateType")
-    return {"timeUntilDestroy": round(float(tree.get("_timeUntilDestroy", 0.0)), 6),
+    return {"timeUntilDestroy": float(tree.get("_timeUntilDestroy", 0.0)),
             "rotationType": ROTATION_TYPES.get(rotation, rotation)}
 
 
@@ -120,7 +120,7 @@ def _effective_rotation(kind, effectors):
 
 
 def _vec(node, keys):
-    return [round(float(node.get(key, 0.0)), 6) for key in keys]
+    return [float(node.get(key, 0.0)) for key in keys]
 
 
 def _component_ids(tree):

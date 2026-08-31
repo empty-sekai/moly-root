@@ -176,11 +176,11 @@ def _steps(body, tables, scalars=None, defaults=None):
         values = [_resolve(a, tables, scalars) for a in args]
         if op == "alone_wait_time":
             seconds = values[1][0] if len(values) > 1 else 0.0
-            steps.append({"t": round(t, 4), "op": "wait", "seconds": seconds})
+            steps.append({"t": t, "op": "wait", "seconds": seconds})
             if isinstance(seconds, (int, float)):
                 t += float(seconds)
             continue
-        step = {"t": round(t, 4)}
+        step = {"t": t}
         if op == "change_animation":
             step["op"] = "animation"
             step["motion"], step["alias"] = values[1]
@@ -252,7 +252,7 @@ def parse_script(text, tables, scalars=None, defaults=None):
         scenarios.append({
             "id": f"{match.group(1)}<{high}", "kind": "randomBranch",
             "trigger": {"kind": "randomBranch", "low": low, "high": high,
-                        "weight": round((high - low) / 100.0, 4)},
+                        "weight": (high - low) / 100.0},
             "steps": steps})
         low, seen = high, seen + count
     for match in GATE_RE.finditer(text):

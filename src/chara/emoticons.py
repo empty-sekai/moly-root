@@ -66,7 +66,7 @@ def _hash(path):
 
 
 def _vec(value, keys):
-    return [round(float(value.get(k, 0.0)), 6) for k in keys]
+    return [float(value.get(k, 0.0)) for k in keys]
 
 
 def _hierarchy(objects, trees, material_resolver=None):
@@ -200,7 +200,7 @@ def _channels(clip_tree, path_names):
         values = []
         for frame in range(frames):
             t = frame / rate
-            values.append([round(evaluate(parts[c], t), 6) if c in parts else 0.0
+            values.append([evaluate(parts[c], t) if c in parts else 0.0
                            for c in range(width)])
         name = path_names.get(path)
         if name is None and path not in unresolved:
@@ -240,10 +240,10 @@ def _material(tree, texture_files, shader=None):
         # pair is what the vertex stage reads, not the image.
         sc = entry.get("m_Scale", {}) or {}
         of = entry.get("m_Offset", {}) or {}
-        scale_offset[name] = [round(float(sc.get("x", 1.0)), 6),
-                              round(float(sc.get("y", 1.0)), 6),
-                              round(float(of.get("x", 0.0)), 6),
-                              round(float(of.get("y", 0.0)), 6)]
+        scale_offset[name] = [float(sc.get("x", 1.0)),
+                              float(sc.get("y", 1.0)),
+                              float(of.get("x", 0.0)),
+                              float(of.get("y", 0.0))]
         pointer = entry.get("m_Texture", {}) or {}
         path_id = pointer.get("m_PathID", 0)
         if not path_id:
@@ -255,9 +255,9 @@ def _material(tree, texture_files, shader=None):
         "renderQueue": tree.get("m_CustomRenderQueue", -1),
         "textures": textures,
         "textureScaleOffset": scale_offset,
-        "floats": {n: round(float(v), 6) for n, v in _pairs(props.get("m_Floats"))
+        "floats": {n: float(v) for n, v in _pairs(props.get("m_Floats"))
                    if isinstance(v, (int, float))},
-        "colors": {n: [round(v.get(c, 0.0), 6) for c in "rgba"]
+        "colors": {n: [v.get(c, 0.0) for c in "rgba"]
                    for n, v in _pairs(props.get("m_Colors")) if isinstance(v, dict)},
     }
 

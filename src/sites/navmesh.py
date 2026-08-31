@@ -50,7 +50,7 @@ def _hash_bytes(node):
 
 
 def _vector(node):
-    return [round(float((node or {}).get(axis, 0.0)), 6) for axis in "xyz"]
+    return [float((node or {}).get(axis, 0.0)) for axis in "xyz"]
 
 
 def height_mesh_blob(mesh):
@@ -102,13 +102,13 @@ def navmesh_document(tree):
         "name": str(tree.get("m_Name", "")),
         "agentTypeID": tree.get("m_AgentTypeID"),
         "position": _vector(tree.get("m_Position")),
-        "rotation": [round(float((tree.get("m_Rotation") or {}).get(axis, 0.0)), 6)
+        "rotation": [float((tree.get("m_Rotation") or {}).get(axis, 0.0))
                      for axis in "xyzw"],
         "siteLocal": (_vector(tree.get("m_Position")) == [0.0, 0.0, 0.0]
-                      and round(float((tree.get("m_Rotation") or {}).get("w", 1.0)), 6) == 1.0),
+                      and float((tree.get("m_Rotation") or {}).get("w", 1.0)) == 1.0),
         "sourceBounds": {"center": _vector(bounds.get("m_Center")),
                          "extent": _vector(bounds.get("m_Extent"))},
-        "buildSettings": {key: (round(float(value), 6)
+        "buildSettings": {key: (float(value)
                                 if isinstance(value, float) else value)
                           for key, value in settings.items()},
         "tiles": {"count": len(tiles), "bytes": len(blob), "parsed": False,

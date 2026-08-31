@@ -43,15 +43,15 @@ def _keys(curve):
     """
     out = []
     for key in (curve or {}).get("m_Curve") or []:
-        entry = {"time": round(float(key.get("time", 0.0)), 6),
-                 "value": round(float(key.get("value", 0.0)), 6)}
+        entry = {"time": float(key.get("time", 0.0)),
+                 "value": float(key.get("value", 0.0))}
         for name in ("inSlope", "outSlope"):
             slope = float(key.get(name, 0.0))
             entry[name] = (None if slope in (float("inf"), float("-inf"))
-                           else round(slope, 6))
+                           else slope)
         entry["weightedMode"] = key.get("weightedMode")
-        entry["inWeight"] = round(float(key.get("inWeight", 0.0)), 6)
-        entry["outWeight"] = round(float(key.get("outWeight", 0.0)), 6)
+        entry["inWeight"] = float(key.get("inWeight", 0.0))
+        entry["outWeight"] = float(key.get("outWeight", 0.0))
         out.append(entry)
     return out
 
@@ -69,26 +69,26 @@ def clip_asset(class_name, tree):
                                               "maxGradient": tree.get("_gradient")
                                               or {}})["gradient"]}, None
     if class_name == "SiteEnvironmentValueClip":
-        return {"scale": round(float(tree.get("_scale", 0.0)), 6),
+        return {"scale": float(tree.get("_scale", 0.0)),
                 "curve": _curve(tree.get("_curve"))}, None
     if class_name == "ValueNoiseClip":
-        return {"intensity": round(float(tree.get("_noiseIntensity", 0.0)), 6),
-                "frequency": round(float(tree.get("_noiseFrequency", 0.0)), 6),
+        return {"intensity": float(tree.get("_noiseIntensity", 0.0)),
+                "frequency": float(tree.get("_noiseFrequency", 0.0)),
                 "intensityCurve": _curve(tree.get("_noiseIntensityCurve"))}, None
     return None, UNMODELLED_CLIP
 
 
 def _clip(tree, class_name, body):
-    return {"start": round(float(tree.get("m_Start", 0.0)), 6),
-            "duration": round(float(tree.get("m_Duration", 0.0)), 6),
-            "clipIn": round(float(tree.get("m_ClipIn", 0.0)), 6),
-            "timeScale": round(float(tree.get("m_TimeScale", 1.0)), 6),
+    return {"start": float(tree.get("m_Start", 0.0)),
+            "duration": float(tree.get("m_Duration", 0.0)),
+            "clipIn": float(tree.get("m_ClipIn", 0.0)),
+            "timeScale": float(tree.get("m_TimeScale", 1.0)),
             "label": str(tree.get("m_DisplayName", "")),
             "class": class_name,
-            "blendInDuration": round(float(tree.get("m_BlendInDuration", 0.0)), 6),
-            "blendOutDuration": round(float(tree.get("m_BlendOutDuration", 0.0)), 6),
-            "easeInDuration": round(float(tree.get("m_EaseInDuration", 0.0)), 6),
-            "easeOutDuration": round(float(tree.get("m_EaseOutDuration", 0.0)), 6),
+            "blendInDuration": float(tree.get("m_BlendInDuration", 0.0)),
+            "blendOutDuration": float(tree.get("m_BlendOutDuration", 0.0)),
+            "easeInDuration": float(tree.get("m_EaseInDuration", 0.0)),
+            "easeOutDuration": float(tree.get("m_EaseOutDuration", 0.0)),
             "preExtrapolation": tree.get("m_PreExtrapolationMode"),
             "postExtrapolation": tree.get("m_PostExtrapolationMode"),
             "asset": body}
@@ -102,7 +102,7 @@ def decode_timeline(path_id, record, follow):
     """
     tree = record.tree(path_id)
     document = {"name": str(tree.get("m_Name", "")),
-                "duration": round(float(tree.get("m_FixedDuration", 0.0)), 6),
+                "duration": float(tree.get("m_FixedDuration", 0.0)),
                 "durationMode": tree.get("m_DurationMode"),
                 "frameRate": (tree.get("m_EditorSettings") or {}).get("m_Framerate"),
                 "tracks": []}
@@ -130,7 +130,7 @@ def decode_timeline(path_id, record, follow):
             track["target"] = targets.get(raw, raw)
             track["targetValue"] = raw
         if "_scale" in track_tree:
-            track["scale"] = round(float(track_tree.get("_scale", 0.0)), 6)
+            track["scale"] = float(track_tree.get("_scale", 0.0))
         if class_name not in MODELLED_TRACKS:
             unsupported.append({"track": track["name"], "trackClass": class_name,
                                 "reason": UNMODELLED_TRACK})
