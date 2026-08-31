@@ -153,7 +153,7 @@ moly --unity-version 2022.3.62f3 site \
 
 角色提取写入 `<name>.glb` 和 `<name>.rig.json`。动作提取写入 glTF 动作库和 `<name>.index.json`。表情提取写入表格 JSON。表演编排提取写入 `alone-actions.json`（动作与表情的配对与时序）。对话语料提取写入 `talks.json`（单角色直接对话，需 `--master`）。头顶件提取写入 `emoticons/`（一份共享 `emoticons.json` 加每张贴图一个 PNG）。天气（现象）提取写入 `phenomena/`：一份共享 `index.json`（现象清单；有 `--master` 时并入现象行、刷新窗口与音乐/环境音的 cue 与包名），每个现象一个目录（`config.json`、`ramp.png`、`postprocess.json`、`fx/effects.json`、`textures/`，以及带覆盖的站点的 `overrides/<站点>/`），另有全部现象图标的 `icons/`、去重后的几何 `models/`（模型资产与网格发射器的 `.glb`）与 `audio/`（音频档原样，加上给了外部解码器时的波形与 `loop.json` 循环点）。站点（place）提取写入 `site/`：`index.json`（域索引：常量、场景表、室内拼装口径、各族清单）、`sites.json`（九行放置表 + 世界坐标 + 网格常量 + 等级与网格范围 + 脚步声表）、`packages.json`（站点路径下 109 个包的普查与逐对象记账），以及每包一个目录：`scenes/<站点>/`（几何 `.glb`，一个 prefab 根一个 glTF scene；碰撞面一面一个文件；出货烘焙的 `navmesh/`；`textures/`）、`indoor/`（室内套件 + 每个扩建档的模块与可行走面）、`skins/`、`props/`、`sitemap/`、`travel/`、`preview/`、`shell/`。**站点几何一律保持包自己的原点，世界偏移只在 `sites.json` 里**——烤进几何会让共用一个包的二三楼永久丢失。给了 `--master` 时另写 `characters.json`（角色在册与移动人格；master 表由使用者自备，本仓不内置）。清单提取始终写入 `extraction-report.json`，并在有角色产物时按盘上实有的 `sd_<编号>.glb` 重建 `manifest.json`（浏览器示例直接读取的角色清单）。`pull` 的提取产物与 `extract` 相同地落在 `local-data/`；其工作区另外生成 `raw/`、`decrypted/`、`downloads.json` 和 `extraction-manifest.txt`。
 
-参阅 [数据契约](docs/data-contract.md)、[清单提取](docs/extract.md)、[拉取流程](docs/pull.md) 和 [动作重定向](docs/retarget.md)。
+参阅 [数据契约](docs/data-contract.md)、[清单提取](docs/extract.md)、[拉取流程](docs/pull.md)、[动作重定向](docs/retarget.md) 和 [着色器提取](docs/shader.md)。
 
 ## 许可证
 
