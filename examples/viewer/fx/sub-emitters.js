@@ -59,6 +59,15 @@
 // this scene has no geometry for, so no particle ever reports a hit. That is a
 // consequence of the collision law, not a gap in this module.
 
+// **The origin handed to the target is the parent particle's world position.**
+// A particle's own `pos` lives in its system's simulation space: local-space
+// systems keep it node-relative, so it must be run through the parent node's
+// world matrix once, here, before it is given to the target. Doing it later
+// would be too late -- the target interprets the origin as a world point
+// (see `spawn(origin)` in the emitter), and a World-space target renders it as
+// is, so a node-relative value lands it tens of meters short of the parent.
+// World-space parents pass their `pos` unchanged -- it is world already.
+
 export const NAME = 'subEmitters';
 
 const BIRTH = 'birth';
@@ -69,6 +78,7 @@ export function make(system, renderer, ctx) {
   const specs = system.subEmitters;
   if (!Array.isArray(specs) || !specs.length) return null;
   const num = ctx.num;
+  const _subP = new ctx.THREE.Vector3();
 
   const records = [];
   const skipped = { noTarget: 0, inheritUnread: 0, collision: 0, unresolved: 0 };
@@ -100,6 +110,22 @@ export function make(system, renderer, ctx) {
     return record.target;
   }
 
+  // The parent particle's position, in world space. `p.pos` is world only when
+  // the parent system is World-space; a Local-space parent keeps it
+  // node-relative, so it must pass through the parent node's world matrix
+  // first -- the target interprets the origin as a world point (see
+  // `spawn(origin)` in the emitter), and a World-space target renders it as
+  // is, so a node-relative value lands it a node-length short of the parent.
+  // A birth play keeps following the particle afterwards (see the follow
+  // refresh in the emitter's update); the death path fires at the spot where
+  // the particle died and stops there.
+  function parentWorld(p) {
+    const em = ctx.emitter;
+    if (!em || em.worldSpace || !em.node) return p.pos;
+    em.node.updateWorldMatrix(true, false);
+    return _subP.copy(p.pos).applyMatrix4(em.node.matrixWorld);
+  }
+
   function fire(type, p) {
     for (const record of records) {
       if (record.type !== type) continue;
@@ -114,11 +140,11 @@ export function make(system, renderer, ctx) {
       // no cycle count, no repeat interval, and never asks whether the target
       // loops; a target with no burst at all emits nothing when a particle dies.
       if (type === BIRTH) {
-        const play = target.playSub(p.pos, p);
+        const play = target.playSub(parentWorld(p), p, ctx.emitter);
         (p.subPlays || (p.subPlays = [])).push({ target, play });
         fired.plays += 1;
       } else {
-        fired.emitted += target.emitBurstZero(p.pos);
+        fired.emitted += target.emitBurstZero(parentWorld(p));
       }
       fired[type] = (fired[type] || 0) + 1;
     }

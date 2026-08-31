@@ -69,18 +69,11 @@ const DEFAULTS = {
 const DISCRETE = new Set(['MysekaiDiffusionVolume.blendMode']);
 
 // 因语义未取证而**不参与像素**的支路。参数照样读进来、照样在 status() 里报告。
-export const SUPPRESSED = {
-  // 合成式与参数喂法都读出来了(见下面 _pyramid 与 COMPOSITE_FRAG 里的实现,代码留着),
-  // 缺的是**输入**:这一支泛光的源不是整幅画面,而是「只画特效那一层」的独立缓冲。
-  // 「哪些粒子系统属于那一层」由渲染器侧的层遮罩 + pass 标签决定,而产物里的
-  // `effects.json` 逐粒子系统只导出了 `node / system / renderer`,**没有层字段**
-  // (560 个粒子系统全数如此),所以本示例无法判断该把谁放进那个缓冲。
-  // 退而用「所有环境粒子」当输入是实测过曝的:015_cloud 近白像素占比 0.0880。
-  // 产物补上层字段(或等价的「进不进特效缓冲」标记)之后删掉这一行即可。
-  MysekaiParticleBloomVolume:
-    '合成式已实现,但它的输入是「只画特效层」的独立缓冲,而产物没有导出粒子系统的层归属;'
-    + '拿所有环境粒子代替实测把 015_cloud 的近白像素推到 0.0880,所以这一支停掉并计数',
-};
+// 目前为空:粒子泛光的「层归属」早已由产物里的 `renderer.material.lightModes` /
+// `renderQueue`、`renderer.enabled` 提供(选择律见 environment.js 的 inEffectLayer),
+// 站点辉光经第二渲染目标并入同一块特效缓冲(见 render() 的 siteGlow)。没有因语义
+// 缺失停掉的支路了;将来有新的未取证支路时照旧在这里登记。
+export const SUPPRESSED = {};
 
 // 停掉并计数的支路:读不出来的不实现,也不用近似冒充。
 export const SKIPPED = {
@@ -212,6 +205,16 @@ const COPY_FRAG = /* glsl */`
 uniform sampler2D tSrc;
 varying vec2 vUv;
 void main() { gl_FragColor = vec4(texture2D(tSrc, vUv).rgb, 1.0); }
+`;
+
+// 两图相加:站点辉光(第二渲染目标)并进粒子特效缓冲。真源里站点 ROF pass 与粒子
+// 特效 pass 写进同一块 effectRT,金字塔从那一块起 —— 阈值与增益在合并之后,所以
+// 这里的相加发生在预过滤之前。
+const ADD_FRAG = /* glsl */`
+uniform sampler2D tA;
+uniform sampler2D tB;
+varying vec2 vUv;
+void main() { gl_FragColor = vec4(texture2D(tA, vUv).rgb + texture2D(tB, vUv).rgb, 1.0); }
 `;
 
 // 泛光预过滤:软膝阈值 + 上限钳制,结果以 sqrt 编码存进金字塔
@@ -557,6 +560,8 @@ export class PostChain {
     this.mDown4 = fullscreen(this.uDown, DOWN4_FRAG);
     this.mDown13 = fullscreen(this.uDown, DOWN13_FRAG);
     this.mUp = fullscreen(this.uUp, UP_FRAG);
+    this.uAdd = { tA: { value: null }, tB: { value: null } };
+    this.mAdd = fullscreen(this.uAdd, ADD_FRAG);
 
     this.uComp = {
       tScene: { value: null }, tBloom: { value: this.black }, tPBloom: { value: this.black },
@@ -579,7 +584,7 @@ export class PostChain {
     };
     this.mComp = fullscreen(this.uComp, COMPOSITE_FRAG);
 
-    this.rtScene = null; this.rtParticles = null;
+    this.rtScene = null; this.rtParticles = null; this.rtEffect = null;
     this.pyBloom = new Pyramid();
     this.pyPBloom = new Pyramid();
     this.pyDiff = new Pyramid();
@@ -588,6 +593,7 @@ export class PostChain {
     this.enabled = true;
     this.lut = null;                 // LUT 接口:产物出现带 file 的贴图参数时接上
     this.lutNote = 'no LUT component in the profiles';
+    this.depthNote = null;           // 场景深度图不可用时的原因(见 _sceneDepth)
     this.stats = { passes: 0, particlePass: false, lastPasses: [], skipped: {} };
   }
 
@@ -616,12 +622,44 @@ export class PostChain {
     return t;
   }
 
+  /**
+   * 场景深度图:软粒子那一环的输入(见 fx/particle-shader.js 的 setSceneDepth)。
+   * 用 DepthStencilFormat(24 位深度 + 8 位模板):场景 pass 里角色的眉目遮罩走模板
+   * (stencilRef 4、Equal/Replace),纯深度附件会把模板存储整个拿掉,那一路会静默失效。
+   * 深度组件在 WebGL2 里按归一化 [0,1] 采样,正是片元链眼深反算(uSoftZParams)要的
+   * 那一域(以 UNSIGNED_INT_24_8 存储时 24 位定深换算成 [0,1] 浮点);模板组件照旧作
+   * 模板用,不进采样结果。只在 WebGL2 下可靠(本示例两处的半浮点渲染目标已要求 WebGL2)。
+   * 拿不到时返回 null —— 软粒子整段让开并计数(NoDepth 路径),那是没接这条线时的行为。
+   */
+  _sceneDepth(w, h) {
+    try {
+      // 采样参数这一排必须传 undefined(或者干脆不传):null 会被 three.js 当实值
+      // 存进纹理,上传时经过查表映射不到任何 GL 枚举,报 INVALID_ENUM 后 GL 参数
+      // 全部保持默认 —— 深度纹理默认的最小过滤是 mipmap 线性,而它只有一级 mip,
+      // 纹理不完备,采样恒得黑。undefined 走构造函数默认
+      // (Nearest/Nearest/ClampToEdge),单级深度纹理就此完整可采样。
+      const t = new THREE.DepthTexture(
+        Math.max(1, w | 0), Math.max(1, h | 0),
+        THREE.UnsignedInt248Type, undefined, undefined, undefined, undefined, undefined, undefined,
+        THREE.DepthStencilFormat);
+      this.depthNote = null;
+      return t;
+    } catch (e) {
+      this.depthNote = `场景深度图不可用:${String(e).slice(0, 80)}`;
+      return null;
+    }
+  }
+
   setSize(w, h) {
     if (this.size.x === w && this.size.y === h) return;
     this.size.set(w, h);
     if (this.rtScene) this.rtScene.dispose();
     this.rtScene = this._rt(w, h);
+    // 深度图跟着场景渲染目标一起重建(size 变了旧的尺寸对不上,渲染目标 dispose 时
+    // 它已经一并释放,这里重新给一份)。
+    this.rtScene.depthTexture = this._sceneDepth(this.rtScene.width, this.rtScene.height);
     if (this.rtParticles) { this.rtParticles.dispose(); this.rtParticles = null; }
+    if (this.rtEffect) { this.rtEffect.dispose(); this.rtEffect = null; }
   }
 
   _blit(material, target) {
@@ -687,14 +725,62 @@ export class PostChain {
   }
 
   /**
-   * 渲染一帧。`hideForParticlePass` 是一个 `(hide:boolean) => void` 回调:
-   * 为真时只留环境粒子可见(粒子泛光缓冲要的是「只有粒子」的画面),为假时复原。
+   * 判据探针:把粒子特效缓冲(rtParticles)拷进一块 8 位目标读回统计。
+   * 只在外部判据需要数「缓冲里到底有没有东西、在什么位置」时调用;不进渲染链,
+   * 不动本帧状态(先保存当前渲染目标,读回后还原)。
+   * 半浮点缓冲里可能大于 1 的值在 8 位目标里被钳到 255 —— 计数只比「非零」,
+   * 不受影响。无 rtParticles(缓冲趟没开)时返回空读数。
    */
-  render(scene, camera, { hideForParticlePass = null, particleCount = 0 } = {}) {
+  particleBufferStats() {
+    if (!this.rtParticles) { return { w: 0, h: 0, nonzero: 0, box: null, max: 0 }; }
+    const src = this.rtParticles;
+    const w = src.width, h = src.height;
+    if (!this._probeRT || this._probeRT.width !== w || this._probeRT.height !== h) {
+      if (this._probeRT) this._probeRT.dispose();
+      this._probeRT = new THREE.WebGLRenderTarget(w, h, {
+        type: THREE.UnsignedByteType, depthBuffer: false, stencilBuffer: false,
+      });
+      this._probeRT.texture.colorSpace = THREE.NoColorSpace;
+    }
+    const prev = this.renderer.getRenderTarget();
+    this.uCopy.tSrc.value = src.texture;
+    this._blit(this.mCopy, this._probeRT);
+    const buf = new Uint8Array(w * h * 4);
+    this.renderer.readRenderTargetPixels(this._probeRT, 0, 0, w, h, buf);
+    this.renderer.setRenderTarget(prev);
+    let nonzero = 0, max = 0;
+    let x0 = w, y0 = h, x1 = -1, y1 = -1;
+    for (let p = 0, i = 0; p < w * h; p++, i += 4) {
+      const m = Math.max(buf[i], buf[i + 1], buf[i + 2]);
+      if (m > 0) {
+        nonzero++;
+        if (m > max) max = m;
+        const x = p % w, y = (p / w) | 0;
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+    }
+    return { w, h, nonzero, max, box: nonzero ? [x0, y0, x1, y1] : null };
+  }
+
+  /**
+   * 渲染一帧。`hideForParticlePass` 是一个 `(hide:boolean) => void` 回调:
+   * 为真时只留**特效层**的粒子可见(粒子泛光缓冲要的是「只画特效层」的画面),
+   * 为假时复原。`setSceneDepth(texture, camera)` 可选:在场景 pass 之前被调用,
+   * 把本帧的场景深度图交给粒子片元链(软粒子那一环)。纹理为 null = 深度图不可用,
+   * 由消费方按既有行为让开。
+   * `siteGlow` 可选:站点第二渲染目标(texture[1])。真源里站点 ROF pass 与粒子特效
+   * pass 写进同一块 effectRT,金字塔从那一块起 —— 所以这里把它与粒子缓冲相加,
+   * 再做预过滤与金字塔,增益照 ParticleBloomVolume 的参数走。
+   */
+  render(scene, camera, { hideForParticlePass = null, particleCount = 0, setSceneDepth = null, siteGlow = null } = {}) {
     if (!this.enabled || !this.profile) return false;
     const r = this.renderer;
     const db = r.getDrawingBufferSize(new THREE.Vector2());
     this.setSize(db.x, db.y);
+    // 深度图在场景 pass 里被写满,所以喂给粒子链必须**在这一帧的场景 pass 之前**;
+    // 相机用真正渲染场景那一台(它的近远平面参与深度反算)。
+    if (setSceneDepth) setSceneDepth(this.rtScene.depthTexture || null, camera);
     const P = this.profile;
     const passes = [];
     const skipped = {};
@@ -714,8 +800,7 @@ export class PostChain {
     const pbWant = num(pb && pb.params.brightEnable) > 0 && num(pb && pb.params.intensity) > 0.001;
     const pbOn = on(pb) && pbWant && particleCount > 0 && !!hideForParticlePass;
     if (pbWant && !pbOn) {
-      skipped[SUPPRESSED.MysekaiParticleBloomVolume
-        ? 'particleBloom.noEffectLayerField' : 'particleBloom.noParticleBuffer'] = 1;
+      skipped['particleBloom.noParticleBuffer'] = 1;
     }
     const blOn = on(bl) && num(bl.params.intensity) > 0;
 
@@ -735,6 +820,16 @@ export class PostChain {
         this.rtParticles = this._rt(w, h);
       }
       hideForParticlePass(true);
+      // 真源里进特效缓冲的是 MysekaiEffect pass 的产物,不是前向 pass —— 这一趟
+      // 把带发光 pass 的材质换成其发光那一份(createParticleShading 建 twin 时在
+      // userData.effectTwin 上互指),渲完换回。不带 pass 的材质不建 twin,而它们在
+      // 这一趟里被隔离藏掉,不会画进来;无 twin 的对象原样(它们不画进缓冲)。
+      const swapped = [];
+      scene.traverse((o) => {
+        if (!o.visible) return;
+        const u = o.material && o.material.userData;
+        if (u && u.effectTwin) { swapped.push([o, o.material]); o.material = u.effectTwin; }
+      });
       const prevBg = scene.background;
       scene.background = null;
       const prevClear = new THREE.Color();
@@ -746,9 +841,24 @@ export class PostChain {
       r.render(scene, camera);
       r.setClearColor(prevClear, prevAlpha);
       scene.background = prevBg;
+      for (const [o, m] of swapped) o.material = m;
       hideForParticlePass(false);
       passes.push('particle-buffer');
-      pbTex = this._pyramid(this.pyPBloom, this.rtParticles.texture, {
+      // 站点辉光并入:和粒子特效同走一块缓冲(真源的 effectRT),相加发生在阈值之前。
+      let pbSource = this.rtParticles.texture;
+      if (siteGlow) {
+        const w = this.rtParticles.width, h = this.rtParticles.height;
+        if (!this.rtEffect || this.rtEffect.width !== w || this.rtEffect.height !== h) {
+          if (this.rtEffect) this.rtEffect.dispose();
+          this.rtEffect = this._rt(w, h);
+        }
+        this.uAdd.tA.value = this.rtParticles.texture;
+        this.uAdd.tB.value = siteGlow;
+        this._blit(this.mAdd, this.rtEffect);
+        pbSource = this.rtEffect.texture;
+        passes.push('site-glow-merge');
+      }
+      pbTex = this._pyramid(this.pyPBloom, pbSource, {
         height: num(pb.params.fixedBufferHeight, 540),
         maxIterations: 6,                       // 本作里泛光的迭代上限是定值
         scatter: num(pb.params.scatter, 0.7), mode: 'bloom',
@@ -862,7 +972,7 @@ export class PostChain {
 
     this._blit(this.mComp, null);
     passes.push('composite');
-    this.stats = { passes: passes.length, particlePass: pbOn, lastPasses: passes, skipped };
+    this.stats = { passes: passes.length, particlePass: pbOn, pbSiteGlow: pbOn && !!siteGlow, lastPasses: passes, skipped };
     return true;
   }
 
@@ -877,6 +987,8 @@ export class PostChain {
     const extra = Object.keys(P).filter((k) => !PIPELINE.includes(k));
     return {
       enabled: this.enabled, passes: this.stats.lastPasses.slice(), particlePass: this.stats.particlePass,
+      sceneDepthTexture: !!(this.rtScene && this.rtScene.depthTexture),
+      depthNote: this.depthNote,
       components, notInPipeline: extra,
       unresolved: Object.entries(UNRESOLVED).map(([k, v]) => `${k}: ${v}`),
       approximated: Object.entries(APPROXIMATED).map(([k, v]) => `${k}: ${v}`),
@@ -889,9 +1001,9 @@ export class PostChain {
   }
 
   dispose() {
-    for (const t of [this.rtScene, this.rtParticles]) if (t) t.dispose();
+    for (const t of [this.rtScene, this.rtParticles, this.rtEffect]) if (t) t.dispose();
     for (const p of [this.pyBloom, this.pyPBloom, this.pyDiff]) p.dispose();
-    for (const m of [this.mCopy, this.mPre, this.mDown4, this.mDown13, this.mUp, this.mComp]) m.dispose();
+    for (const m of [this.mCopy, this.mPre, this.mDown4, this.mDown13, this.mUp, this.mAdd, this.mComp]) m.dispose();
     this.quad.geometry.dispose();
   }
 }

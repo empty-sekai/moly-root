@@ -44,6 +44,25 @@ const col4 = (v, d = [0, 0, 0, 1]) => (Array.isArray(v)
 const lerp = (a, b, t) => a + (b - a) * t;
 const lerp4 = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t), lerp(a[3], b[3], t)];
 
+/**
+ * 特效层律(真源 MysekaiEffectFeature):ParticleSystem 画进特效缓冲 ⇔ 它的材质有
+ * `LightMode = MysekaiEffect` 的 pass(**大小写不敏感**,逐 subshader→pass 摊平在
+ * `material.lightModes` 里)且 `renderer.enabled` 为真且 `renderQueue ∈ [2501, 5000]`。
+ * 无材质(lightModes 为 null/缺失)一律排除。
+ */
+function inEffectLayer(em) {
+  const r = em && em.renderer;
+  if (!r || r.enabled === false) return false;
+  const m = r.material;
+  if (!m || !Array.isArray(m.lightModes)) return false;
+  const q = num(m.renderQueue);
+  if (!(q >= 2501 && q <= 5000)) return false;
+  for (const l of m.lightModes) {
+    if (typeof l === 'string' && l.toLowerCase() === 'mysekaieffect') return true;
+  }
+  return false;
+}
+
 /** 方位角/仰角(度)→ 单位向量,与角色着色用的同一条公式。 */
 export function dirFromAngles(angleXZDeg, angleYDeg) {
   const a = num(angleXZDeg) * Math.PI / 180, b = num(angleYDeg) * Math.PI / 180;
@@ -1827,6 +1846,93 @@ void main() {
 `,
 };
 
+// ---- Mysekai/Fixture/Road --------------------------------------------------
+SITE_PROGRAMS.road = {
+  shader: 'Mysekai/Fixture/Road',
+  vert: /* glsl */`
+${SITE_VERT_COMMON}
+uniform float mRoadTextureScale;
+uniform float mMainTextureLocalMapping;
+uniform vec4 mAlphaTilingOffset;
+varying vec2 vUv0;
+varying vec2 vUv1;
+varying vec3 vWorldPos;
+varying vec3 vRoadCenter;
+void main() {
+  vec4 wp = modelMatrix * vec4(position, 1.0);
+  vWorldPos = wp.xyz + siteWorldOrigin;
+  vRoadCenter = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz + siteWorldOrigin;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+  vUv1 = uv * mAlphaTilingOffset.xy + mAlphaTilingOffset.zw;
+  vec2 worldUv = vWorldPos.xz * mRoadTextureScale;
+  vec2 localUv = position.xz * mRoadTextureScale;
+  vUv0 = (mMainTextureLocalMapping > 0.5) ? localUv : worldUv;
+}
+`,
+  frag: /* glsl */`
+${SITE_FRAG_COMMON}
+uniform sampler2D mMainTex;
+uniform vec4 mRoadConnection;
+uniform float mUseAlphaClip;
+uniform float mRoadShadowSize;
+uniform float mRoadShadowIntensity;
+uniform float mRoadShadowExponent;
+uniform float mRoadCornerExponent;
+uniform float mRoadEdgeShadowIntensity;
+uniform float mRoadEdgeShadowSize;
+varying vec2 vUv0;
+varying vec2 vUv1;
+varying vec3 vWorldPos;
+varying vec3 vRoadCenter;
+void main() {
+  // _GlobalMipBias 没有对应的查看器全局量;texture() 也没有 mip 偏置参数,所以这一项不实现。
+  // 注意:本注释在模板字符串里,不能用反引号 —— 反引号会当场把模板串关掉,
+  // 而按 CommonJS 语法检查会假通过,只有按 ESM 检查(浏览器用的那条)才报错。
+  vec4 mainSample = texture(mMainTex, vUv0);
+  float alpha = texture(mMainTex, vUv1).a;
+  if (mUseAlphaClip > 0.5 && alpha < 0.5) discard;
+
+  vec3 color = mainSample.rgb;
+  if (mUsePhenomenaLighting > 0.5) {
+    vec2 centerRelative = vWorldPos.xz - vRoadCenter.xz;
+    vec2 originalRelative = centerRelative;
+    float radial = 1.0 - length(abs(centerRelative * 2.0) - vec2(0.5));
+    float radialTerm = pow(radial, mRoadShadowSize * mRoadCornerExponent);
+    bool radialInside = (1.0 - mRoadEdgeShadowSize * 0.5) >= radial;
+
+    centerRelative *= 8.0;
+    bvec2 nonPositive = lessThanEqual(originalRelative, vec2(0.0));
+    bvec2 nonNegative = greaterThanEqual(originalRelative, vec2(0.0));
+    vec2 edgePosition = abs(centerRelative);
+    if (mRoadConnection.y > 0.5) edgePosition.x = abs(centerRelative.x)
+      + (nonPositive.x ? -1.0 : 0.0);
+    if (mRoadConnection.w > 0.5) edgePosition.y = abs(centerRelative.y)
+      + (nonPositive.y ? -1.0 : 0.0);
+    vec2 shiftedPosition = edgePosition
+      + vec2(nonNegative.x ? -1.0 : 0.0, nonNegative.y ? -1.0 : 0.0);
+    if (mRoadConnection.x > 0.5) edgePosition.x = shiftedPosition.x;
+    if (mRoadConnection.z > 0.5) edgePosition.y = shiftedPosition.y;
+    edgePosition = clamp(edgePosition, 0.0, 1.0);
+
+    float edgeThreshold = 1.0 - mRoadEdgeShadowSize;
+    float edgeX = edgeThreshold >= edgePosition.x ? 1.0 : 0.0;
+    float edgeY = edgeThreshold >= edgePosition.y ? 1.0 : 0.0;
+    float edgeMask = min(edgeX, edgeY);
+    float roadMask = (radialInside ? 1.0 : 0.0) * edgeMask;
+    vec2 edgeTerm = pow(edgePosition, vec2(mRoadShadowSize * mRoadShadowExponent));
+    float shadowShape = max(radialTerm, edgeTerm.x + edgeTerm.y);
+    float shadowValue = clamp(1.0 - shadowShape * mRoadShadowIntensity, 0.0, 1.0);
+    float shadow = mix(shadowValue, roadMask * shadowValue, mRoadEdgeShadowIntensity);
+    vec3 dropShadowColor = mix(color, color * envDropShadowColor1.rgb, envDropShadowColor1.a);
+    color = mix(dropShadowColor, color, shadow);
+  }
+  color = mix(color, color * envPhenLightColor.rgb, envPhenLightColor.a);
+  SV_Target0 = vec4(color, 1.0);
+  SV_Target1 = vec4(0.0);
+}
+`,
+};
+
 // ---- 回落:八族之外的材质 ---------------------------------------------------
 //
 // 这一族之外的着色器(粒子那一族的 UberUnlit、引擎标准件 URP/Lit、以及本轮清单外的
@@ -1881,6 +1987,26 @@ export const SITE_FAMILY_BY_SHADER = {};
 for (const [key, prog] of Object.entries(SITE_PROGRAMS)) {
   if (key !== 'fallback') SITE_FAMILY_BY_SHADER[prog.shader] = key;
 }
+
+/**
+ * 这张表按**着色器名**索引,收录的是游戏为世界表面发货的八个程序 ——
+ * `Mysekai/Site/*` 三个、`Mysekai/Object`、`Mysekai/DropItem`、`Mysekai/Fixture/*` 两个、
+ * `Mysekai/Room/Floor`。**所以它不叫「站点程序」**:里面既有站点也有家具也有房间地板,
+ * 名字若暗示「站点专用」,消费侧拿它渲家具就是又一次类别错误。
+ * 角色与粒子不在此列 —— 角色走 `shading.js` 的卡通链,粒子走 `fx/particle-shader.js`。
+ *
+ * **取不到时返回 `null`,不返回回落程序。** 回落是本模块内部的记账手段
+ * (它同时把没匹配上的着色器名计进 `fallbackShaders`),把它导出去等于给外部消费方
+ * 一条「静默画成近似」的路 —— 而外部消费方拿不到本模块的那份计数,
+ * 于是「用了近似」这件事在它那边不留痕迹。要近似可以,但必须由它自己声明并计数。
+ */
+export function surfaceProgramForShader(shaderName) {
+  const family = SITE_FAMILY_BY_SHADER[shaderName];
+  return family ? { family, program: SITE_PROGRAMS[family] } : null;
+}
+
+/** 上面那张表**确切**覆盖的着色器名,供消费侧断言覆盖面并对未覆盖者计数。 */
+export const SURFACE_PROGRAM_SHADERS = Object.keys(SITE_FAMILY_BY_SHADER);
 
 /** 八个程序 + 回落的全部源码,供全局量消费方普查用(名字出现即算声明)。 */
 const SITE_ALL_SOURCE = Object.values(SITE_PROGRAMS)
@@ -1944,6 +2070,12 @@ function siteUniformsFor(family, rec, ctx) {
       mBaseTextureMappingMode: { value: _siteF(rec, '_BaseTextureMappingMode') },
       mMainTextureLocalMapping: { value: _siteF(rec, '_MainTextureLocalMapping') },
       mObjectShaderUsage: { value: _siteF(rec, '_ObjectShaderUsage') },
+      // ⚠ 这一行现在是**错的**,留着是因为改对它需要还没取得的真值。
+      // `_RoadTextureScale` **不在** `Mysekai/Object` 声明的 171 个材质属性里(实测命中 0),
+      // 它是一个**环境全局量**,由环境视图每帧写入、来源是现象配置且在配置之间交叉淡化。
+      // ⇒ 这里的 `_siteF(rec, ...)` **永远取回落值 1**,于是路面贴图缩放恒等、不随现象变,
+      // 而且**不报错、画面看着正常** —— 那正是这一类错误最难被发现的原因。
+      // 取得真值来源之后改为读那一路的全局量;在那之前**不要**把这一行当成已还原。
       mRoadTextureScale: { value: _siteF(rec, '_RoadTextureScale', 1) },
       mUvScroll: { value: new THREE.Vector2(_siteF(rec, '_UVScrollX'), _siteF(rec, '_UVScrollY')) },
       mAlphaTilingOffset: { value: V4(_siteC(rec, '_AlphaTilingOffset', [1, 1, 0, 0])) },
@@ -2060,6 +2192,48 @@ function siteUniformsFor(family, rec, ctx) {
       mFresnelColor: common.mFresnelColor,
     };
   }
+  if (family === 'road') {
+    return {
+      ...common,
+      mRoadTextureScale: { value: 1.0 },
+      mMainTextureLocalMapping: { value: _siteF(rec, '_MainTextureLocalMapping') },
+      // Road has ten viewer substitutes. Per-instance: mRoadConnection,
+      // mAlphaTilingOffset, and mUseAlphaClip. mRoadCenter is not a substitute:
+      // modelMatrix computes it per draw, matching cell.transform.position and
+      // remaining correct when a cached material is shared by different meshes.
+      // Runtime tile adjacency is derived from NeighbourData, not stored in the asset.
+      // These zeroes represent an isolated tile; materialIndex does not enter connection bits.
+      // materialIndex only selects alpha tiling/clipping per submesh (RD=0/LD=1/RU=2/LU=3).
+      // GetAlphaTilingOffset rotates D->R->U->L:
+      // RD Get(D,R), LD Get(L,D), RU Get(R,U), LU Get(U,L).
+      // x-only -> (0.5,0.5,0.0,0.5); y-only -> (0.5,0.5,0.5,0.5);
+      // both -> (0.5,0.5,0.5,0.0); neither -> (0.5,0.5,0.0,0.0).
+      // IsAlphaClipOn stays on unless both edges and the diagonal are connectable:
+      // RD (D&R&RD)==0, LD (D&L&LD)==0, RU (U&R&RU)==0, LU (U&L&LU)==0.
+      // Invalid materialIndex defaults to vec4(1,0,0,0) and true. In particular,
+      // materialIndex=4 must show the full image with clipping enabled.
+      mRoadConnection: { value: V4([0, 0, 0, 0]) },
+      mAlphaTilingOffset: { value: V4([0.5, 0.5, 0, 0]) },
+      mUseAlphaClip: { value: 1 },
+      // Environment-global: _RoadTextureScale, _RoadShadowSize,
+      // _RoadShadowIntensity, _RoadShadowExponent, _RoadCornerExponent,
+      // _RoadEdgeShadowIntensity, and _RoadEdgeShadowSize. These seven values
+      // are one unconnected environment-driven channel: EnvironmentShaderView.OnUpdate
+      // calls SetGlobalFloat every frame, and phenomenon configuration plus cross-fades
+      // change them. _RoadTextureScale is global and is not read from the material record.
+      // Neutral values are scale 1.0, sizes/exponents 1.0, and intensities 0.0.
+      // Intensity is multiplicative. If only Size/Exponent is supplied while its
+      // corresponding Intensity remains 0, the image will not change and the connector
+      // may think the channel is disconnected. Intensity must be connected first for
+      // size and exponent changes to become visible.
+      mRoadShadowSize: { value: 1 },
+      mRoadShadowIntensity: { value: 0 },
+      mRoadShadowExponent: { value: 1 },
+      mRoadCornerExponent: { value: 1 },
+      mRoadEdgeShadowIntensity: { value: 0 },
+      mRoadEdgeShadowSize: { value: 1 },
+    };
+  }
   if (family === 'shadowMesh') {
     return { mShow: { value: _siteF(rec, '_Show', 1) } };
   }
@@ -2145,7 +2319,86 @@ function siteDefinesFor(family, rec) {
  *   画面一模一样;但本示例把站点与一个摆在场景原点的角色合成在一起,而那个角色同时是
  *   站点着色器读的落影投射体 —— 平移几何会把这两件拆开。所以落影比较仍在**站点局部
  *   坐标**里做,与「把几何和相机一起平移」逐像素等价。
- *装载的 glTF 材质在这里按**材质记录**换成对应的程序;
+/**
+ * 按一份材质记录造一个站点族材质。**这一族的「记录 → uniform」只有这一个实现**:
+ * 站点自己走这里,家具演出那一侧也走这里。两处各写一份会分叉,而分叉之后
+ * 画面上看不出来 —— 那正是最贵的一类缺陷,所以宁可多导出一个函数。
+ *
+ * 这个函数**不持有任何计数**:它只回报「发生了什么」,记账由调用方自己做
+ * (站点侧记进 `families` / `fallbackShaders`,消费方各记各的)。
+ *
+ * @param shaderName 记录里的着色器名;取不到给 null,会落到回落程序
+ * @param record     材质记录(带 `floats` / `colors` / `textures` / `keywords` / `__dir`)
+ * @param ctx        取贴图与 glTF 预览值的回调,形状见站点侧的构造处:
+ *                   `{texture(rec, slot), gltfMap, gltfBaseColor, gltfAlphaTest, blackCube}`
+ * @param geometry   要挂这个材质的几何(只用来问有没有 uv3)
+ * @param source     装载出来的 glTF 材质(取透明/剔面/深度写的预览值),可以没有
+ * @returns `{material, family, shaderName, isFallback, emissive, blend, notes}`
+ */
+export function makeSurfaceMaterial({ shaderName = null, record = null, ctx,
+                                      geometry = null, source = null } = {}) {
+  const rec = record;
+  const src = source;
+  const family = SITE_FAMILY_BY_SHADER[shaderName] || 'fallback';
+  const prog = SITE_PROGRAMS[family];
+  const notes = [];
+  const uniforms = siteUniformsFor(family, rec, ctx);
+  if (family === 'object') {
+    // 墙面 AO 读 uv3。产物导出的站点网格只带 uv0 与 uv1,取不到就**整块停用并计数**:
+    // 拿缺失的输入硬算会画出一整片全暗的墙,那不是还原。
+    uniforms.mHasUv3.value = geometry && geometry.getAttribute('uv3') ? 1 : 0;
+    if (!uniforms.mHasUv3.value && Math.abs(num(_siteF(rec, '_ObjectShaderUsage')) - 2) < 0.5
+        && _siteF(rec, '_WallAOIntensity') > 0) {
+      notes.push('墙面 AO 读 uv3,产物导出的网格只带 uv0/uv1:这一块停用并计数');
+    }
+  }
+  const cull = num(_siteF(rec, '_Cull', -1));
+  const mat = new THREE.ShaderMaterial({
+    name: `env-site:${family}:${(src && src.name) || 'unnamed'}`,
+    uniforms: withEnvGlobals({ ...SITE_SUBJECT, ...SITE_GLOBALS, ...uniforms }),
+    defines: siteDefinesFor(family, rec),
+    vertexShader: prog.vert,
+    fragmentShader: prog.frag,
+    glslVersion: THREE.GLSL3,     // 两个渲染目标要 GLSL3 的具名输出
+    vertexColors: true,           // 没有 COLOR_0 的网格由 three 喂 (1,1,1,1),这一格自动成恒等
+    // 剔面照**记录**的 `_Cull` 走(0=双面 1=剔正面 2=剔背面),记录里没有才落回 glTF 那份预览近似。
+    // 注意 `THREE.FrontSide` 就是 0,不能拿 `||` 当「取不到」判 —— 那会把最常见的那一档整批漏掉。
+    side: (UNITY_CULL_SIDE[cull] !== undefined)
+      ? UNITY_CULL_SIDE[cull]
+      : (src ? src.side : THREE.FrontSide),
+    transparent: !!(src && src.transparent),
+    depthWrite: src ? src.depthWrite : true,
+  });
+  mat.userData.siteFamily = family;
+  mat.userData.siteShader = shaderName;
+  mat.userData.siteMaterial = (src && src.name) || null;
+  // 真的会往第二目标写非零的:两个发光族 + 记录里那一槽真的有贴图。
+  const emissive = SITE_EMISSIVE_FAMILIES.indexOf(family) >= 0
+    && !!((rec || {}).textures || {})._EmissionMaskTex;
+  if (emissive) mat.userData.siteEmissive = true;
+
+  const bf = ((src && src.userData) || {}).blendFactors || null;
+  let blend;
+  if (bf && UNITY_BLEND_FACTOR[bf.src] !== undefined && UNITY_BLEND_FACTOR[bf.dst] !== undefined) {
+    mat.blending = THREE.CustomBlending;
+    mat.blendSrc = UNITY_BLEND_FACTOR[bf.src];
+    mat.blendDst = UNITY_BLEND_FACTOR[bf.dst];
+    mat.transparent = true;
+    if (bf.dst === 1) mat.depthWrite = false;
+    blend = { kind: ((src && src.userData) || {}).blendMode || `${bf.src}/${bf.dst}`, known: true };
+  } else if (bf) {
+    blend = { kind: '未知因子对', known: false, factors: bf };
+  } else {
+    blend = { kind: mat.transparent ? '混合(无 extras)' : '不透明', known: true };
+  }
+  return {
+    material: mat, family, shaderName, isFallback: family === 'fallback',
+    emissive, blend, notes,
+  };
+}
+
+/**
+ * 装载的 glTF 材质在这里按**材质记录**换成对应的程序;
  * 透明度照原样带过来:混合模式来自材质 extras 的 `blendFactors`(Unity 枚举),
  * 剔面来自记录的 `_Cull`,遮罩阈值由记录的关键字与属性决定(不是 glTF 的 alphaCutoff)。
  * 贴图按本示例的 gamma 直通规矩置 `NoColorSpace`(与角色贴图同一条),不走 sRGB 解码。
@@ -2731,74 +2984,39 @@ class SiteView {
 
   _materialFor(src, rec, geometry) {
     const shaderName = ((rec || {}).shader || {}).name || null;
-    const family = SITE_FAMILY_BY_SHADER[shaderName] || 'fallback';
-    const prog = SITE_PROGRAMS[family];
-    this.families[family] = (this.families[family] || 0) + 1;
-    if (family === 'fallback') {
-      const k = shaderName || (rec ? '(记录里没有着色器名)' : '(没有材质记录)');
-      this.fallbackShaders[k] = (this.fallbackShaders[k] || 0) + 1;
-    }
     const map = src && src.map ? src.map : null;
     if (map) { map.colorSpace = THREE.NoColorSpace; map.updateMatrix(); }
     const c = src && src.color ? src.color : { r: 1, g: 1, b: 1 };
-    const ud = (src && src.userData) || {};
-    const bf = ud.blendFactors || null;
-    const ctx = {
-      texture: (r, slot) => this._textureFor(r, slot),
-      gltfMap: map,
-      gltfBaseColor: [c.r, c.g, c.b, src ? src.opacity : 1],
-      gltfAlphaTest: src ? num(src.alphaTest) : 0,
-      blackCube: this.blackCube,
-    };
-    const uniforms = siteUniformsFor(family, rec, ctx);
-    if (family === 'object') {
-      // 墙面 AO 读 uv3。产物导出的站点网格只带 uv0 与 uv1,取不到就**整块停用并计数**:
-      // 拿缺失的输入硬算会画出一整片全暗的墙,那不是还原。
-      uniforms.mHasUv3.value = geometry && geometry.getAttribute('uv3') ? 1 : 0;
-      if (!uniforms.mHasUv3.value && Math.abs(num(_siteF(rec, '_ObjectShaderUsage')) - 2) < 0.5
-          && _siteF(rec, '_WallAOIntensity') > 0) {
-        this._note('墙面 AO 读 uv3,产物导出的网格只带 uv0/uv1:这一块停用并计数');
-      }
-    }
-    const mat = new THREE.ShaderMaterial({
-      name: `env-site:${family}:${(src && src.name) || 'unnamed'}`,
-      uniforms: withEnvGlobals({ ...SITE_SUBJECT, ...SITE_GLOBALS, ...uniforms }),
-      defines: siteDefinesFor(family, rec),
-      vertexShader: prog.vert,
-      fragmentShader: prog.frag,
-      glslVersion: THREE.GLSL3,     // 两个渲染目标要 GLSL3 的具名输出
-      vertexColors: true,           // 没有 COLOR_0 的网格由 three 喂 (1,1,1,1),这一格自动成恒等
-      // 剔面照**记录**的 `_Cull` 走(0=双面 1=剔正面 2=剔背面),记录里没有才落回 glTF 那份预览近似。
-      // 注意 `THREE.FrontSide` 就是 0,不能拿 `||` 当「取不到」判 —— 那会把最常见的那一档整批漏掉。
-      side: (UNITY_CULL_SIDE[num(_siteF(rec, '_Cull', -1))] !== undefined)
-        ? UNITY_CULL_SIDE[num(_siteF(rec, '_Cull', -1))]
-        : (src ? src.side : THREE.FrontSide),
-      transparent: !!(src && src.transparent),
-      depthWrite: src ? src.depthWrite : true,
+    const built = makeSurfaceMaterial({
+      shaderName,
+      record: rec,
+      geometry,
+      source: src,
+      ctx: {
+        texture: (r, slot) => this._textureFor(r, slot),
+        gltfMap: map,
+        gltfBaseColor: [c.r, c.g, c.b, src ? src.opacity : 1],
+        gltfAlphaTest: src ? num(src.alphaTest) : 0,
+        blackCube: this.blackCube,
+      },
     });
-    mat.userData.siteFamily = family;
-    mat.userData.siteShader = shaderName;
-    mat.userData.siteMaterial = (src && src.name) || null;
-    // 真的会往第二目标写非零的:两个发光族 + 记录里那一槽真的有贴图。
-    if (SITE_EMISSIVE_FAMILIES.indexOf(family) >= 0 && ((rec || {}).textures || {})._EmissionMaskTex) {
-      this.emissiveMaterials += 1;
-      mat.userData.siteEmissive = true;
+    // 记账留在这里:造材质那一段是纯的,谁调用谁记自己的账。
+    this.families[built.family] = (this.families[built.family] || 0) + 1;
+    if (built.isFallback) {
+      const k = shaderName || (rec ? '(记录里没有着色器名)' : '(没有材质记录)');
+      this.fallbackShaders[k] = (this.fallbackShaders[k] || 0) + 1;
     }
-    if (bf && UNITY_BLEND_FACTOR[bf.src] !== undefined && UNITY_BLEND_FACTOR[bf.dst] !== undefined) {
-      mat.blending = THREE.CustomBlending;
-      mat.blendSrc = UNITY_BLEND_FACTOR[bf.src];
-      mat.blendDst = UNITY_BLEND_FACTOR[bf.dst];
-      mat.transparent = true;
-      if (bf.dst === 1) mat.depthWrite = false;
-      this._countBlend(ud.blendMode || `${bf.src}/${bf.dst}`);
-    } else if (bf) {
+    for (const n of built.notes) this._note(n);
+    if (built.emissive) this.emissiveMaterials += 1;
+    if (!built.blend.known && built.blend.factors) {
       this._countBlend('未知因子对');
-      this.errors.push(`材质 ${(src && src.name) || '?'}: blendFactors ${JSON.stringify(bf)} 不在枚举里`);
+      this.errors.push(`材质 ${(src && src.name) || '?'}: blendFactors `
+        + `${JSON.stringify(built.blend.factors)} 不在枚举里`);
     } else {
-      this._countBlend(mat.transparent ? '混合(无 extras)' : '不透明');
+      this._countBlend(built.blend.kind);
     }
-    this.materials.push(mat);
-    return mat;
+    this.materials.push(built.material);
+    return built.material;
   }
 
   _note(text) { if (this.notes.indexOf(text) < 0) this.notes.push(text); }
@@ -2883,8 +3101,11 @@ class SiteView {
       emissiveMaterials: this.emissiveMaterials,
       // 现象下发的发光类型(0=无 1=亮 2=暗),门开不开由它与材质的两个声明一起定。
       emissionType: ENV_GLOBALS.envEmissionType.value,
-      composited: false,
-      compositeNote: '发光缓冲**不加进主目标**;辉光合成在后处理链那一侧,本轮不改那条车道的文件',
+      // 辉光并入主图的唯一路径是后处理链的粒子泛光分支(真源里站点辉光与粒子特效
+      // 同走 effectRT → ParticleBloom);composited 记**上一帧**那张第二渲染目标
+      // 内容是否真的进了主图(分支未开/无站点都算没进,与真源同构)。
+      composited: !!this._glowComposite,
+      compositeNote: '辉光经后处理链的粒子泛光分支并入主图(与真源 effectRT→ParticleBloom 同链);分支未开的那几帧不进主图',
     };
   }
 
@@ -2950,34 +3171,40 @@ const FX_KINDS = ['sky', 'camera', 'site', 'other'];
 
 // 相机族的跟随律**不统一**,一刀切会让多数效果的方向错。两种律:
 //
-//   'rotate' —— 随相机一起转(效果自带那个环境效应器组件、走零参装配)。
-//   'fixed'  —— 位置跟随,**旋转反向抵消**:本地旋转 = 父节点世界旋转的逆。
+//   'rotate'(字段值 'normal',即 RotationType.Normal)—— 随相机一起转。
+//   'fixed' (字段值 'fix',  即 RotationType.Fix)  —— 位置跟随,**旋转反向抵消**:
+//                                                     本地旋转 = 父节点世界旋转的逆。
 //
-// 当前内容里 15 个相机族效果只有 4 个是 'rotate',其余 11 个是 'fixed'。判据就在产物里:
-// 带那个效应器组件的效果会以 `prefab component not modelled` 出现在 `summary.unsupported`,
-// 所以**不必按现象名写死名单**,按数据判。派生字段(提取侧将给出的 `cameraFollow` 之类)
-// 一旦出现就优先用它 —— 见 `cameraFollowOf`。
+// 判据就在产物里:每个相机族效果都带 `effectiveRotation`(当前 15 条相机族效果全部有值:
+// 4 条 'normal'、11 条 'fix'),所以按字段判,不按现象名写死名单 —— 见 `cameraFollowOf`。
+//
+// `cameraFollow` 与 `rotationMode` 两个键**当前产物从不给出**(全域 0 次),下面保留对
+// 它们的兼容读取只是前瞻:将来产物若给出,且值是这里认识的,仍按同一张表判。
 export const CAMERA_FOLLOW = { ROTATE: 'rotate', FIXED: 'fixed' };
-const EFFECTOR_COMPONENT = 'SiteEnvironmentEffector';
 
 /**
- * 一个相机族效果的跟随律。三级取值,越靠前越可信:
- *   1) 效果自带的派生字段(契约字段名以最终产物为准,这里认几个同义写法);
- *   2) 该效果在 `summary.unsupported` 里带那个效应器组件 → 'rotate';
- *   3) 都没有 → 'fixed'(多数律)。
- * 返回 `{law, source}`,`source` 进 status(),便于看出这一条是读出来的还是落到了默认。
+ * 一个相机族效果的跟随律。取值只有两个来源,越靠前越可信:
+ *   1) 效果自带的旋转律字段(当前产物给的是 `effectiveRotation`;`cameraFollow` 与
+ *      `rotationMode` 是前瞻性兼容,当前从不命中)。认识的取值按下面的表解析,
+ *      **认不出的取值不猜**:落到 `{law: null, source: 'unknown'}` 并进 status(),等人来对齐;
+ *   2) 字段缺失 → 'fixed'(多数律)。
+ * 返回 `{law, source}`,`source` 进 status(),便于看出这一条是读出来的、落到了默认、
+ * 还是读到了不认识的取值。
+ *
+ * 曾经有第二级判据:「该效果在 `summary.unsupported` 里带 SiteEnvironmentEffector 组件
+ * ⇒ 'rotate'」。它从不成立:当前产物的 `summary.unsupported` 条目没有 `component` 键
+ * (全域 3 条,全为站点件),按「永不求值的判据」纪律整级删除并计数,
+ * 判据侧用 `effector-component` 恒 0 见证这一级别未再出现。
  */
-export function cameraFollowOf(name, effect, unsupported) {
+export function cameraFollowOf(effect) {
   const declared = effect && (effect.cameraFollow || effect.effectiveRotation || effect.rotationMode);
   if (typeof declared === 'string') {
     const v = declared.toLowerCase();
-    if (v.includes('rotate') || v.includes('follow')) return { law: CAMERA_FOLLOW.ROTATE, source: 'contract-field' };
-    if (v.includes('fix') || v.includes('inverse') || v.includes('cancel')) {
-      return { law: CAMERA_FOLLOW.FIXED, source: 'contract-field' };
-    }
+    // 认识的取值逐条显式列出;将来出现新取值时落 'unknown',不许用反向兜底。
+    if (v === 'normal' || v === 'rotate') return { law: CAMERA_FOLLOW.ROTATE, source: 'contract-field' };
+    if (v === 'fix' || v === 'fixed') return { law: CAMERA_FOLLOW.FIXED, source: 'contract-field' };
+    return { law: null, source: 'unknown' };
   }
-  const hit = (unsupported || []).some((u) => u && u.effect === name && u.component === EFFECTOR_COMPONENT);
-  if (hit) return { law: CAMERA_FOLLOW.ROTATE, source: 'effector-component' };
   return { law: CAMERA_FOLLOW.FIXED, source: 'default-majority' };
 }
 
@@ -2985,7 +3212,6 @@ class EffectSet {
   constructor(doc, textureFor) {
     this.doc = doc || { effects: {} };
     this.textureFor = textureFor;
-    this.unsupported = ((doc || {}).summary || {}).unsupported || [];
   }
 
   /** 该现象在当前站点下要挂的效果名单(两级:global/common 的通用件 + 当前站点的件)。 */
@@ -2998,7 +3224,7 @@ class EffectSet {
         if (!includeSite) continue;
         if (e.site && e.site !== site) continue;
       }
-      const follow = kind === 'camera' ? cameraFollowOf(name, e, this.unsupported) : null;
+      const follow = kind === 'camera' ? cameraFollowOf(e) : null;
       out.push({ name, kind, site: e.site || null, variant: e.variant || null, effect: e, follow });
     }
     return out;
@@ -3615,7 +3841,16 @@ export class Environment {
     }
     const site = this.indoor ? this.overrideSite : this.sceneKey;
     const plan = this.to.rec.fx.plan(site);
+    // 旋转律判不出的相机族效果**整条拒绝挂载**,不是砍掉一条律凑合上。理由:
+    // 两条律都会显形(跟转与反向抵消方向相反),而这时判不出是哪条 —— 放上去就是
+    // 让标签说「不知道」、像素替它选了一边。所以拒绝,并按名字计数进 status();
+    // 拒绝是**正常路径**,不是错误,不进 errors。
+    this.refusedUnknownRotation = [];
     for (const item of plan) {
+      if (item.follow && item.follow.source === 'unknown') {
+        this.refusedUnknownRotation.push(item.name);
+        continue;
+      }
       // camera 族挂在相机的子节点上(跟视点);其余挂世界。
       const parent = item.kind === 'camera' ? this.fxCamera : this.fxWorld;
       let view = null;
@@ -3828,35 +4063,90 @@ export class Environment {
    *
    * 站点这一族**每个程序都写两个渲染目标**。画进只有一个附着点的目标时第二路被 GL 丢掉,
    * 所以要真的拿到那一张发光图,得先把站点画进一个两个附着点的目标 —— 就是下面这一趟。
-   * 它**只产出缓冲**:辉光合成在后处理链那一侧,那条车道不在本轮改动范围里。
+   * 辉光的合成在**后处理链那一侧**:真源里站点 ROF pass 与粒子特效 pass 写进同一块
+   * effectRT,后处理链只从那一块起金字塔 —— 这里把第二渲染目标内容作为 siteGlow
+   * 交给后处理链并入特效缓冲(见 envpost.js render())。分支没开的那几帧它不进主图,
+   * 与真源同构:链没开则那帧 effectRT 无人消费。
    */
   render() {
+    this._glowComposite = false;
     if (!this.enabled) return false;
     if (this.siteVisible) this.siteView.renderEmission(this.renderer, this.camera);
     // 直显:把第二渲染目标画到屏幕上给人看。它不参与合成,也不加进主目标。
     if (this.siteView.emission === 'view') return this.siteView.drawEmission(this.renderer);
     if (!this.postOn) return false;
-    return this.post.render(this.scene, this.camera, {
+    const composited = this.post.render(this.scene, this.camera, {
       sunScreen: this._sunScreen(),
       particleCount: this.liveParticles(),
       hideForParticlePass: (hide) => this._isolateParticles(hide),
+      setSceneDepth: (texture, camera) => this._bindSceneDepth(texture, camera),
+      siteGlow: (this.siteVisible && this.siteView.emission === 'buffer' && this.siteView.emissionRT)
+        ? this.siteView.emissionRT.texture[1] : null,
     });
+    this._glowComposite = !!(composited && this.post.stats && this.post.stats.pbSiteGlow);
+    this.siteView._glowComposite = this._glowComposite;   // status() 的 emission 段读 SiteView 侧
+    return composited;
   }
 
-  /** 粒子泛光缓冲要「只有环境粒子」的画面:其余一切临时隐藏,再原样恢复。 */
-  _isolateParticles(hide) {
-    const keep = new Set([this.fxWorld, this.fxCamera]);
-    const walk = (obj) => {
-      if (keep.has(obj)) return;
-      if (hide) { obj.userData._envPrevVisible = obj.visible; obj.visible = false; }
-      else if (obj.userData._envPrevVisible !== undefined) {
-        obj.visible = obj.userData._envPrevVisible;
-        delete obj.userData._envPrevVisible;
+  /**
+   * 把这一帧的场景深度图喂给每个发射器的片元链(软粒子那一环,见
+   * fx/particle-shader.js 的 setSceneDepth)。相机必须是实际渲染场景那一台 ——
+   * 深度反算要它的近远平面。深度图不可用时后处理链传 null,软粒子整段让开并计数,
+   * 那是没接这条线时的行为,这里不拿别的东西顶替。
+   */
+  _bindSceneDepth(texture, camera) {
+    const views = [...this.effects.map((e) => e.view), ...this.retiring.map((r) => r.view)];
+    for (const view of views) {
+      for (const em of view.emitters || []) {
+        if (em.shading && em.shading.setSceneDepth) em.shading.setSceneDepth(texture, camera);
       }
+    }
+  }
+
+  /**
+   * 特效缓冲 pass 的可见性:真源里特效缓冲只有「特效层」—— inEffectLayer 命中的
+   * 系统画的那份,其余一切隐藏;命中系统的在场粒子连同所在效果的根亮出来。
+   * 恢复按快照原样还(sprites 只在快照期里被改动,过后照常生灭)。
+   */
+  _isolateParticles(hide) {
+    const views = [...this.effects.map((e) => e.view), ...this.retiring.map((r) => r.view)];
+    const touched = this._isolateTouched || [];
+    if (!hide) {
+      for (const o of touched) {
+        o.visible = o.userData._envPrevVisible;
+        delete o.userData._envPrevVisible;
+      }
+      this._isolateTouched = null;
+      return;
+    }
+    touched.length = 0;
+    this._isolateTouched = touched;
+    const set = (obj, visible) => {
+      if (!obj) return;
+      if (obj.userData._envPrevVisible === undefined) {
+        obj.userData._envPrevVisible = obj.visible;
+        touched.push(obj);
+      }
+      obj.visible = visible;
     };
     for (const child of this.scene.children) {
-      if (child === this.group) { for (const g of child.children) walk(g); continue; }
-      walk(child);
+      if (child === this.group) {
+        // 特效容器不整体隐藏:视图根级逐个控制(fxCamera 挂在相机上,不在 scene.children 里)。
+        for (const g of child.children) { if (g === this.fxWorld) continue; set(g, false); }
+        continue;
+      }
+      set(child, false);
+    }
+    // 先逐视图整根隐藏(含非特效层的效果),再把命中的亮回来 —— 根级控制,容器保持可见。
+    for (const v of views) if (v && v.root) set(v.root, false);
+    for (const v of views) {
+      if (!v || !v.root) continue;
+      const inLayer = (v.emitters || []).filter((em) => inEffectLayer(em));
+      if (!inLayer.length) continue;
+      set(v.root, true);
+      for (const em of inLayer) {
+        for (const p of em.particles || []) set(p.sprite, true);
+      }
     }
   }
 
@@ -4015,6 +4305,8 @@ export class Environment {
         // 相机族的跟随律逐个报出来(读出来的还是落到默认,一眼可辨)。
         cameraFollow: this.effects.filter((e) => e.kind === 'camera')
           .map((e) => ({ name: e.name, law: e.follow ? e.follow.law : null, source: e.follow ? e.follow.source : null })),
+        // 旋转律判不出、整条拒绝挂载的相机族效果(正常路径,不是错误;见 _mountEffects)。
+        refusedUnknownRotation: this.refusedUnknownRotation ? this.refusedUnknownRotation.slice() : [],
         notes: this.effectNotes.slice(),
         unmodelledShapes: shapes ? shapes.counts : {},
         emittersWithoutShape: shapes ? shapes.noShape : 0,

@@ -50,6 +50,12 @@
         <button id="bCloth" class="btn toggle on" type="button">物理</button>
         <button id="bClothReset" class="btn" type="button">重置物理</button>
       </div>
+      <div class="controls" aria-label="相机模式">
+        <span class="k">相机:<b id="cameraModeLabel">轨道</b></span>
+        <button id="bCameraOrbit" class="btn toggle on" type="button">轨道</button>
+        <button id="bCameraFree" class="btn toggle" type="button">自由</button>
+      </div>
+      <div id="cameraHint" class="hintline dim">拖拽旋转 · 滚轮缩放</div>
       <div class="controls">
         <label class="slider"><span class="k">速度</span>
           <input id="rSpeed" type="range" min="0" max="200" value="100" aria-label="播放速度">
@@ -102,10 +108,12 @@
           title="室内房间等级:房间 = 该级扩张模块摆出来的套件网格 + 该级的可走面。名单 = 产物里的扩张模块等级 ∩ placement 表里这一站开放的等级(2 楼与 3 楼只开放 5 级);当前是第几级由服务端决定,所以做成面板下发"></select>
       </div>
       <!-- 站点这一族八个程序**都写两个渲染目标**:第一个是颜色,第二个是发光。
-           只有 Object 与 Fixture/Basic 会往第二个写非零值,而且发光**从不加进主目标**。 -->
+           只有 Object 与 Fixture/Basic 会往第二个写非零值。这块缓冲与粒子特效缓冲相加后
+           一起进泛光金字塔(真源里两者写同一块 effectRT),所以发光**经泛光那一路**进主目标;
+           泛光那一支关着时它不进。 -->
       <div class="controls">
         <select id="selEnvEmission" class="field"
-          title="站点的第二个渲染目标(发光):不产 / 每帧产一张缓冲 / 把缓冲直显到屏幕。三态都不把发光加进主目标">
+          title="站点的第二个渲染目标(发光):不产 / 每帧产一张缓冲 / 把缓冲直显到屏幕。产出态下它与粒子特效缓冲相加后经泛光进主目标;直显是查看手段,不是原版通路">
           <option value="off">发光缓冲:不产</option>
           <option value="buffer" selected>发光缓冲:产出</option>
           <option value="view">发光缓冲:直显</option>
@@ -126,6 +134,21 @@
         </label>
       </div>
       <div class="hintline dim" id="envTlHint">&nbsp;</div>
+    </section>
+
+    <section class="group" id="gAudio">
+      <h2>音频<span class="count" id="audioCount"></span></h2>
+      <!-- 现象音频:按产物行的律路由(现象 bgms / siteSounds,站点底层 siteBgms /
+           siteSoundFallbacks);循环点由产物直接给出。开关是真实播放手势。 -->
+      <div class="controls">
+        <button id="bAudio" class="btn toggle" type="button"
+          title="现象音频:先选现象与站点,再点这里开(浏览器自动播放策略要求的第一次手势)">音频</button>
+        <label class="slider"><span class="k">音量</span>
+          <input id="rAudio" type="range" min="0" max="100" value="100" aria-label="音量">
+          <output id="oAudio">100%</output>
+        </label>
+      </div>
+      <div class="hintline dim" id="audioHint">&nbsp;</div>
     </section>
 
     <section class="group">

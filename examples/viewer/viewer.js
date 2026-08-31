@@ -13,6 +13,7 @@ import { CheckPanel, runChecks, applySabotage, parseSabotage } from './selfcheck
 import { PerformancePlayer, loadPerformance } from './performance.js';
 import { loadEmoticons } from './emoticon.js';
 import { Environment, CROSS_FADE_SECONDS } from './environment.js';
+import { createAudioController } from './audio.js';
 
 // ---- shader 错误捕获(须在 renderer 前安装) ----
 const shaderErrors = [];
@@ -27,6 +28,15 @@ const shaderErrors = [];
 
 const params = new URLSearchParams(location.search);
 const BASE = params.get('base') || '.';
+// ---- 音频(现象层)----
+// 独立控制器:数据目录 + 播放(循环区间按产物秒值)。「播什么」全部按 index 的
+// bgms / siteSounds / siteBgms / siteSoundFallbacks 行路由,不从这里猜映射。
+const audio = createAudioController({
+  base: BASE,
+  cueOnly: params.get('audiocueonly') === '1',   // 寻址对照(调试用):重复 cue 只留裸名地址
+});
+audio.configure({ siteIdFor: siteIdOfAudio });
+audio.init();
 const SABOTAGE = parseSabotage();
 const FALLBACK_UNITS = [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
   116, 117, 118, 119, 120, 121, 127, 128, 129, 130, 131, 133, 139, 142, 149, 155];
@@ -55,6 +65,40 @@ scene.background = new THREE.Color(0x14151c);
 const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 1000);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+let cameraMode = 'orbit';
+const freecam = {
+  active: false,
+  yaw: 0,
+  pitch: 0,
+  dragging: false,
+  pointerId: null,
+  lastX: 0,
+  lastY: 0,
+  keys: new Set(),
+  shift: false,
+  slow: false,
+};
+const FREECAM_SPEED = 3;
+// 两个修饰键各自是一个倍率,**相乘**而不是互相覆盖:同时按住就回到 1 倍。
+// 这样不必规定「谁优先」,行为也不会随按下顺序变。
+const FREECAM_FAST = 4;
+const FREECAM_SLOW = 0.25;
+// 减速键用 Z,不用 Ctrl:`Ctrl+W` 是浏览器的关标签页,`preventDefault()` 拦不住它,
+// 而 W 恰好是最常按的移动键。Z 在左手小指位、贴着 WASD,且不构成任何浏览器组合键。
+// 注意它与 Shift 有一处本质不同:**Z 是可打印字符**,所以它必须先过「焦点在输入框」
+// 那道闸再判——否则在筛选框里打一个 z 会既触发减速又被吞掉。
+const FREECAM_SLOW_KEYS = Object.freeze({ KeyZ: true, z: true, Z: true });
+const FREECAM_PITCH_LIMIT = 89 * Math.PI / 180;
+const FREE_MOVE_KEYS = Object.freeze({
+  KeyW: 'forward', KeyS: 'back', KeyA: 'left', KeyD: 'right',
+  KeyQ: 'down', KeyE: 'up', KeyR: 'down', KeyF: 'up',
+  w: 'forward', s: 'back', a: 'left', d: 'right',
+  q: 'down', e: 'up', r: 'down', f: 'up',
+});
+const _freeEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+const _freeForward = new THREE.Vector3();
+const _freeRight = new THREE.Vector3();
+const _freeMove = new THREE.Vector3();
 const grid = new THREE.GridHelper(4, 16, 0x2c2f3d, 0x21232e);
 scene.add(grid);
 scene.add(camera);   // 相机族环境粒子挂在相机下,相机必须在场景图里
@@ -64,7 +108,8 @@ const clock = new THREE.Clock();
 
 // ---- app 状态(selfcheck 消费) ----
 const app = {
-  THREE, renderer, scene, camera,
+  THREE, renderer, scene, camera, controls,
+  cameraMode,
   materials: [], overlayMesh: null, eyeMesh: null, mouthMesh: null, bodyMeshes: [],
   mixer: null, clothSystem: null, facial: null, segctl: null, clipByName: new Map(),
   currentFamily: null, probeBone: null, stencilRef: 4, shaderErrors,
@@ -77,6 +122,7 @@ const app = {
   emoticon: null,
   emoticonItems: [],
   environment: null,
+  audio,
 };
 
 let tables = null;
@@ -140,63 +186,108 @@ function buildScenarioList(perf) {
 // 选择时停用自动演出(否则编排的 eye/mouth 步下一拍就把脸盖回去)。
 // 表里三族行,只有一族对着 SD 角色自己的图集:
 //   base   —— 本图集的行,闭合格全落在真闭眼那几格上;
-//   egg*   —— 家具头像(蛋)的行,寻的是另一张图集,所以闭合格会指到本图集的睁眼格;
-//   uniq*  —— 「本角色专属槽」,同一格号在每个角色的图集里画着各自的脸,
-//             名字里的角色名对当前角色不成立。眼表写作 uniq1_/uniq2_(两个槽),
-//             口表只有一个槽,写作 uniq_(不带序号)。
-// 三族混在一个下拉里发给所有角色,选中时都会换脸——但换到的是名字没承诺的那一格。
-// 所以这里只发本图集的行:egg 族整族扣下(数目写在提示里,不静默),
-// uniq 族按它实际指向的格子归并成「专属槽」,不再挂别人的名字。
+//   egg*   —— 家具头像(蛋)的行,寻的是另一张图集(每个蛋自己的纹理),
+//             闭合格会指到本图集的睁眼格,选了也画不对名字;
+//   uniq*  —— 本角色专属槽:每个角色的图集在这一格画着自己专属的脸,
+//             后缀就是角色的英文名,只有当前角色是那个角色时才成立,
+//             所以按角色过滤(整族丢弃会让所有角色都用不上自己的专属脸)。
+// 眼表写作 uniq1_/uniq2_(两个槽),口表只有一个槽,写作 uniq_(不带序号)。
+// egg 族整族扣下:逐行以禁用项陈列(可看得见、数得出、选不了),数目与理由写进标题。
 const FACIAL_FAMILY = /^(egg\d|uniq\d?)_/;
+
+// 故障注入(自检探针用):?sabotageFacial=cellShift 把眼睛整体画偏一格,
+// 判据必须因此转红;=labelShift 把标签里的格号印错一格,标签检查必须转红。
+const FACIAL_SABOTAGE = params.get('sabotageFacial');
 
 function facialFamily(name) {
   const m = FACIAL_FAMILY.exec(name);
   return m ? m[1] : 'base';
 }
-
-// uniq 行按 (开格, 闭格, 是否眨眼) 归并:12 行 uniq1 只有两种取值,4 行 uniq2 只有一种。
-function uniqueSlots(rows, openOf, closeOf, blinkOf) {
-  const seen = new Map();
-  for (const [name, row] of rows) {
-    const fam = facialFamily(name);
-    if (!fam.startsWith('uniq')) continue;
-    const key = `${fam}/${openOf(row)}/${closeOf(row)}/${blinkOf ? blinkOf(row) : 0}`;
-    if (!seen.has(key)) {
-      seen.set(key, { name, slot: fam.slice(4), blink: blinkOf ? !!blinkOf(row) : false });
-    }
-  }
-  return [...seen.values()];
+function uniqSuffix(name) {
+  const fam = facialFamily(name);
+  if (!fam.startsWith('uniq')) return '';
+  return fam === 'uniq' ? name.slice(5) : name.slice(fam.length + 1);
 }
 
-// 一行表情是「开格/闭格」一对;把格号写进标签,名字指向哪一格就当场看得见。
+// 一行表情是「开格/闭格」一对;把格号写进标签,名字指向哪一格当场看得见。
 function cells(row) {
-  return row ? `${row.open}/${row.close > 0 ? row.close : '-'}` : '?';
+  const shift = FACIAL_SABOTAGE === 'labelShift' ? 1 : 0;
+  if (!row) return '?';
+  return `开${row.open + shift}/闭${row.close > 0 ? row.close + shift : '-'}`;
+}
+function blinkMark(row) {
+  return row.blink ? '·眨眼' : '·不眨眼';
 }
 
-function fillFacialSelects() {
+function fillFacialSelects(unitId) {
   const se = $('selEye'), sm = $('selMouth');
   if (!se || !sm || !tables) return;
   se.innerHTML = ''; sm.innerHTML = '';
-  se.append(new Option('眼型:默认', ''));
-  sm.append(new Option('口型:默认', ''));
+  const name = Facial.uniqNameOf(unitId || 0);
+  const group = (sel, tag) => {
+    const g = document.createElement('optgroup');
+    g.label = tag;
+    sel.appendChild(g);
+    return g;
+  };
+  const option = (sel, text, value, extra) => {
+    const o = new Option(text, value, false, false);
+    if (extra) for (const k in extra) o[k] = extra[k];
+    sel.appendChild(o);
+    return o;
+  };
   let heldEye = 0, heldLip = 0;
-  for (const [name] of tables.eye) {
-    const fam = facialFamily(name);
-    if (fam === 'base') se.append(new Option(`眼型:${name} ·${cells(tables.eye.get(name))}`, name));
+
+  const gEyeBase = group(se, '基础眼型');
+  option(se, '眼型:默认', '');
+  for (const [nm] of tables.eye) {
+    const fam = facialFamily(nm);
+    if (fam === 'base') option(gEyeBase, `眼型:${nm} ·${cells(tables.eye.get(nm))}${blinkMark(tables.eye.get(nm))}`, nm);
     else if (fam.startsWith('egg')) heldEye++;
   }
-  for (const s of uniqueSlots(tables.eye, (r) => r.open, (r) => r.close, (r) => r.blink))
-    se.append(new Option(`眼型:专属${s.slot}${s.blink ? '·眨眼' : ''}`, s.name));
-  for (const [name] of tables.lip) {
-    const fam = facialFamily(name);
-    if (fam === 'base') sm.append(new Option(`口型:${name} ·${cells(tables.lip.get(name))}`, name));
+  // 只发当前角色自己的专属行;名字后缀 != 当前角色英文名的行不发。
+  let gEyeUniq = null;
+  for (const [nm, row] of tables.eye) {
+    const fam = facialFamily(nm);
+    if (!fam.startsWith('uniq')) continue;
+    if (name && uniqSuffix(nm) === name) {
+      if (!gEyeUniq) gEyeUniq = group(se, `专属眼型(${name})`);
+      option(gEyeUniq, `眼型:专属(${name}) ·${cells(row)}${blinkMark(row)}`, nm);
+    }
+  }
+  const gEyeEgg = group(se, `家具头像(蛋) — 指向另一张图集,与角色图集不对应,不可选(眼 ${heldEye} 行)`);
+  for (const [nm, row] of tables.eye) {
+    if (facialFamily(nm).startsWith('egg')) option(gEyeEgg, `眼型:${nm} ·${cells(row)}`, nm, { disabled: true });
+  }
+
+  const gMouthBase = group(sm, '基础口型');
+  option(sm, '口型:默认', '');
+  for (const [nm] of tables.lip) {
+    const fam = facialFamily(nm);
+    if (fam === 'base') option(gMouthBase, `口型:${nm} ·${cells(tables.lip.get(nm))}`, nm);
     else if (fam.startsWith('egg')) heldLip++;
   }
-  for (const s of uniqueSlots(tables.lip, (r) => r.open, (r) => r.close, null))
-    sm.append(new Option(`口型:专属${s.slot}`, s.name));
-  const held = (n) => n ? `;另有 ${n} 行属家具头像(蛋)的图集,选了也对不上名字,已扣下` : '';
-  se.title = `眼型标签(表情表行);选择即应用并停用自动演出,眨眼取所选行的开/闭格${held(heldEye)}`;
-  sm.title = `口型标签(表情表行);选择即应用并停用自动演出,说话取所选行的开/闭格${held(heldLip)}`;
+  let gMouthUniq = null;
+  for (const [nm, row] of tables.lip) {
+    if (!facialFamily(nm).startsWith('uniq')) continue;
+    if (name && uniqSuffix(nm) === name) {
+      if (!gMouthUniq) gMouthUniq = group(sm, `专属口型(${name})`);
+      option(gMouthUniq, `口型:专属(${name}) ·${cells(row)}`, nm);
+    }
+  }
+  const gMouthEgg = group(sm, `家具头像(蛋) — 指向另一张图集,与角色图集不对应,不可选(口 ${heldLip} 行)`);
+  for (const [nm, row] of tables.lip) {
+    if (facialFamily(nm).startsWith('egg')) option(gMouthEgg, `口型:${nm} ·${cells(row)}`, nm, { disabled: true });
+  }
+
+  // egg 行逐行陈列,数量写进标题:不是静默扣下,而是查得见、选不了。
+  const held = (n, what) => n
+    ? `${what} ${n} 行属家具头像(蛋)的图集,名字指向的格子在另一张纹理上,选了会对不上;`
+    : '';
+  se.title = `眼型标签(表情表行);选择即应用并停用自动演出,眨眼取所选行的开/闭格。${held(heldEye, '眼表另有')}`
+    + (name ? `当前角色专属:${name}` : (unitId > 0 ? '该角色没有专属表情行。' : '未加载角色,专属行不显示;换角色后重排。'));
+  sm.title = `口型标签(表情表行);选择即应用并停用自动演出,说话取所选行的开/闭格。${held(heldLip, '口表另有')}`
+    + (name ? `当前角色专属:${name}` : (unitId > 0 ? '该角色没有专属表情行。' : '未加载角色,专属行不显示;换角色后重排。'));
 }
 
 function resetFacialSelects() {
@@ -269,6 +360,63 @@ function envLabel(name) {
   // 名字优先用 master 的英文名(master 由使用者自备,没有它就只有资产名)。
   const short = m && m.englishName ? m.englishName : name.replace(/^\d+_/, '');
   return { short, bright: m ? m.brightnessType : null, time: m ? m.timePeriodType : null, icon: entry && entry.icon };
+}
+
+// ---- 音频(现象层) ----
+// 站点键 → siteId:站点表行里显式写着 id,按「场景键 + siteType 名」接。
+// 音频只认 siteId(站点行的号),不认站点键的拼法。
+function siteIdOfAudio(siteKey) {
+  if (!environment) return null;
+  const sv = environment.siteView;
+  const row = sv.rowFor(siteKey);
+  if (!row || !row.placement) return null;
+  const rows = ((sv.placement || {}).sites) || [];
+  const hit = rows.find((r) => r.scene === row.scene && r.siteType === row.siteType);
+  return hit && typeof hit.id === 'number' ? hit.id : null;
+}
+
+function syncAudioUI() {
+  const b = $('bAudio');
+  const h = $('audioHint');
+  const st = audio.status();
+  if (b) b.classList.toggle('on', st.armed);
+  const r = $('rAudio');
+  if (r && document.activeElement !== r) r.value = String(Math.round((st.volume || 0) * 100));
+  const o = $('oAudio');
+  if (o) o.value = `${Math.round((st.volume || 0) * 100)}%`;
+  const c = $('audioCount');
+  if (c) c.textContent = st.ready ? String(st.streamsCount) : '';
+  if (!h) return;
+  if (!st.ready) {
+    h.innerHTML = `<span class="${st.loadError ? 'bad' : 'dim'}">${st.loadError || '音频索引载入中…'}</span>`;
+    return;
+  }
+  const loopTxt = (l) => (l ? `循环 ${l.start}/${l.end}` : '整段(无循环点)');
+  const m = st.music;
+  let mTxt;
+  if (!st.armed || !st.active) {
+    mTxt = `<span class="dim">${st.armed ? '环境层关,声音停' : '音频关'}</span>`;
+  } else if (!m) {
+    mTxt = '<span class="dim">还没有选中现象</span>';
+  } else if (m.streamState === 'none') {
+    mTxt = `<span class="dim">按律无 BGM(${m.from || '——'})</span>`;
+  } else if (m.streamState === 'missing') {
+    mTxt = `<span class="warn">音乐 ${m.cue} 目录里没这条流</span>`;
+  } else {
+    mTxt = `<span class="ok">音乐 ${m.cue}</span> <span class="dim">${m.address ? `${loopTxt(m.loopInterval)} · ` : ''}${m.from || ''}</span>`;
+  }
+  const seTxt = st.se && st.se.length
+    ? `<span class="ok">环境音:${st.se.map((s) => (s.cue || '?')).join('、')}</span>`
+       + `<span class="dim">${st.se.some((s) => s.streamState === 'missing') ? ' 缺流' : ''}</span>`
+    : '';
+  const failTxt = st.failures.length
+    ? ` <span class="bad">取不到 ${st.failures.length} 条(第一处:${st.failures[0].address})</span>`
+    : (st.missingFromRoutes.length
+      ? ` <span class="warn">缺流 ${st.missingFromRoutes.join('、')}</span>` : '');
+  const ctxTxt = (st.armed && st.context !== 'running')
+    ? ` <span class="warn">上下文 ${st.context}(浏览器等一次播放手势)</span>` : '';
+  h.innerHTML = `${mTxt}${seTxt ? `<br>${seTxt}` : ''}${failTxt}${ctxTxt}`
+    + (st.playing ? ` <span class="dim">${st.playing} 个源在响</span>` : '');
 }
 
 function buildEnvList() {
@@ -444,6 +592,7 @@ function syncEnvUI() {
     'selEnvLevel', 'selEnvEmission']) {
     const el = $(id); if (el) el.disabled = !environment || !envOn;
   }
+  syncAudioUI();
 }
 
 /** 点一个现象:第一次点顺手把环境层打开;之后每次切换走 0.25 秒交叉淡化。 */
@@ -452,6 +601,8 @@ async function setEnvPhenomenon(name, seconds = CROSS_FADE_SECONDS) {
   const first = !environment.to;
   const ok = await environment.setPhenomenon(name, first ? 0 : seconds);
   if (!ok) { syncEnvUI(); return false; }
+  // 音频跟着视觉切换走:视觉这次用了多长时间的交叉淡化,音频就用多长(不加自创时长)。
+  audio.setScene(name, environment.site, first ? 0 : seconds);
   if (!envOn) enableEnv(true);
   syncEnvUI();
   return true;
@@ -460,6 +611,7 @@ async function setEnvPhenomenon(name, seconds = CROSS_FADE_SECONDS) {
 function enableEnv(on) {
   if (!environment) return;
   envOn = !!on;
+  audio.setActive(envOn);
   if (envOn) {
     environment.attach();
     environment.setCharacterMaterials(current ? current.mats : []);
@@ -800,6 +952,10 @@ async function loadUnit(unit) {
   const facial = new Facial.FacialController({
     trace: true,
     applyEye: (idx) => {
+      // 故障注入(?sabotageFacial=cellShift):把要画的格子整体偏一格。
+      // 判据按 canon 公式独立核验画出的格,偏移一格的画法必须被判红;
+      // 不带该参数时本行恒为假,零影响。
+      if (FACIAL_SABOTAGE === 'cellShift') idx += 1;
       const o = Facial.cellOffset(idx, eyeCell);
       if (eyeMesh) eyeMesh.material.uniforms.uvOffset.value.set(o.x, o.y);
       if (overlay) overlay.material.uniforms.uvOffset.value.set(o.x, o.y);
@@ -813,6 +969,8 @@ async function loadUnit(unit) {
   facial.setBlinkEnabled($('bBlink').classList.contains('on'));
 
   current = { unit, unitId, root, mats, overlay, mixer, cloth, facial, segctl, families, headAnchor, headOffset, clipByName, emoAnchor, emoAnchors, emoticon: null, emote: null, started: false };
+  fillFacialSelects(unitId);      // 专属行只发当前角色;换角色时重排(加载完成前只发基础行)
+  resetFacialSelects();
   await emoticonReady;                   // 首个 emoticon 步要能查到条目(编排在下面才起跑)
 
   // ---- app / HUD / UI ----
@@ -883,6 +1041,171 @@ async function loadUnit(unit) {
 }
 
 // ---- 相机 ----
+function isEditableTarget(target) {
+  const el = target && target.nodeType === 1 ? target : document.activeElement;
+  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+}
+
+function freeMoveKey(event) {
+  return FREE_MOVE_KEYS[event.code] || FREE_MOVE_KEYS[(event.key || '').toLowerCase()] || null;
+}
+
+function applyFreecamRotation() {
+  _freeEuler.set(freecam.pitch, freecam.yaw, 0, 'YXZ');
+  camera.quaternion.setFromEuler(_freeEuler);
+}
+
+function isFreecamSlowKey(event) {
+  return !!(FREECAM_SLOW_KEYS[event.code] || FREECAM_SLOW_KEYS[event.key]);
+}
+
+function onFreecamKeyDown(event) {
+  if (!freecam.active) return;
+  if (event.key === 'Shift') { freecam.shift = true; return; }
+  const editable = isEditableTarget(event.target) || isEditableTarget(document.activeElement);
+  // 减速键是可打印字符,**先让输入框拿走**再判,否则在筛选框里打一个 z 会既减速又被吞掉。
+  if (isFreecamSlowKey(event)) {
+    if (editable) return;
+    freecam.slow = true;
+    event.preventDefault();
+    return;
+  }
+  const move = freeMoveKey(event);
+  if (!move) return;
+  if (editable) return;
+  freecam.keys.add(move);
+  // 修饰键可能在移动键之前就按下了(那一下的 keydown 已经过去),所以每次移动键事件都对一次真值。
+  if (event.shiftKey) freecam.shift = true;
+  event.preventDefault();
+}
+
+function onFreecamKeyUp(event) {
+  if (!freecam.active) return;
+  if (event.key === 'Shift') { freecam.shift = false; return; }
+  // 松开一律复位,不看焦点在哪:按下时焦点在画布、松开时焦点已经跑进输入框的情况真会发生,
+  // 那时若因为「在输入框里」而跳过复位,减速就会一直粘着。
+  if (isFreecamSlowKey(event)) { freecam.slow = false; return; }
+  const move = freeMoveKey(event);
+  if (!move) return;
+  freecam.keys.delete(move);
+  if (!isEditableTarget(event.target) && !isEditableTarget(document.activeElement)) event.preventDefault();
+}
+
+function onFreecamPointerDown(event) {
+  if (!freecam.active || event.button !== 0) return;
+  freecam.dragging = true;
+  freecam.pointerId = event.pointerId;
+  freecam.lastX = event.clientX;
+  freecam.lastY = event.clientY;
+  renderer.domElement.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+}
+
+function onFreecamPointerMove(event) {
+  if (!freecam.active || !freecam.dragging || event.pointerId !== freecam.pointerId) return;
+  const dx = event.clientX - freecam.lastX;
+  const dy = event.clientY - freecam.lastY;
+  freecam.lastX = event.clientX;
+  freecam.lastY = event.clientY;
+  freecam.yaw -= dx * 0.004;
+  freecam.pitch = Math.max(-FREECAM_PITCH_LIMIT,
+    Math.min(FREECAM_PITCH_LIMIT, freecam.pitch - dy * 0.004));
+  applyFreecamRotation();
+  event.preventDefault();
+}
+
+function onFreecamPointerUp(event) {
+  if (!freecam.dragging || event.pointerId !== freecam.pointerId) return;
+  freecam.dragging = false;
+  renderer.domElement.releasePointerCapture?.(event.pointerId);
+  freecam.pointerId = null;
+}
+
+function startFreecamInput() {
+  window.addEventListener('keydown', onFreecamKeyDown);
+  window.addEventListener('keyup', onFreecamKeyUp);
+  renderer.domElement.addEventListener('pointerdown', onFreecamPointerDown);
+  renderer.domElement.addEventListener('pointermove', onFreecamPointerMove);
+  renderer.domElement.addEventListener('pointerup', onFreecamPointerUp);
+  renderer.domElement.addEventListener('pointercancel', onFreecamPointerUp);
+}
+
+function stopFreecamInput() {
+  window.removeEventListener('keydown', onFreecamKeyDown);
+  window.removeEventListener('keyup', onFreecamKeyUp);
+  renderer.domElement.removeEventListener('pointerdown', onFreecamPointerDown);
+  renderer.domElement.removeEventListener('pointermove', onFreecamPointerMove);
+  renderer.domElement.removeEventListener('pointerup', onFreecamPointerUp);
+  renderer.domElement.removeEventListener('pointercancel', onFreecamPointerUp);
+  freecam.dragging = false;
+  freecam.pointerId = null;
+  freecam.keys.clear();
+  freecam.shift = false;
+  freecam.slow = false;
+}
+
+function updateFreecam(dt) {
+  if (!freecam.active) return;
+  if (isEditableTarget(document.activeElement)) {
+    freecam.keys.clear();
+    freecam.shift = false;
+    freecam.slow = false;
+    return;
+  }
+  _freeForward.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+  _freeRight.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
+  _freeMove.set(0, 0, 0);
+  if (freecam.keys.has('forward')) _freeMove.add(_freeForward);
+  if (freecam.keys.has('back')) _freeMove.sub(_freeForward);
+  if (freecam.keys.has('right')) _freeMove.add(_freeRight);
+  if (freecam.keys.has('left')) _freeMove.sub(_freeRight);
+  if (freecam.keys.has('up')) _freeMove.y += 1;
+  if (freecam.keys.has('down')) _freeMove.y -= 1;
+  if (_freeMove.lengthSq() === 0) return;
+  _freeMove.normalize().multiplyScalar(FREECAM_SPEED * dt
+    * (freecam.shift ? FREECAM_FAST : 1) * (freecam.slow ? FREECAM_SLOW : 1));
+  camera.position.add(_freeMove);
+}
+
+function syncCameraModeUI() {
+  const orbit = $('bCameraOrbit'), free = $('bCameraFree');
+  if (orbit) orbit.classList.toggle('on', cameraMode === 'orbit');
+  if (free) free.classList.toggle('on', cameraMode === 'free');
+  const label = $('cameraModeLabel');
+  if (label) label.textContent = cameraMode === 'free' ? '自由' : '轨道';
+  const hint = $('cameraHint');
+  if (hint) hint.textContent = cameraMode === 'free'
+    ? 'WASD 移动 · Q/E 或 R/F 升降 · Shift 加速 · Z 减速 · 拖拽转向'
+    : '拖拽旋转 · 滚轮缩放';
+  const hudHint = document.querySelector('#hud .hint');
+  if (hudHint) hudHint.textContent = cameraMode === 'free'
+    ? '自由: WASD 移动 · Q/E 升降 · Shift 加速 · Z 减速 · 拖拽转向'
+    : '拖拽旋转 · 滚轮缩放';
+  app.cameraMode = cameraMode;
+}
+
+function setCameraMode(mode) {
+  if (mode === cameraMode) { syncCameraModeUI(); return; }
+  if (mode === 'free') {
+    camera.getWorldDirection(_freeForward);
+    freecam.yaw = Math.atan2(-_freeForward.x, -_freeForward.z);
+    freecam.pitch = Math.max(-FREECAM_PITCH_LIMIT,
+      Math.min(FREECAM_PITCH_LIMIT, Math.asin(Math.max(-1, Math.min(1, _freeForward.y)))));
+    freecam.active = true;
+    controls.enabled = false;
+    startFreecamInput();
+  } else {
+    camera.getWorldDirection(_freeForward);
+    freecam.active = false;
+    stopFreecamInput();
+    controls.target.copy(camera.position).addScaledVector(_freeForward, 4);
+    controls.enabled = true;
+    controls.update();
+  }
+  cameraMode = mode;
+  syncCameraModeUI();
+}
+
 function fitCamera(obj) {
   const box = new THREE.Box3().setFromObject(obj);
   const size = box.getSize(new THREE.Vector3());
@@ -989,6 +1312,9 @@ $('bCloth').onclick = (e) => {
   e.target.classList.toggle('on', clothOn);
   if (!clothOn && current && current.cloth) { current.cloth.restoreRest(); current.cloth.reset(); }
 };
+$('bCameraOrbit').onclick = () => setCameraMode('orbit');
+$('bCameraFree').onclick = () => setCameraMode('free');
+syncCameraModeUI();
 // ---- 气泡(emoticon)运行时 ----
 // 同一时刻只挂一个 view(真运行时也只有一个 view 位)。收场两段式:hide() 进 end 段 → view 在
 // end 段放完 + disposeDelaySeconds 之后自己 stop()(phase 回 idle、root 隐藏,对象留着可重播)。
@@ -1239,11 +1565,14 @@ $('selEnvSite').onchange = async (e) => {
   await environment.setSite(e.target.value);   // 换站点 = 重挂几何 + 重判室内 + 重取两级查找
   buildSiteLists();                            // 2 楼与 3 楼只开放 5 级:等级名单跟着站点重建
   syncEnvUI();
+  audio.setSite(e.target.value, CROSS_FADE_SECONDS);   // 环境音跟着站点走同一个淡化时长
 };
 $('selEnvEmission').onchange = (e) => {
   if (!environment) return;
   // 站点的**第二个渲染目标**:不产 / 只产缓冲 / 把缓冲直显到屏幕。
-  // 三态都**不把发光加进主目标**。
+  // 「产出」态下这块缓冲会与粒子特效缓冲相加、一起进泛光金字塔(真源里两者写同一块
+  // effectRT),所以发光**经泛光那一路**进主目标;泛光那一支关着时它就不进。
+  // 「直显」是查看手段,不是原版的一条通路。
   environment.setSiteEmission(e.target.value);
   syncEnvUI();
 };
@@ -1263,6 +1592,18 @@ $('bEnvTimelineReset').onclick = () => {
   if (!environment) return;
   environment.resetTimeline();
   syncEnvUI();
+};
+// ---- 音频面板 ----
+// 开关 = 真实手势(浏览器自动播放策略要求的第一次手势在用户按这个按钮时给出;
+// 判据跑无头 Chrome 时用 --autoplay-policy=no-user-gesture-required 绕过策略)。
+$('bAudio').onclick = () => {
+  const armed = audio.status().armed;
+  audio.setArmed(!armed);
+  syncAudioUI();
+};
+$('rAudio').oninput = (e) => {
+  audio.setVolume(+e.target.value / 100);
+  syncAudioUI();
 };
 $('rEnvTimeline').oninput = (e) => {
   if (!environment) return;
@@ -1316,6 +1657,7 @@ function refreshHud(dt) {
   fps = fpsN / Math.max(fpsAcc, 1e-6); fpsAcc = 0; fpsN = 0; hudT = 0;
   // 时间轴那一行每 0.25 秒刷一次:它是**在跑的**,只在点面板时刷就永远看着像停着。
   syncTimelineUI();
+  syncAudioUI();
   if (!current) return;
   const info = lastFrameInfo;   // 上一帧的整帧统计(见 lastFrameInfo 的注释)
   const cs = current.cloth ? current.cloth.stats() : null;
@@ -1417,8 +1759,9 @@ renderer.setAnimationLoop(() => {
     current.facial.update();
   }
   if (envOn && environment) environment.update(dt);   // 淡化推进 + 天空跟随 + 环境粒子
+  updateFreecam(dt);
   refreshHud(dt);
-  controls.update();
+  if (cameraMode === 'orbit') controls.update();
   // 环境层的后处理链接管最终绘制;它没接管(关掉/无档案)时照常直画到画布。
   if (!(envOn && environment && environment.render())) renderer.render(scene, camera);
   // Negative self-check path: emulate a post-process buffer writing the wrong height
@@ -1459,7 +1802,7 @@ $('bCheckMotion').onclick = () => {
 (async () => {
   const tRaw = await fetchJson(`${BASE}/facial-tables.json`);
   tables = (tRaw && Facial.normalizeTables(tRaw)) || Facial.fallbackTables();
-  fillFacialSelects();
+  fillFacialSelects(0);
   app.dataInfo.tables = tables.counts;
   app.dataInfo.tablesFallback = !!tables.fallback;
 

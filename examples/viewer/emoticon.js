@@ -693,6 +693,7 @@ const GRAVITY = -9.81;
 const MIN_PARTICLE_SCALE = 0.0001;     // 零缩放的 sprite 会被剔掉,给一个下限
 const TMP_V3 = new THREE.Vector3();    // 屏幕占比截断算深度用的临时向量(每帧每粒子,别新建)
 const _subQ = new THREE.Quaternion();  // 子发射:只取发射节点的世界旋转
+const _subP = new THREE.Vector3();     // 子发射:发射节点的世界平移(origin 折算用)
 const _birthP = new THREE.Vector3();   // 出生点统计复用
 const _centerP = new THREE.Vector3();
 
@@ -1224,10 +1225,14 @@ class Emitter {
   }
 
   /**
-   * 发一颗。`origin` 非空时是**世界空间的发射原点**,用于子发射:目标系统被父粒子
-   * 驱动时,它是被搬到父粒子所在处再发射的,所以形状的局部偏移仍按本节点的**旋转**
-   * 摆放,但平移来自父粒子而不是本节点。继承父粒子的颜色/尺寸等是另一回事,本方法
-   * 不做 —— 那需要一条尚未从真源读出的合成律,见 `fx/sub-emitters.js`。
+   * 发一颗。`origin` 非空时是**世界空间的发射原点** —— 调用方(子发射模块,见
+   * `fx/sub-emitters.js`)保证传入父粒子的世界位置:目标系统被父粒子驱动时,它是
+   * 被搬到父粒子所在处再发射的,所以形状的局部偏移仍按本节点的**旋转**摆放,但
+   * 平移来自父粒子而不是本节点。本方法按目标自身的仿真空间再把原点折算回它的
+   * 坐标系:World 目标直接拿它当世界点,Local 目标先减掉本节点的世界平移 ——
+   * Local 目标的粒子经节点世界矩阵渲染,不减就会把父粒子位置叠两次。继承父粒子的
+   * 颜色/尺寸等是另一回事,本方法不做 —— 那需要一条尚未从真源读出的合成律,
+   * 见 `fx/sub-emitters.js`。
    */
   spawn(origin = null) {
     const s = this.system, start = s.start || {};
@@ -1246,10 +1251,17 @@ class Emitter {
     if (this.node) {
       this.node.updateWorldMatrix(true, false);
       if (origin) {
-        // 只取旋转:平移由父粒子给。用整条 matrixWorld 会把本节点的世界位置也加
-        // 进去,水环就会在雨滴落点与发射节点之间的某处冒出来。
+        // 只取旋转:平移由 origin(父粒子世界位置)给。用整条 matrixWorld 会把本节点
+        // 的世界位置也加进去 —— 但那是本节点自己的平移,「搬到父粒子处」的模型里它
+        // 已经被父粒子的位置顶替,再叠一次水环就会在雨滴落点与发射节点之间的某处
+        // 冒出来。World 目标到此为止(pos 已是世界量);Local 目标经节点矩阵渲染,
+        // 矩阵里的平移会在渲染时加回来 —— 所以这里先把它减掉,两相抵消只留旋转。
         this.node.getWorldQuaternion(_subQ);
         pos.applyQuaternion(_subQ).add(origin);
+        if (!this.worldSpace) {
+          _subP.set(0, 0, 0).applyMatrix4(this.node.matrixWorld);
+          pos.sub(_subP);
+        }
         dir.applyQuaternion(_subQ).normalize();
       } else if (this.worldSpace && !EMIT_FAULT.dropNodeTransform) {
         // 局部点/方向 → 世界。父链的旋转也一起吃掉(挂点在绑定姿态下带 90° 旋转,
@@ -1387,7 +1399,17 @@ class Emitter {
         for (const play of this.plays) {
           if (play.done) continue;
           play.age += dt * num(s.simulationSpeed, 1);
-          if (play.follow) play.origin.copy(play.follow.pos);
+          if (play.follow) {
+            // 原点契约是「父粒子世界位置」。父粒子自己的 pos 只在母系统是 World
+            // 空间时才是世界的;Local 的按母节点世界矩阵换算一次(母系统由
+            // play.host 给出,它在 playSub 时由子发射模块填入)。
+            play.origin.copy(play.follow.pos);
+            const host = play.host;
+            if (host && !host.worldSpace && host.node) {
+              host.node.updateWorldMatrix(true, false);
+              play.origin.applyMatrix4(host.node.matrixWorld);
+            }
+          }
           // 出生触发每帧过三道闸,全部通过才发。父粒子还活着是第一道(它死时由
           // onDeath/onDrop 收场);第二道是父粒子的归一化年龄减去本系统自己的起始
           // 延迟要落在 [0,1);第三道是播放时间要小于上限,而上限对循环目标是无穷、
@@ -1592,12 +1614,15 @@ class Emitter {
   }
 
   /**
-   * 播放一次这个系统,原点在 `origin`。`follow` 非空时原点每帧跟着那颗粒子走,
-   * 直到调用方停掉它 —— 出生触发在 Unity 里就是挂在父粒子上活一辈子的。
+   * 播放一次这个系统,原点在 `origin`(世界空间,见 `spawn` 的那条契约)。`follow`
+   * 非空时原点每帧跟着那颗粒子走,直到调用方停掉它 —— 出生触发在 Unity 里就是
+   * 挂在父粒子上活一辈子的。`follow` 是父粒子,而它的 `pos` 只在母系统是 World
+   * 空间时才等于世界位置;母系统是 Local 时每帧刷新要先过母节点世界变换,所以
+   * 需要 `host`(母发射器)来拿那颗节点 —— 由子发射模块传进来。
    */
-  playSub(origin, follow = null) {
+  playSub(origin, follow = null, host = null) {
     const play = { age: 0, pending: 0, cursors: [], done: false,
-                   origin: origin.clone(), follow };
+                   origin: origin.clone(), follow, host };
     this.plays.push(play);
     return play;
   }
@@ -2055,11 +2080,29 @@ export class EmoticonView {
  * 并把这个文件记进失败表 —— 之后再问同一个文件**直接返回 null**,让调用方那道
  * 「没有图就不画」的闸真的关得上。
  */
-function makeTextureLoader(base) {
+function makeTextureLoader(base, spec) {
   const loader = new THREE.TextureLoader();
   const cache = new Map();
   const failed = new Map();            // 文件 -> 失败原因(面板与判据读它)
   const prefix = base && !base.endsWith('/') ? `${base}/` : base;
+  // 取样约定:色彩空间与环绕由 `spec` 给出;不传时保持历史默认
+  // (伽马取样 + 钳制环绕)。
+  const colorSpaceDefault = (spec && spec.colorSpaceDefault) || THREE.SRGBColorSpace;
+  const wrapDefault = (spec && spec.wrapDefault) || THREE.ClampToEdgeWrapping;
+  const raw = spec && spec.raw ? spec.raw : [];           // 原样取样(不做译码)
+  const clamp = spec && spec.clamp ? spec.clamp : [];     // 钳制环绕
+  const repeat = spec && spec.repeat ? spec.repeat : [];  // 重复环绕
+  /**
+   * 命中判定。条目按文件名的**结尾**匹配 —— 同一条文件串可能携带目录前缀
+   * (形态如 `目录__文件名`),约定挂在文件自己的名字上;`*` 结尾的条目
+   * 改按整条名字的前缀匹配。
+   */
+  const pick = (file, list) => {
+    const f = String(file);
+    return list.some((s) => (s.endsWith('*')
+      ? f.split('/').pop().startsWith(s.slice(0, -1))
+      : f.endsWith(s)));
+  };
   const get = (file) => {
     if (!file) return null;
     if (failed.has(file)) return null;
@@ -2069,7 +2112,10 @@ function makeTextureLoader(base) {
         failed.set(file, String(err && err.message ? err.message : err).slice(0, 120));
         warnOnce(`tex:${file}`, `贴图读不到,用它的发射器不画并计数:${file}`);
       });
-      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.colorSpace = pick(file, raw) ? THREE.NoColorSpace : colorSpaceDefault;
+      const wrap = pick(file, repeat) ? THREE.RepeatWrapping
+        : (pick(file, clamp) ? THREE.ClampToEdgeWrapping : wrapDefault);
+      tex.wrapS = tex.wrapT = wrap;
       cache.set(file, tex);
     }
     return cache.get(file);
@@ -2097,7 +2143,35 @@ export function createParticleEffect(effect, opts = {}) {
   }, opts);
 }
 
-export function makeSharedTextureLoader(base) { return makeTextureLoader(base); }
+/**
+ * 现象环境的共享取用器。
+ *
+ * 取样约定是一张逐文件的清单(每条文件单独记录,不是名字里的关键字规则):
+ *   - 默认:伽马取样 + 重复环绕(现象环境贴图的主流)
+ *   - 例外甲:线性取样的文件 —— 环境噪声与天空渐变条,取样时不做译码
+ *   - 例外乙:钳制环绕 —— 天空渐变条与默认粒子系统的默认贴图
+ * 清单外的文件全走默认。
+ */
+export function makeSharedTextureLoader(base) {
+  return makeTextureLoader(base, {
+    wrapDefault: THREE.RepeatWrapping,
+    raw: [
+      'ramp_sky_*',
+      'tex_rare_stone_normal.png',
+      'tex_env_001_sunny_noise.png', 'tex_noise_001_fine.png',
+      'tex_env_002_rain_noise_01.png', 'tex_noise_003_rain.png',
+      'tex_env_004_fine_noise.png', 'tex_noise_004_fine.png',
+      'tex_noise_005_rain.png', 'tex_noise_006_rain.png',
+      'tex_noise_007_rainnight.png', 'tex_env_008_thunder_dust_noise.png',
+      'tex_noise_008_thunder.png', 'tex_env_009_meteorshower_noise_02.png',
+      'tex_noise_01_009_meteorshower.png', 'tex_noise_010_snow.png',
+      'tex_noise_011_snownight.png', 'tex_noise_014_sekai.png',
+      'tex_noise_015_cloud.png', 'tex_noise_017_rainbow.png',
+      'tex_noise_999_festivalgarden.png',
+    ],
+    clamp: ['ramp_sky_*', 'Default-ParticleSystem*'],
+  });
+}
 
 /**
  * Shared mesh loader for the Mesh draw mode: an async preload half and a

@@ -71,10 +71,10 @@
 //   * 软粒子:律已取得、代码已在,缺的只是**一张场景深度图** —— 这条管线里没有人
 //     产出它,而产出它的地方不在本文件。绑上之后 `setSceneDepth` 就打开这一档;
 //     没绑就整段让开并计数(`softParticlesNoDepth`);
-//   * 发光那一条 pass 的**合成**:pass 本身已经建出来了(`effect()`),但它的产物是
-//     一张独立缓冲,合成侧要知道哪些粒子系统渲进那张缓冲,而产物里没有这个字段 ——
-//     所以只出 pass、不合成(`emissionPassNoConsumer`)。自己编一条合成律(例如
-//     把它加法叠进前向画面)比不做更远离原版;
+//   * 发光那一条 pass 已接线:凡材质带 `LightMode=MysekaiEffect` pass 的系统,
+//     特效缓冲趟渲它们时走的就是发光那一条(见 `effectBufferTwin` 与
+//     userData.effectTwin / userData.forwardTwin 互指、envpost.js 的缓冲趟换材质);
+//     不带该 pass 的材质在真源里本就不进那块缓冲;
 //   * 现象光:要一个由环境下发的全局光色,**这个量未取得**;
 //   * 高动态染色:见下面「高动态」一节。
 //
@@ -566,8 +566,12 @@ export function createParticleShading(THREE, ctx) {
     // 按图档、图模式开着,但这一槽没绑图:采的是那张 1×1 全白,遮罩恒为 1。
     // 原版这时采的是着色器为这个属性声明的缺省图,而缺省图是什么**未取得**。
     emissionMapNoTexture: 0,
-    // 发光那一条 pass 的产物没有消费方(见下面的说明),只建了不合成。
-    emissionPassNoConsumer: 0,
+    // 材质带 MysekaiEffect pass → 特效缓冲成员,发光那一份材质已建并互指(twin)。
+    effectBufferTwin: 0,
+    // 材质声明了发光档、但其着色器**没有** MysekaiEffect pass:它的发光没有任何
+    // 缓冲消费点(真源里前向链也不碰发光)。已发货数据为零(56 个带发光关键字的
+    // 材质全部带 pass),照实记,数据侧由判据核对。
+    emissionAreaNoBufferPass: 0,
     // —— 顶点形变 ——
     vertexDeformation: 0, vertexDeformApplied: 0,
     vertexDeformNoMap: 0, vertexDeformBillboardUnread: 0,
@@ -679,6 +683,13 @@ export function createParticleShading(THREE, ctx) {
   if (transMode === 1) counts.transitionDissolve = 1;
   if (transMode === 2) counts.transitionFade = 1;
 
+  // 材质是否带 `LightMode = MysekaiEffect` 的 pass(大小写不敏感)—— 特效缓冲
+  // 成员律的判据。环境侧 inEffectLayer 还看 renderer.enabled 与 renderQueue,
+  // 那条律只读不动;这里只认「有没有这个 pass」。
+  const inEffectBuffer = !!(record && Array.isArray(record.lightModes)
+    && record.lightModes.some((l) => typeof l === 'string'
+      && l.toLowerCase() === 'mysekaieffect'));
+
   // —— 发光档(只在发光那一条 pass 上求值) ——
   //
   // 区域是两个互斥关键字:全域(遮罩恒 1)与按图(遮罩取发光图的一个通道)。
@@ -707,9 +718,7 @@ export function createParticleShading(THREE, ctx) {
     if (emissionArea === 2 && emissionMapMode > 0.5 && !emissionFile) {
       counts.emissionMapNoTexture = 1;
     }
-    // 这一条 pass 建出来了,但它的产物**没有消费方**:合成侧要知道哪些粒子系统
-    // 渲进自发光缓冲,而产物里没有这个字段。所以这里只出 pass,不合成。
-    counts.emissionPassNoConsumer = 1;
+    if (!inEffectBuffer) counts.emissionAreaNoBufferPass = 1;
     // 自发光槽的两个逐粒子偏移**做到了**,但只有**按图档**才有消费点:全域档的遮罩
     // 恒为 1、发光图根本不被采,那条 uv 算了也没人读。按「声明了」记会让两百多个
     // 材质各中一次,数出来的全是噪声。
@@ -915,14 +924,20 @@ export function createParticleShading(THREE, ctx) {
   };
   const vertexShader = billboard ? VERTEX_BILLBOARD : VERTEX_SHAPED;
   const material = build(vertexShader);
-  // 发光那一条 pass 的材质。**惰性建**:只有真的开着发光的材质才需要它,
-  // 而这一族里开着发光的是多数,没开的那些不必为一个恒黑的程序多编译一次。
-  //
-  // 它现在**没有消费方**:这一条 pass 的产物是一张独立的自发光缓冲,合成侧要知道
-  // 哪些粒子系统渲进那张缓冲,而产物里没有这个字段(计数见 `emissionPassNoConsumer`)。
-  // 所以它建出来、可被探针读、可被将来的合成消费,但不进当前这一趟绘制 ——
-  // 把它当加法混合叠进前向画面等于自己编一条合成律,那比不做更远离原版。
-  let effectMaterial = null;
+  // 发光那一条 pass 的材质。真源里进特效缓冲用的是**这一条 pass**(前向 pass 一次
+  // 都不碰自发光):凡带 `LightMode=MysekaiEffect` pass 的材质,这里把两份都建出来
+  // 并在 userData 上互指 —— envpost 的特效缓冲趟遍历场景时拿 `userData.effectTwin`
+  // 换成发光那一份渲,渲完换回。不带 pass 的材质(Standard Unlit 等)不建 twin:
+  // 真源里它们不进那块缓冲;无发光关键字的 UberUnlit 也建 twin —— 真源对它们编译
+  // 的那条 pass1 输出纯黑(见取证:952 号程序),前向颜色不该喂进缓冲。
+  // 两份**共用同一套 uniform 对象**(build 传的就是 `uniforms`),push 一次两条都
+  // 跟着变;混合状态也照抄材质自己的那一套 —— 缓冲的合成规则不在这条链上。
+  const effectMaterial = inEffectBuffer ? build(vertexShader, true) : null;
+  if (effectMaterial) {
+    effectMaterial.userData.forwardTwin = material;
+    material.userData.effectTwin = effectMaterial;
+    counts.effectBufferTwin = 1;
+  }
 
   /** 这个发射器要不要逐帧算逐粒子向量(材质里有没有指向它们的选择器)。 */
   const coordFields = [
@@ -960,14 +975,14 @@ export function createParticleShading(THREE, ctx) {
     softOn,
 
     /**
-     * 发光那一条 pass 的材质(没有发光的材质返回 null)。第一次问才编译。
+     * 发光那一条 pass 的材质(材质不带 MysekaiEffect pass 时返回 null)。
+     * 建在 `createParticleShading` 里,不是惰性:方法返回后这份材质就已存在,
+     * 判据可以直接读它的 userData.forwardTwin 反查前向那一份。
      *
      * 它与前向那一份**共用同一套 uniform 对象**,所以 `push` 一次两条都跟着变;
      * 混合状态也照抄材质自己的那一套 —— 缓冲的合成规则不在这条链上。
      */
     effect() {
-      if (!emissionArea) return null;
-      if (!effectMaterial) effectMaterial = build(vertexShader, true);
       return effectMaterial;
     },
 
@@ -1130,7 +1145,7 @@ export function createParticleShading(THREE, ctx) {
 
     dispose() {
       material.dispose();
-      if (effectMaterial) { effectMaterial.dispose(); effectMaterial = null; }
+      if (effectMaterial) effectMaterial.dispose();
     },
   };
   return handle;

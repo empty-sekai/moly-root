@@ -93,6 +93,24 @@ export function normalizeTables(json) {
   return { eye, lip, defaults, counts: { eye: eye.size, lip: lip.size, defaults: defaults.size } };
 }
 
+// The uniq-pattern suffixes are the characters' English given names in lower
+// case, matched against the pages' character ids (game character id = unit id
+// minus 100). Only characters that actually have uniq rows appear here. A uniq
+// row is only ever valid on its own character, because each atlas paints its
+// own face in the shared uniq cell; offering a row named after someone else
+// would draw the current character's face under another character's name.
+export const UNIQ_NAMES = new Map([
+  [2, 'saki'], [4, 'shiho'], [7, 'airi'], [10, 'an'], [11, 'akito'],
+  [13, 'tsukasa'], [14, 'emu'], [15, 'nene'], [16, 'rui'], [19, 'ena'],
+  [20, 'mizuki'], [30, 'wnsmiku'],
+]);
+
+// Given name of the character at this unit id, or '' when the character has
+// no uniq rows (and therefore never needs the name).
+export function uniqNameOf(unitId) {
+  return UNIQ_NAMES.get(unitId | 0) || '';
+}
+
 // Fallback rows for a missing facial-tables.json; the viewer reports this as a fallback.
 // Built-in fallback rows for the standard eye and mouth atlas.
 export function fallbackTables() {
