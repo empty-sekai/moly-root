@@ -2,6 +2,7 @@
 import argparse
 import json
 import sys
+from pathlib import Path
 
 
 def _configure_unity(fallback_version):
@@ -23,6 +24,30 @@ def _master_source(args):
     if url is not None:
         return url or DEFAULT_MASTER_URL, getattr(args, "master_cache", None)
     return getattr(args, "master", None), None
+
+
+def _write_programs(directory, entries, platform=None):
+    """Write each program body to its own file; return how many were written.
+
+    A body is named by shader, platform and record index rather than by content
+    hash, so a caller reading a file knows which variant produced it; identical
+    variants therefore appear more than once, which is the honest shape -- the
+    census reports the distinct count separately.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for entry in entries:
+        stem = "".join(c if c.isalnum() or c in "-_" else "_" for c in entry["shader"])
+        for block in entry["platforms"]:
+            if platform is not None and block["platform"] != platform:
+                continue
+            for row in block["programs"]:
+                suffix = "glsl" if row["isText"] else "bin"
+                name = f"{stem}__platform{block['platform']}__record{row['record']}.{suffix}"
+                (directory / name).write_bytes(row.get("code") or b"")
+                written += 1
+    return written
 
 
 def _print_extract_summary(report, out_dir):
@@ -164,6 +189,15 @@ def main(argv=None):
     asub.add_parser("latest")
     ad = asub.add_parser("download"); ad.add_argument("destination"); ad.add_argument("--url"); ad.add_argument("--sha256")
     ai = asub.add_parser("inspect"); ai.add_argument("apk")
+    s = sub.add_parser("shader", help="what a package's shaders declare and contain")
+    s.add_argument("package", help="one AssetBundle file")
+    s.add_argument("--platform", type=int, default=None,
+                   help="count only this ShaderCompilerPlatform (9 is GLSL text)")
+    s.add_argument("--out", help="write the full census here as JSON")
+    s.add_argument("--programs", metavar="DIR",
+                   help="write each program body here, named by shader, platform and record")
+    s.add_argument("--json", action="store_true", help="print the counts as JSON")
+
     args = ap.parse_args(argv); _configure_unity(args.unity_version)
     if args.cmd == "pull":
         from .fetch import pull
@@ -188,6 +222,30 @@ def main(argv=None):
                       f"{', '.join(audio['notInManifest'])}")
             _print_extract_summary(report["extraction"], args.extract_out or "local-data")
         return 0 if not report["extraction"]["summary"]["failed"] else 1
+    if args.cmd == "shader":
+        import UnityPy
+        from shaders import census as shader_census
+        entries = shader_census.census(UnityPy.load(args.package),
+                                       keep_code=bool(args.programs))
+        counts = shader_census.totals(entries, args.platform)
+        if args.out:
+            from .jsonio import write_json
+            write_json(args.out, {"package": args.package,
+                                  "shaders": shader_census.without_code(entries)})
+        if args.programs:
+            written = _write_programs(args.programs, entries, args.platform)
+            counts["bodiesWritten"] = written
+        if args.json:
+            print(json.dumps(counts, ensure_ascii=False))
+        else:
+            scope = "all platforms" if args.platform is None else f"platform {args.platform}"
+            print(f"{counts['shaders']} shaders, {counts['records']} program records, "
+                  f"{counts['uniquePrograms']} distinct programs ({scope})")
+            if counts["platformErrors"]:
+                print(f"{counts['platformErrors']} platform blob(s) failed to parse")
+            for name, records, unique in shader_census.by_shader(entries, args.platform)[:10]:
+                print(f"  {unique:6d} distinct / {records:6d} records  {name}")
+        return 1 if counts["platformErrors"] else 0
     if args.cmd == "fetch-apk":
         from . import apk
         forwarded = []

@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from core.assets import shaderblob
+from shaders import blob as shaderblob
 
 BUNDLES_VARIABLE = "MOLY_SHADER_BUNDLES"
 CLASSID_SHADER = 48
