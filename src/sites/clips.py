@@ -16,6 +16,11 @@ Curve values are written exactly as the segments store them.  A streamed segment
 keys are cubic coefficients, so they are labelled ``cubic`` and carry all four; a
 dense segment is linear samples and a constant segment is one value.  Resampling
 them to a fixed frame rate here would bake in a choice the consumer should make.
+
+A clip's *events* are exported as bodies rather than as a count: an event is a
+call at a time (the cannon fires one ``PlayEffect`` partway through its clip),
+and the count alone says an event exists without saying when it happens or what
+it calls, which is the one thing a consumer needs.
 """
 import zlib
 
@@ -29,6 +34,49 @@ TRANSFORM_ATTRIBUTES = {1: ("translation", 3), 2: ("rotation", 4),
 UNDECODABLE = "compiled animation clip could not be decoded"
 NO_CURVES = ("clip carries no curve data: its compiled segments are all empty, "
              "which is an authored state (an idle pose) and not a decode failure")
+
+
+def _events(tree, record=None):
+    """The clip's animation events, bodies and all.
+
+    An event is a call the clip makes at a time: the cannon's clip fires one
+    ``PlayEffect`` partway through, and a bare count cannot tell a consumer when
+    to fire it or what to fire.  Unity gives every event all four parameter slots
+    whether the call uses them or not, so they are all carried rather than
+    guessed at from the function name.  ``frame`` is the time on the clip's own
+    sample rate, which is what an authoring tool shows.
+    """
+    rate = float(tree.get("m_SampleRate", 0.0)) or 0.0
+    out = []
+    for event in tree.get("m_Events") or []:
+        time = float(event.get("time", 0.0))
+        reference = event.get("objectReferenceParameter") or {}
+        entry = {"time": time,
+                 "frame": time * rate if rate else None,
+                 "functionName": str(event.get("functionName", "")),
+                 "stringParameter": str(event.get("data", "")),
+                 "floatParameter": float(event.get("floatParameter", 0.0)),
+                 "intParameter": int(event.get("intParameter", 0)),
+                 "messageOptions": int(event.get("messageOptions", 0)),
+                 "objectParameter": None}
+        if reference.get("m_PathID", 0):
+            entry["objectParameter"] = {
+                "pathId": reference.get("m_PathID"),
+                "fileId": reference.get("m_FileID"),
+                "name": _reference_name(record, reference)}
+        out.append(entry)
+    return out
+
+
+def _reference_name(record, reference):
+    """The name of an event's object parameter, when the package holds it."""
+    if record is None:
+        return None
+    try:
+        tree = record.tree(reference.get("m_PathID"))
+    except Exception:                     # a pointer into another package
+        return None
+    return str(tree.get("m_Name")) if tree else None
 
 
 def path_hashes(graph):
@@ -67,11 +115,11 @@ def clip_document(record, path_id, hashes):
     tree = record.tree(path_id)
     document = {"name": str(tree.get("m_Name", "")),
                 "legacy": bool(tree.get("m_Legacy", 0)),
-                "sampleRate": round(float(tree.get("m_SampleRate", 0.0)), 6),
+                "sampleRate": float(tree.get("m_SampleRate", 0.0)),
                 "wrapMode": tree.get("m_WrapMode"),
-                "stopTime": round(float((tree.get("m_MuscleClip") or {})
-                                        .get("m_StopTime", 0.0)), 6),
-                "events": len(tree.get("m_Events") or []),
+                "stopTime": float((tree.get("m_MuscleClip") or {})
+                                        .get("m_StopTime", 0.0)),
+                "events": _events(tree, record),
                 "bindings": [], "curves": []}
     bindings = (tree.get("m_ClipBindingConstant") or {}).get("genericBindings") or []
     document["bindings"] = [_binding(entry, hashes) for entry in bindings]
@@ -93,10 +141,10 @@ def clip_document(record, path_id, hashes):
                          pathHash=digest & 0xFFFFFFFF,
                          attribute=name if type_id == TRANSFORM_TYPEID else attribute,
                          component=component)
-        entry["keys"] = [[round(float(time), 6),
-                          ([round(float(v), 6) for v in value]
+        entry["keys"] = [[float(time),
+                          ([float(v) for v in value]
                            if isinstance(value, (list, tuple))
-                           else round(float(value), 6))]
+                           else float(value))]
                          for time, value in points]
         document["curves"].append(entry)
     if not document["curves"]:
