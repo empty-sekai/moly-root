@@ -80,9 +80,12 @@ MODELLED_MODULES = {
 
 
 def _keys(curve):
-    return [{"time": round(k["time"], 6), "value": round(k["value"], 6),
-             "inSlope": None if k["inSlope"] in (float("inf"), float("-inf")) else round(k["inSlope"], 6),
-             "outSlope": None if k["outSlope"] in (float("inf"), float("-inf")) else round(k["outSlope"], 6)}
+    return [{"time": k["time"], "value": k["value"],
+             "inSlope": None if k["inSlope"] in (float("inf"), float("-inf")) else k["inSlope"],
+             "outSlope": None if k["outSlope"] in (float("inf"), float("-inf")) else k["outSlope"],
+             "weightedMode": k.get("weightedMode"),
+             "inWeight": float(k.get("inWeight", 0.0)),
+             "outWeight": float(k.get("outWeight", 0.0))}
             for k in curve.get("m_Curve", [])]
 
 
@@ -96,15 +99,15 @@ def min_max_curve(node):
     mode = CURVE_MODES.get(state, f"state{state}")
     out = {"mode": mode}
     if mode == "constant":
-        out["value"] = round(float(node.get("scalar", 0.0)), 6)
+        out["value"] = float(node.get("scalar", 0.0))
     elif mode == "twoConstants":
-        out["min"] = round(float(node.get("minScalar", 0.0)), 6)
-        out["max"] = round(float(node.get("scalar", 0.0)), 6)
+        out["min"] = float(node.get("minScalar", 0.0))
+        out["max"] = float(node.get("scalar", 0.0))
     elif mode == "curve":
-        out["multiplier"] = round(float(node.get("scalar", 1.0)), 6)
+        out["multiplier"] = float(node.get("scalar", 1.0))
         out["keys"] = _keys(node.get("maxCurve", {}))
     else:
-        out["multiplier"] = round(float(node.get("scalar", 1.0)), 6)
+        out["multiplier"] = float(node.get("scalar", 1.0))
         out["minKeys"] = _keys(node.get("minCurve", {}))
         out["maxKeys"] = _keys(node.get("maxCurve", {}))
     return out
@@ -119,17 +122,17 @@ def _gradient(node):
     colors, alphas = [], []
     for i in range(int(node.get("m_NumColorKeys", 0))):
         key = node.get(f"key{i}", {})
-        colors.append({"time": round(node.get(f"ctime{i}", 0) / GRADIENT_TIME_SCALE, 6),
-                       "color": [round(key.get(c, 0.0), 6) for c in "rgb"]})
+        colors.append({"time": node.get(f"ctime{i}", 0) / GRADIENT_TIME_SCALE,
+                       "color": [key.get(c, 0.0) for c in "rgb"]})
     for i in range(int(node.get("m_NumAlphaKeys", 0))):
         key = node.get(f"key{i}", {})
-        alphas.append({"time": round(node.get(f"atime{i}", 0) / GRADIENT_TIME_SCALE, 6),
-                       "alpha": round(key.get("a", 0.0), 6)})
+        alphas.append({"time": node.get(f"atime{i}", 0) / GRADIENT_TIME_SCALE,
+                       "alpha": key.get("a", 0.0)})
     return {"colorKeys": colors, "alphaKeys": alphas}
 
 
 def _color(node):
-    return [round(node.get(c, 0.0), 6) for c in "rgba"]
+    return [node.get(c, 0.0) for c in "rgba"]
 
 
 def min_max_gradient(node):
@@ -151,11 +154,11 @@ def min_max_gradient(node):
 
 
 def _vec(node, keys="xyz"):
-    return [round(float(node.get(k, 0.0)), 6) for k in keys]
+    return [float(node.get(k, 0.0)) for k in keys]
 
 
 def _number(node, key, default=0.0):
-    return round(float(node.get(key, default)), 6)
+    return float(node.get(key, default))
 
 
 def _enum(table, value):
@@ -305,11 +308,11 @@ def decode_system(tree, resolve_node=None):
     gaps = []
     initial = tree.get("InitialModule", {})
     out = {
-        "duration": round(float(tree.get("lengthInSec", 0.0)), 6),
+        "duration": float(tree.get("lengthInSec", 0.0)),
         "looping": bool(tree.get("looping")),
         "prewarm": bool(tree.get("prewarm")),
         "playOnAwake": bool(tree.get("playOnAwake")),
-        "simulationSpeed": round(float(tree.get("simulationSpeed", 1.0)), 6),
+        "simulationSpeed": float(tree.get("simulationSpeed", 1.0)),
         "simulationSpace": SIMULATION_SPACES.get(tree.get("moveWithTransform"),
                                                  tree.get("moveWithTransform")),
         "randomSeed": tree.get("randomSeed"),
@@ -349,11 +352,11 @@ def decode_system(tree, resolve_node=None):
         out["emission"] = {
             "rateOverTime": min_max_curve(emission.get("rateOverTime", {})),
             "rateOverDistance": min_max_curve(emission.get("rateOverDistance", {})),
-            "bursts": [{"time": round(float(b.get("time", 0.0)), 6),
+            "bursts": [{"time": float(b.get("time", 0.0)),
                         "count": min_max_curve(b.get("countCurve", {})),
                         "cycleCount": b.get("cycleCount"),
-                        "repeatInterval": round(float(b.get("repeatInterval", 0.0)), 6),
-                        "probability": round(float(b.get("probability", 1.0)), 6)}
+                        "repeatInterval": float(b.get("repeatInterval", 0.0)),
+                        "probability": float(b.get("probability", 1.0))}
                        for b in emission.get("m_Bursts", [])],
         }
 
@@ -361,26 +364,26 @@ def decode_system(tree, resolve_node=None):
     if shape.get("enabled"):
         out["shape"] = {
             "type": SHAPE_TYPES.get(shape.get("type"), shape.get("type")),
-            "radius": round(float(shape.get("radius", {}).get("value", 0.0)
+            "radius": float(shape.get("radius", {}).get("value", 0.0)
                                   if isinstance(shape.get("radius"), dict)
-                                  else shape.get("radius", 0.0)), 6),
-            "radiusThickness": round(float(shape.get("radiusThickness", 0.0)), 6),
-            "angle": round(float(shape.get("angle", 0.0)), 6),
-            "length": round(float(shape.get("length", 0.0)), 6),
-            "arc": round(float(shape.get("arc", {}).get("value", 0.0)
+                                  else shape.get("radius", 0.0)),
+            "radiusThickness": float(shape.get("radiusThickness", 0.0)),
+            "angle": float(shape.get("angle", 0.0)),
+            "length": float(shape.get("length", 0.0)),
+            "arc": float(shape.get("arc", {}).get("value", 0.0)
                                if isinstance(shape.get("arc"), dict)
-                               else shape.get("arc", 0.0)), 6),
+                               else shape.get("arc", 0.0)),
             "boxThickness": _vec(shape.get("boxThickness", {})),
-            "donutRadius": round(float(shape.get("donutRadius", 0.0)), 6),
+            "donutRadius": float(shape.get("donutRadius", 0.0)),
             "position": _vec(shape.get("m_Position", {})),
             "rotation": _vec(shape.get("m_Rotation", {})),
             "scale": _vec(shape.get("m_Scale", {})),
             "alignToDirection": bool(shape.get("alignToDirection")),
-            "randomDirectionAmount": round(float(shape.get("randomDirectionAmount", 0.0)), 6),
-            "sphericalDirectionAmount": round(float(shape.get("sphericalDirectionAmount", 0.0)), 6),
+            "randomDirectionAmount": float(shape.get("randomDirectionAmount", 0.0)),
+            "sphericalDirectionAmount": float(shape.get("sphericalDirectionAmount", 0.0)),
             # Where on the mesh a particle is born, and how far off its surface.
             "meshPlacement": shape.get("placementMode"),
-            "meshNormalOffset": round(float(shape.get("m_MeshNormalOffset", 0.0)), 6),
+            "meshNormalOffset": float(shape.get("m_MeshNormalOffset", 0.0)),
             "meshMaterialIndex": (shape.get("m_MeshMaterialIndex")
                                   if shape.get("m_UseMeshMaterialIndex") else None),
         }
@@ -417,7 +420,7 @@ def decode_system(tree, resolve_node=None):
         out["limitVelocity"] = {
             "separateAxis": bool(clamp.get("separateAxis")),
             "magnitude": min_max_curve(clamp.get("magnitude", {})),
-            "dampen": round(float(clamp.get("dampen", 0.0)), 6),
+            "dampen": float(clamp.get("dampen", 0.0)),
             "drag": min_max_curve(clamp.get("drag", {})) if clamp.get("drag") else None,
             "inWorldSpace": bool(clamp.get("inWorldSpace")),
         }
@@ -427,7 +430,7 @@ def decode_system(tree, resolve_node=None):
         out["textureSheet"] = {
             "tilesX": uv.get("tilesX"), "tilesY": uv.get("tilesY"),
             "animationType": uv.get("animationType"), "timeMode": uv.get("timeMode"),
-            "fps": round(float(uv.get("fps", 0.0)), 6),
+            "fps": float(uv.get("fps", 0.0)),
             "cycles": uv.get("cycles"), "rowIndex": uv.get("rowIndex"),
             "startFrame": min_max_curve(uv.get("startFrame", {})),
             "frameOverTime": min_max_curve(uv.get("frameOverTime", {})),
@@ -523,11 +526,11 @@ def decode_renderer(tree, material, trail_material=None):
         "renderMode": RENDER_MODES.get(tree.get("m_RenderMode"), tree.get("m_RenderMode")),
         "sortMode": tree.get("m_SortMode"),
         "sortingOrder": tree.get("m_SortingOrder"),
-        "minParticleSize": round(float(tree.get("m_MinParticleSize", 0.0)), 6),
-        "maxParticleSize": round(float(tree.get("m_MaxParticleSize", 0.0)), 6),
-        "lengthScale": round(float(tree.get("m_LengthScale", 0.0)), 6),
-        "velocityScale": round(float(tree.get("m_VelocityScale", 0.0)), 6),
-        "cameraVelocityScale": round(float(tree.get("m_CameraVelocityScale", 0.0)), 6),
+        "minParticleSize": float(tree.get("m_MinParticleSize", 0.0)),
+        "maxParticleSize": float(tree.get("m_MaxParticleSize", 0.0)),
+        "lengthScale": float(tree.get("m_LengthScale", 0.0)),
+        "velocityScale": float(tree.get("m_VelocityScale", 0.0)),
+        "cameraVelocityScale": float(tree.get("m_CameraVelocityScale", 0.0)),
         "pivot": _vec(tree.get("m_Pivot", {})),
         "alignment": tree.get("m_RenderAlignment"),
         # Custom streams are what a material's per-particle addresses resolve
