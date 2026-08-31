@@ -623,12 +623,20 @@ def _verbatim_values(kind, pts):
 
 #  Classes for a hash that resolves in no hierarchy on disk.  The class is read
 #  off the clip's *other* transform bindings, so it is evidence and not a guess.
+#
+#  The fourth class is **named** rather than left as an absent key.  It is the
+#  one that means "no sibling told us anything", so it is exactly the class a
+#  consumer most needs to see; written as a missing key it becomes
+#  indistinguishable from a record some other producer wrote without the field
+#  at all, and an aggregation by class then carries an unlabelled residual that
+#  reads as "nothing to classify here".
 UNRESOLVED_REASON = "path hash unresolved"
+UNRESOLVED_CLASS_NONE = "nothing resolves"
 UNRESOLVED_DETAIL = {
     FOREIGN_KIND_CHARACTER: "clip's other bindings are character-rig bones",
     FOREIGN_KIND_FIXTURE: "clip's other bindings are fixture-model nodes",
     "this package": "clip's other bindings are this package's nodes",
-    None: "no binding of this clip resolves anywhere",
+    UNRESOLVED_CLASS_NONE: "no binding of this clip resolves anywhere",
 }
 
 
@@ -636,7 +644,7 @@ def _unresolved_class(resolved_kinds):
     for kind in (FOREIGN_KIND_CHARACTER, FOREIGN_KIND_FIXTURE, "this package"):
         if kind in resolved_kinds:
             return kind
-    return None
+    return UNRESOLVED_CLASS_NONE
 
 
 #  Curve-slot accounting: where every decoded curve slot went.
@@ -776,16 +784,15 @@ def decode_clip(clip_tt, hierarchy):
     # fixture model is naming a node of that model's rig.  The four classes are
     # exhaustive by construction and none of them is a catch-all: each states
     # the evidence that put the hash there, and each turns red the moment that
-    # evidence changes.
+    # evidence changes.  Every record carries ``classification``, the fourth
+    # class included, so grouping the output by that field leaves no residual.
     for path_hash in unresolved_order:
         classification = _unresolved_class(resolved_kinds)
-        anomaly = {"pathHash": path_hash,
-                   "reason": UNRESOLVED_REASON,
-                   "resolvedSiblingSources": sorted(resolved_kinds)}
-        if classification is not None:
-            anomaly["classification"] = classification
-        anomaly["detail"] = UNRESOLVED_DETAIL[classification]
-        anomalies.append(anomaly)
+        anomalies.append({"pathHash": path_hash,
+                          "reason": UNRESOLVED_REASON,
+                          "resolvedSiblingSources": sorted(resolved_kinds),
+                          "classification": classification,
+                          "detail": UNRESOLVED_DETAIL[classification]})
 
     # Transform bindings that exist but cannot become a glTF channel.
     for slot, info in sorted(index.items()):

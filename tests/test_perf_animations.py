@@ -366,7 +366,12 @@ def test_unresolved_binding_reported_as_path_hash_unresolved():
     # specific than the bare label while still naming it.
     assert animations.UNRESOLVED_REASON in reasons
     details = {a.get("detail") for a in anomalies}
-    assert animations.UNRESOLVED_DETAIL[None] in details
+    assert animations.UNRESOLVED_DETAIL[animations.UNRESOLVED_CLASS_NONE] in details
+    # The fourth class is named in the record, not signalled by an absent key:
+    # absence cannot be told apart from a producer that never wrote the field.
+    unresolved = [a for a in anomalies if a["reason"] == animations.UNRESOLVED_REASON]
+    assert unresolved and all(
+        a["classification"] == animations.UNRESOLVED_CLASS_NONE for a in unresolved)
 
 
 # ---------------------------------------------------------------------------
