@@ -16,3 +16,7 @@ local-data/
 # host paths. Ignoring it here is defence in depth, not the fix -- lane paths
 # must be absolute.
 blueprint/
+
+
+# CodeGraph 索引（本机重建）
+.codegraph/
