@@ -17,6 +17,8 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import pytest
+
 from PIL import Image
 
 import phenomena.environments as environments
@@ -24,7 +26,7 @@ from core import mesh as core_mesh
 from pathlib import Path
 from phenomena import audio, texarray
 from phenomena.config import flatten_config, volume_profile
-from phenomena.effects import decode_effect
+from phenomena.effects import decode_effect, light_modes
 
 
 # -- synthetic bundles ------------------------------------------------------
@@ -824,6 +826,75 @@ def test_a_declared_dependency_resolves_the_material_it_holds(tmp_path, monkeypa
     assert image == "006_rain/textures/006_rain_common__tex_env_006_rain_drop.png"
     assert (out / image).exists()
     assert "dependencies" not in index["summary"]["missing"]
+
+
+def test_light_modes_reads_each_pass_state_tag_in_order():
+    """The pass list one material commits to: state tags, pass by pass.
+
+    The tags live on m_State, not on the pass itself: a pass's own m_Tags
+    is empty on every shader in these packages, so reading the pass level would
+    yield a well-formed list of Nones that says nothing.  A pass without the
+    tag keeps its position with None rather than being dropped, and a
+    subshader with no passes contributes nothing.
+    """
+    parsed = {"m_Name": "Probe/Effect/Unlit", "m_SubShaders": [{
+        "m_Passes": [
+            {"m_Tags": {"tags": []},
+             "m_State": {"m_Tags": {"tags": [["LIGHTMODE", "UniversalForward"],
+                                             ["RenderType", "Opaque"]]}}},
+            {"m_State": {"m_Tags": {"tags": [["LIGHTMODE", "SHADOWCASTER"]]}}},
+            {"m_State": {}},
+        ]}]}
+    assert light_modes(parsed) == ["UniversalForward", "SHADOWCASTER", None]
+    assert light_modes({}) == []
+
+
+def test_a_resolved_material_carries_its_shader_light_modes(tmp_path, monkeypatch):
+    """Every resolved material reports the LIGHTMODE tags of its shader's passes."""
+    site = "mysekai__effect__site__environment__006_rain__unique__grasslands"
+    shared = "mysekai__effect__site__environment__006_rain__common"
+    mapping = {site: _dependent_site_bundle("006_rain", "grasslands"),
+               shared: _shared_bundle("006_rain")}
+    result, out, index = _run(tmp_path, monkeypatch, mapping,
+                              bundle_root=str(tmp_path / "bundles"))
+    document = json.loads((out / "006_rain" / "fx" / "effects.json")
+                          .read_text(encoding="utf-8"))
+    material = document["effects"]["fx_env_site_006_rain_grasslands"]["particles"][0][
+        "renderer"]["material"]
+    assert material["lightModes"] == []
+
+
+def test_a_material_whose_shader_is_unresolvable_fails_the_run(tmp_path, monkeypatch):
+    """An unreadable pass list must not come out as an empty claim.
+
+    The field commits to what a shader declares; a shader that cannot be read
+    from the supplied packages declares nothing *to us*, which an empty array
+    would quietly present as a fact about the shader.  The run fails instead, so
+    the missing input stays visible.
+    """
+    site = "mysekai__effect__site__environment__006_rain__unique__grasslands"
+    shared = "mysekai__effect__site__environment__006_rain__common"
+    bundle = _shared_bundle("006_rain")
+    for obj in bundle.objects:
+        if obj.path_id == 500:                     # the material
+            obj._tree["m_Shader"] = {"m_FileID": 0, "m_PathID": 999}
+    with pytest.raises(ValueError, match="names a shader no supplied package"):
+        _run(tmp_path, monkeypatch, {site: _dependent_site_bundle("006_rain",
+                                                                  "grasslands"),
+                                     shared: bundle},
+             bundle_root=str(tmp_path / "bundles"))
+
+
+def test_a_shader_without_a_parsed_form_fails_the_run(tmp_path, monkeypatch):
+    bundle = _shared_bundle("006_rain")
+    for obj in bundle.objects:
+        if obj.path_id == 501:                     # the shader
+            obj._tree["m_ParsedForm"] = None
+    mapping = {"mysekai__effect__site__environment__006_rain__unique__grasslands":
+               _dependent_site_bundle("006_rain", "grasslands"),
+               "mysekai__effect__site__environment__006_rain__common": bundle}
+    with pytest.raises(ValueError, match="has no parsed form"):
+        _run(tmp_path, monkeypatch, mapping, bundle_root=str(tmp_path / "bundles"))
 
 
 def test_icons_come_from_the_shared_thumbnail_package(tmp_path, monkeypatch):
@@ -1838,7 +1909,7 @@ def test_the_timeline_says_which_value_each_track_drives(tmp_path, monkeypatch):
     assert clip["asset"]["gradient"]["colorKeys"][0]["color"] == [1.0, 0.9, 0.8]
     # Gradient key times are stored as sixteenths of a thousandth, and the
     # shared encoding divides by 65535 rather than rounding to a nicer number.
-    assert clip["asset"]["gradient"]["alphaKeys"][1]["time"] == 0.500008
+    assert clip["asset"]["gradient"]["alphaKeys"][1]["time"] == 0.5000076295109483
     assert value["clips"][0]["clipIn"] == 0.25
     # An infinite slope is a stepped key, not a number a JSON reader can take.
     assert value["clips"][0]["asset"]["curve"]["keys"][1]["inSlope"] is None
