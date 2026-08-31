@@ -147,3 +147,138 @@ def shaders_in(environment):
         if is_shader(obj):
             out.append((obj, obj.read_typetree()))
     return out
+
+
+#: ``m_GpuProgramType`` values and the compiler platform each was observed to
+#: address.  Established by cross-check rather than assumed: for every one of
+#: the 5,096 subprogram entries in the world package, the record at
+#: ``m_BlobIndex`` in that platform's blob carries exactly this program type
+#: (0 disagreements, 0 out-of-range).  Two GL types occur, which is why the
+#: mapping is not one-to-one and cannot be inverted by taking the first hit.
+PROGRAM_TYPE_PLATFORM = {3: PLATFORM_GLSL, 4: PLATFORM_GLSL, 25: PLATFORM_BINARY}
+
+#: The program-block field names a pass can carry, in Unity's own order.
+PASS_PROGRAM_FIELDS = ("progVertex", "progFragment", "progGeometry",
+                       "progHull", "progDomain", "progRayTracing")
+
+
+def subprograms(tree):
+    """Which pass, stage and keyword set each blob record belongs to.
+
+    Returns ``[{platform, record, subshader, pass, programBlock, lightMode,
+    gpuProgramType, keywordIndices, parameterRecord}]``.
+
+    ``programBlock`` is the field a subprogram was **declared under**, not the
+    stage of the code it points at.  On this content every entry is declared
+    under ``progVertex`` and those entries account for every program record in
+    both blobs -- because one GL record holds the whole program, vertex and
+    fragment together, under ``#ifdef VERTEX`` / ``#ifdef FRAGMENT``.  Naming
+    the field ``stage`` would say each record is vertex-only, which is the
+    opposite of true and would send a consumer looking for fragment records
+    that do not exist as separate entries.
+
+    A blob record on its own says only "here is a compiled program"; the pass it
+    serves, the stage it is, and the keyword combination that selected it live
+    in the *declared* form, under
+    ``m_SubShaders[].m_Passes[].prog<Stage>.m_PlayerSubPrograms``.  Without this
+    link a survey can group records by content hash but cannot say which pass's
+    render state applies to one, and render state is per pass -- so a value
+    comparison that ignores the link is comparing numbers whose meaning it does
+    not know.
+
+    The outer list of ``m_PlayerSubPrograms`` is **not** indexed by the shader's
+    ``platforms`` field: the world package's shaders declare two platforms and
+    that list has four slots with only one populated.  The platform comes from
+    ``m_GpuProgramType`` (see :data:`PROGRAM_TYPE_PLATFORM`), and
+    ``m_BlobIndex`` then indexes *that platform's own* blob -- both platforms
+    reuse the same index range, so reading the index without first resolving the
+    platform silently attributes half the records to the wrong blob.
+    """
+    out = []
+    for sub_index, subshader in enumerate(parsed_form(tree).get("m_SubShaders") or []):
+        for pass_index, entry in enumerate((subshader or {}).get("m_Passes") or []):
+            light_mode = ""
+            for s, p, mode, _ in passes(tree):
+                if (s, p) == (sub_index, pass_index):
+                    light_mode = mode
+                    break
+            for field in PASS_PROGRAM_FIELDS:
+                block = (entry or {}).get(field) or {}
+                slots = block.get("m_PlayerSubPrograms") or []
+                parameter_slots = block.get("m_ParameterBlobIndices") or []
+                for slot_index, slot in enumerate(slots):
+                    parameters = (parameter_slots[slot_index]
+                                  if slot_index < len(parameter_slots) else []) or []
+                    for item_index, item in enumerate(slot or []):
+                        program_type = (item or {}).get("m_GpuProgramType")
+                        out.append({
+                            "platform": PROGRAM_TYPE_PLATFORM.get(program_type),
+                            "record": (item or {}).get("m_BlobIndex"),
+                            "subshader": sub_index,
+                            "pass": pass_index,
+                            "programBlock": field,
+                            "lightMode": light_mode,
+                            "gpuProgramType": program_type,
+                            "keywordIndices": list((item or {}).get("m_KeywordIndices") or []),
+                            "parameterRecord": (parameters[item_index]
+                                                if item_index < len(parameters) else None),
+                        })
+    return out
+
+
+def attribution_check(tree, parsed_by_platform):
+    """Whether every subprogram's record really carries the type it claims.
+
+    ``parsed_by_platform`` maps a platform to a
+    :func:`shaders.blob.parse_blob` result.  Returns
+    ``{"checked", "agree", "typeMismatch", "outOfRange"}``.  The check is the
+    reason :func:`subprograms` can be trusted at all: the platform is inferred
+    from ``m_GpuProgramType``, and if that inference were wrong the record it
+    points at would hold a different program type.  A caller that reports an
+    attribution without running this is reporting an assumption.
+    """
+    counts = {"checked": 0, "agree": 0, "typeMismatch": 0, "outOfRange": 0}
+    for item in subprograms(tree):
+        counts["checked"] += 1
+        parsed = parsed_by_platform.get(item["platform"])
+        records = (parsed or {}).get("records") or []
+        index = item["record"]
+        if not isinstance(index, int) or not 0 <= index < len(records):
+            counts["outOfRange"] += 1
+        elif records[index].get("programType") != item["gpuProgramType"]:
+            counts["typeMismatch"] += 1
+        else:
+            counts["agree"] += 1
+    return counts
+
+
+def attribution_coverage(tree, parsed_by_platform):
+    """Whether the attribution partitions the program records, or merely touches them.
+
+    Returns ``{"programRecords", "claimedOnce", "claimedTwiceOrMore",
+    "unclaimed"}`` per the whole object.  This is a different question from
+    :func:`attribution_check` and both are needed: that one asks whether the
+    records an attribution names are the right *kind*, this one asks whether
+    every record is named and named once.  A consistent attribution that covers
+    half the records reads as working, because everything it does say is true.
+    """
+    counts = {"programRecords": 0, "claimedOnce": 0,
+              "claimedTwiceOrMore": 0, "unclaimed": 0}
+    rows = subprograms(tree)
+    for platform, parsed in parsed_by_platform.items():
+        program_indexes = [index for index, record in enumerate(parsed.get("records") or [])
+                           if record.get("kind") == "program"]
+        claims = {}
+        for item in rows:
+            if item["platform"] == platform:
+                claims[item["record"]] = claims.get(item["record"], 0) + 1
+        counts["programRecords"] += len(program_indexes)
+        for index in program_indexes:
+            times = claims.get(index, 0)
+            if times == 0:
+                counts["unclaimed"] += 1
+            elif times == 1:
+                counts["claimedOnce"] += 1
+            else:
+                counts["claimedTwiceOrMore"] += 1
+    return counts

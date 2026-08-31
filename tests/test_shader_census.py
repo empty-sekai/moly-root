@@ -105,3 +105,56 @@ def test_bodies_are_dropped_before_serialising():
     stripped = census.without_code(entries)
     assert "code" not in stripped[0]["platforms"][0]["programs"][0]
     assert stripped[0]["platforms"][0]["programs"][0]["codeSha256"]
+
+
+def test_the_declaring_block_is_not_called_a_stage():
+    """Every subprogram on this content is declared under `progVertex`, and one
+    GL record holds vertex and fragment together.  A field named `stage` would
+    say each record is vertex-only and send a consumer looking for fragment
+    records that do not exist as separate entries."""
+    tree = {"m_Name": "", "m_ParsedForm": {
+        "m_Name": "P",
+        "m_PropInfo": {"m_Props": []},
+        "m_SubShaders": [{"m_Passes": [{
+            "m_Name": "Base",
+            "m_Tags": {"tags": {"LIGHTMODE": "UniversalForward"}},
+            "progVertex": {
+                "m_PlayerSubPrograms": [[], [{"m_BlobIndex": 4, "m_KeywordIndices": [7],
+                                              "m_GpuProgramType": 4}]],
+                "m_ParameterBlobIndices": [[], [0]],
+            },
+            "progFragment": {"m_PlayerSubPrograms": [], "m_ParameterBlobIndices": []},
+        }]}],
+    }}
+    rows = objects.subprograms(tree)
+    assert len(rows) == 1
+    assert "stage" not in rows[0]
+    assert rows[0]["programBlock"] == "progVertex"
+    assert rows[0] == {"platform": objects.PLATFORM_GLSL, "record": 4, "subshader": 0,
+                       "pass": 0, "programBlock": "progVertex",
+                       "lightMode": "UniversalForward", "gpuProgramType": 4,
+                       "keywordIndices": [7], "parameterRecord": 0}
+
+
+def test_an_attribution_that_covers_half_the_records_is_not_reported_as_working():
+    """Consistency and coverage are different questions.  An attribution whose
+    every claim is true can still leave records unnamed, and it reads as working
+    because everything it does say checks out."""
+    tree = {"m_Name": "", "m_ParsedForm": {
+        "m_Name": "P", "m_PropInfo": {"m_Props": []},
+        "m_SubShaders": [{"m_Passes": [{
+            "m_Name": "", "m_Tags": {"tags": {}},
+            "progVertex": {"m_PlayerSubPrograms": [[{"m_BlobIndex": 0,
+                                                     "m_KeywordIndices": [],
+                                                     "m_GpuProgramType": 4}]],
+                           "m_ParameterBlobIndices": [[None]]},
+        }]}],
+    }}
+    parsed = {objects.PLATFORM_GLSL: {"records": [
+        {"kind": "program", "programType": 4},
+        {"kind": "program", "programType": 4},   # never claimed
+    ]}}
+    assert objects.attribution_check(tree, parsed) == {
+        "checked": 1, "agree": 1, "typeMismatch": 0, "outOfRange": 0}
+    assert objects.attribution_coverage(tree, parsed) == {
+        "programRecords": 2, "claimedOnce": 1, "claimedTwiceOrMore": 0, "unclaimed": 1}
