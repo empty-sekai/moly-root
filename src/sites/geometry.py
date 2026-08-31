@@ -215,10 +215,8 @@ def shader_reference(store, record, tree):
     """
     target = store.follow(record, tree.get("m_Shader") or {})
     if target is None:
-        pointer = tree.get("m_Shader") or {}
         return {"name": None, "external": True,
-                "archive": store.archive_of(record, pointer),
-                "fileId": pointer.get("m_FileID", 0)}
+                **store.gap(record, tree.get("m_Shader") or {})}
     shader_record, path_id = target
     parsed = shader_record.tree(path_id).get("m_ParsedForm") or {}
     tags = {}

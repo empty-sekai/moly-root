@@ -43,6 +43,12 @@ class BundleEntry:
     file_size: int
     crc: int
     dependencies: tuple[str, ...]
+    #: The manifest says this package is part of the player build.  Such a
+    #: package is never on the download path, so its absence from a bundle
+    #: directory is the manifest's design rather than a gap to be fetched.  This
+    #: is a different subject from ``core.assets.packages.is_builtin_archive``,
+    #: which is about serialized files the engine itself ships.
+    in_player_build: bool
     raw: dict
 
     @classmethod
@@ -51,7 +57,8 @@ class BundleEntry:
         return cls(name, str(value.get("downloadPath") or ""),
                    str(value.get("cacheFileName") or name.rsplit("/", 1)[-1]),
                    int(value.get("fileSize") or 0), int(value.get("crc") or 0),
-                   tuple(str(item) for item in (value.get("dependencies") or ())), value)
+                   tuple(str(item) for item in (value.get("dependencies") or ())),
+                   bool(value.get("isBuiltin")), value)
 
 
 class Manifest:

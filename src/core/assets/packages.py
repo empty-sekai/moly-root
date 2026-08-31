@@ -118,12 +118,23 @@ class PackageStore:
     """Packages by logical name, each loaded at most once.
 
     *paths* are the packages the caller named; *root* is an optional directory the
-    dependencies of those packages are looked up in.
+    dependencies of those packages are looked up in.  *manifest* is optional and
+    only ever makes an unresolved pointer say more: with one, :meth:`gap` can
+    tell a package that has to be fetched from one that is part of the player
+    build and never ships at all.
+
+    :meth:`gap` also reads *root* to find which package holds an archive.  That
+    index is built on the first unresolved pointer and not before, so a run in
+    which everything resolves never pays for it, and a run that has something to
+    explain pays once.
     """
 
-    def __init__(self, paths, root=None):
+    def __init__(self, paths, root=None, manifest=None, index=None):
         self.paths = {os.path.basename(str(path)): str(path) for path in paths}
         self.root = str(root) if root else None
+        self.manifest = manifest
+        self._index = index
+        self._indexed = index is not None
         self.missing = []
         self._packages = {}
         self._archives = {}
@@ -224,6 +235,41 @@ class PackageStore:
         if index < 0:
             return record.archive
         return record.externals[index] if index < len(record.externals) else None
+
+    def archive_index(self):
+        """Which package holds each archive under *root*, built once on demand.
+
+        ``None`` when no root was given, which leaves :meth:`gap` reporting the
+        archive name alone rather than guessing at what holds it.
+        """
+        if not self._indexed:
+            self._indexed = True
+            if self.root:
+                from . import references
+                self._index = references.ArchiveIndex.of_directory(self.root)
+        return self._index
+
+    def gap(self, record, pointer):
+        """Why a pointer did not resolve, as much as this store can establish.
+
+        Always carries the archive name, which is what an unresolved pointer
+        could say on its own.  Given a root it also carries the package that
+        holds the archive and a ``reason`` from :mod:`core.assets.references`,
+        so a reader learns whether to name another input, fetch a package, or
+        stop looking because the package is part of the player build.
+        """
+        from . import references
+        archive = self.archive_of(record, pointer)
+        answer = {"archive": archive, "fileId": (pointer or {}).get("m_FileID", 0)}
+        index = self.archive_index()
+        if archive is None or index is None:
+            return answer
+        package = self._packages.get(record.bundle)
+        answer.update(references.explain(
+            str(archive).rsplit("/", 1)[-1], index, self.manifest,
+            dependencies=getattr(package, "dependencies", ()) or (),
+            engine_archives=BUILTIN_ARCHIVES))
+        return answer
 
     def load_dependencies(self, names):
         """Load *names* and everything they declare, as far as the store reaches."""
