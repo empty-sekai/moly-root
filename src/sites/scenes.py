@@ -24,6 +24,15 @@ Three decisions worth naming:
   a pack that dropped them would not be the authored scene, and a consumer that
   drew them would show things the game never shows, so they are exported with
   ``extras.active``/``extras.enabled`` on the node and listed by path.
+* **A renderer whose every material slot is unassigned is a root the game never
+  places, not a rendering choice.**  A prefab a designer actually placed always
+  carries a real material; an enabled MeshRenderer with only a null material
+  pointer is the leftover top object of an FBX import that is never instantiated
+  by anything else in the package (checked, not assumed: its mesh is referenced
+  by no other component either).  It is listed under
+  unassignedMaterialRenderers and flagged extras.materialed=False on its
+  node, the same way a disabled renderer is, so a consumer does not draw it by
+  default.
 """
 from core.assets.packages import pairs
 from core.jsonio import write_json
@@ -47,7 +56,7 @@ SKIPPED_TYPES = {
                "repository, only named, and every site material's shader is in "
                "`mysekai/shader` anyway"),
     "AnimatorController": ("an animator state machine; its clips are exported and "
-                           "listed under `animations.controllers`, and the state "
+                           "listed under `animations.clips`, and the state "
                            "graph itself is not modelled here"),
 }
 
@@ -149,7 +158,7 @@ def _plain(value, store, record, depth=0):
     if isinstance(value, (list, tuple)):
         return [_plain(item, store, record, depth + 1) for item in value]
     if isinstance(value, float):
-        return round(value, 6)
+        return value
     if isinstance(value, (bytes, bytearray)):
         return {"bytes": len(value)}
     return value
@@ -187,8 +196,10 @@ class PackageExtract:
         self.environments = {}
         self.inactive = []
         self.disabled = []
+        self.unmaterialed = []
         self.unsupported = []
         self.omitted = []
+        self.skins = []
         self.directors = []
         self.extra_scenes = []
         self._container = {}
@@ -261,7 +272,7 @@ class PackageExtract:
             self._other_component(record, path_id, kind, path)
         return mesh_index
 
-    def _geometry_of(self, record, graph, transform, path):
+    def _geometry_of(self, record, graph, transform, path, root=None):
         """``(glTF mesh index, entry)`` for the geometry on one node."""
         components = dict((kind, path_id) for kind, path_id in graph.components(transform)
                           if kind in GEOMETRY_COMPONENTS)
@@ -285,7 +296,10 @@ class PackageExtract:
                      "reason": "material pointer names a material no supplied "
                                "package holds",
                      "archive": self.store.archive_of(record, material)})
-        mesh_index, reason = self.builder.mesh(record, pointer, slots)
+        has_material = any((material or {}).get("m_PathID", 0)
+                           for material in (renderer.get("m_Materials") or []))
+        mesh_index, reason = self.builder.mesh(
+            record, pointer, slots, skinned=renderer_kind == "SkinnedMeshRenderer")
         vertices, triangles = self.builder.mesh_size(record, pointer)
         if mesh_index is None:
             self.unsupported.append({"node": path, "component": renderer_kind,
@@ -295,30 +309,64 @@ class PackageExtract:
             self.disabled.append(path)
         entry = {"skinned": renderer_kind == "SkinnedMeshRenderer",
                  "enabled": bool(renderer.get("m_Enabled", 1)),
+                 "materialed": has_material,
                  "vertices": vertices, "triangles": triangles}
         if entry["skinned"]:
-            self.omitted.append(
-                {"node": path, "component": renderer_kind,
-                 "bones": len(renderer.get("m_Bones") or []),
-                 "reason": "a skinned mesh is exported as its bind-pose geometry; "
-                           "the skin weights and the skeleton that drive it are the "
-                           "character domain's contract and are not re-implemented "
-                           "here"})
+            entry["skin"] = self._skin_plan(record, renderer, pointer, path, root)
         return mesh_index, entry
+
+    def _skin_plan(self, record, renderer, pointer, path, root=None):
+        """What a skinned renderer needs before its joints can be node indices.
+
+        The bone list is transform path ids; the walk that turns those into glTF
+        node indices has not finished when the geometry is read, so the binding
+        is planned here and closed in :meth:`root`.  Returns ``None`` with an
+        ``omitted`` entry when the mesh cannot be skinned at all.
+
+        Every omission here names its *root*: one prefab node path can occur once
+        per scene, so two genuinely different renderers otherwise produce two
+        byte-identical records that read as one entry reported twice.
+        """
+        bones = [(bone or {}).get("m_PathID", 0)
+                 for bone in renderer.get("m_Bones") or []]
+        skin = self.builder.mesh_skin(record, pointer)
+        if skin is None:
+            self.omitted.append(
+                {"node": path, "root": root, "component": "SkinnedMeshRenderer",
+                 "bones": len(bones),
+                 "reason": "the renderer is skinned but its mesh carries no bone "
+                           "weights or no bind pose, so it is exported as plain "
+                           "geometry"})
+            return None
+        if len(bones) != skin["joints"]:
+            self.omitted.append(
+                {"node": path, "root": root, "component": "SkinnedMeshRenderer",
+                 "bones": len(bones), "bindPoses": skin["joints"],
+                 "reason": "the renderer's bone list and the mesh's bind pose "
+                           "disagree on how many joints there are, so no skin is "
+                           "written rather than a mismatched one"})
+            return None
+        return {"bones": bones, "joints": skin["joints"],
+                "influences": skin["influences"],
+                "inverseBindMatrices": skin["inverseBindMatrices"],
+                "rootBone": (renderer.get("m_RootBone") or {}).get("m_PathID", 0)}
 
     def root(self, record, graph, transform, primary=False):
         """Walk one prefab root into a glTF scene; returns its entry."""
         node_paths = graph.node_paths(transform)
         indices = {}
+        pending = []
         entry = {"name": graph.name(transform), "primary": primary, "nodes": 0,
                  "meshes": 0, "renderers": 0, "vertices": 0, "triangles": 0,
+                 "skins": 0,
                  "assets": self.asset_paths(record, graph.owner[transform])}
         for current in graph.subtree(transform):
             game_object = graph.owner[current]
             path = node_paths.get(game_object, "")
             tree = graph.game_object(current)
             self._mark(record, game_object, "exported", "node")
-            mesh_index, geometry = self._geometry_of(record, graph, current, path)
+            mesh_index, geometry = self._geometry_of(record, graph, current, path,
+                                                     root=entry["name"])
             index = self.builder.node(graph, current, mesh_index)
             node = self.builder.glb.g["nodes"][index]
             active = bool(tree.get("m_IsActive", 1))
@@ -332,8 +380,13 @@ class PackageExtract:
                 entry["triangles"] += geometry["triangles"]
                 if geometry["skinned"]:
                     node["extras"] = dict(node.get("extras") or {}, skinned=True)
+                    if geometry.get("skin"):
+                        pending.append((index, path, geometry["skin"]))
                 if not geometry["enabled"]:
                     node["extras"] = dict(node.get("extras") or {}, enabled=False)
+                if not geometry["materialed"]:
+                    self.unmaterialed.append(path)
+                    node["extras"] = dict(node.get("extras") or {}, materialed=False)
             indices[current] = index
             parent = graph.father.get(current)
             if parent in indices:
@@ -342,11 +395,43 @@ class PackageExtract:
             entry["nodes"] += 1
             self._component(record, graph, current, path, node_paths,
                             root=entry["name"])
+        entry["skins"] = self._bind_skins(pending, indices, entry["name"])
         scene = self.builder.scene(entry["name"], indices[transform])
         entry["scene"] = scene
         if primary:
             self.slots = self._slot_table(record, graph, transform, node_paths)
         return entry
+
+    def _bind_skins(self, pending, indices, root):
+        """Turn each planned skin's bone list into glTF node indices.
+
+        Runs after the root's walk, when every transform of the root has a node.
+        A bone that names a transform outside this root cannot be a joint here,
+        and that is reported rather than guessed at: the alternative is a skin
+        whose joints silently point at the wrong nodes.
+        """
+        written = 0
+        for node_index, path, plan in pending:
+            joints = [indices.get(bone) for bone in plan["bones"]]
+            missing = [bone for bone, joint in zip(plan["bones"], joints)
+                       if joint is None]
+            if missing:
+                self.omitted.append(
+                    {"node": path, "root": root, "component": "SkinnedMeshRenderer",
+                     "bones": len(plan["bones"]), "unresolvedBones": len(missing),
+                     "reason": "the renderer names bones outside the prefab root it "
+                               "hangs under, so their glTF nodes are not in this "
+                               "scene and no skin is written"})
+                continue
+            self.builder.glb.g["nodes"][node_index]["skin"] = self.builder.skin(
+                joints, indices.get(plan["rootBone"]), plan["inverseBindMatrices"])
+            self.skins.append(
+                {"node": path, "root": root, "joints": len(joints),
+                 "influences": plan["influences"],
+                 "jointNodes": joints,
+                 "skeleton": indices.get(plan["rootBone"])})
+            written += 1
+        return written
 
     def _slot_table(self, record, graph, transform, node_paths):
         """The direct children of a site prefab root, with their stated role."""
@@ -491,7 +576,7 @@ class PackageExtract:
                                       .get("m_References") or [])),
             "wrapMode": tree.get("m_WrapMode"),
             "initialState": tree.get("m_InitialState"),
-            "initialTime": round(float(tree.get("m_InitialTime", 0.0)), 6),
+            "initialTime": float(tree.get("m_InitialTime", 0.0)),
             "state": BOUND_SOCKET if bound else EMPTY_SOCKET})
         self._mark(record, path_id, "exported", "timeline socket")
 
@@ -619,11 +704,13 @@ class PackageExtract:
             "components": {name: entry for name, entry
                            in sorted(self.components.items())},
             "particles": self.particles,
+            "skins": self.skins,
             "animations": {"clips": self.clips},
             "timelineSockets": self.directors,
             "environments": self.environments,
             "inactiveNodes": sorted(self.inactive),
             "disabledRenderers": sorted(self.disabled),
+            "unassignedMaterialRenderers": sorted(self.unmaterialed),
             "omitted": self.omitted,
             "unsupported": self.unsupported + [dict(gap, kind="image")
                                                for gap in self.textures.failed],

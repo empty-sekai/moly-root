@@ -31,9 +31,12 @@ The extractor reads meshes from **both** a ``MeshFilter``/``MeshRenderer`` pair
 and a ``SkinnedMeshRenderer``.  ``fixture-mesh-topology`` reports 111 packages
 whose geometry hangs entirely on ``SkinnedMeshRenderer``; an extractor that only
 watches ``MeshRenderer`` would silently export empty files for all of them and
-still report a green run.  Skins are not exported (the contract's skeleton is for
-characters, and the dispatch here asks for geometry, materials and node
-transforms), but the bone transforms stay in the hierarchy as ordinary nodes.
+still report a green run.  A skinned renderer's joint influences, bind pose and
+bone list are exported too, through the same ``core.mesh`` reader every other
+domain uses: without them the package is drawn in its bind pose, and the bind
+pose is not what the prefab is authored at.  Measured over those 111 packages,
+22 carry at least one bone whose authored pose differs from the bind pose, and
+in those the difference reaches 0.34 authored units.
 """
 import io
 import json
@@ -49,7 +52,8 @@ from core.assets.packages import PackageStore
 from core.gltf import GLB
 from core.jsonio import write_json
 from core.mesh import (FLOAT, UNSIGNED_INT, ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER,
-                       TRIANGLES, NOT_TRIANGLES, INDEX_RANGE, compose_mesh)
+                       TRIANGLES, NOT_TRIANGLES, INDEX_RANGE, compose_mesh,
+                       skin_accessors)
 
 UnityPy.config.FALLBACK_UNITY_VERSION = "2022.3.62f3"
 
@@ -63,6 +67,15 @@ UNREADABLE_MESH = "mesh vertex data could not be read"
 NOT_TRIANGLE_LIST = "a submesh is not a triangle list"
 TEXTURE_DECODE_FAILED = "texture could not be decoded to PNG"
 MATERIAL_UNRESOLVED = "a renderer names a material that does not resolve here"
+
+NO_SKIN_DATA = ("the renderer is skinned but its mesh carries no bone weights or "
+                "no bind pose, so it is exported as plain geometry")
+BONES_DISAGREE = ("the renderer's bone list and the mesh's bind pose disagree on "
+                  "how many joints there are, so no skin is written rather than "
+                  "a mismatched one")
+BONES_OUTSIDE_ROOT = ("the renderer names bones outside the prefab variant it "
+                      "hangs under, so their glTF nodes are not in this scene "
+                      "and no skin is written")
 
 UNSIGNED_BYTE = 5121
 
@@ -115,15 +128,20 @@ def _local_transform(tree):
             [ls.get("x", 1.0), ls.get("y", 1.0), ls.get("z", 1.0)])
 
 
-def _mesh_channels(glb, mesh_obj, tree):
+def _mesh_channels(glb, mesh_obj, tree, skin=True):
     """Write one mesh's vertex buffers into *glb*, verbatim, for composing.
 
     Returns the ``buffers`` dict that :func:`core.mesh.compose_mesh` consumes:
-    ``{"attributes", "submeshes", "name", "vertices", "triangles"}``.  Unlike
-    ``core.mesh.mesh_accessors`` this does not reflect the X axis, reorder
-    winding or flip UVs — the surrounding node transforms are exported verbatim,
-    so the geometry is kept in the same (authored) space.  Colors are written as
-    the UNorm8 bytes they are authored in.
+    ``{"attributes", "submeshes", "name", "vertices", "triangles", "skin"}``.
+    Unlike ``core.mesh.mesh_accessors`` this does not reflect the X axis,
+    reorder winding or flip UVs — the surrounding node transforms are exported
+    verbatim, so the geometry is kept in the same (authored) space.  Colors are
+    written as the UNorm8 bytes they are authored in.
+
+    ``skin`` comes from ``core.mesh.skin_accessors`` with the reflection off, for
+    the same reason: an inverse bind matrix is read against the space the node
+    transforms are written in, and here that space is the authored one.  It is
+    ``None`` for a mesh with no bone weights or no bind pose.
     """
     handler = MeshHandler(mesh_obj.read())
     handler.process()
@@ -179,7 +197,9 @@ def _mesh_channels(glb, mesh_obj, tree):
             UNSIGNED_INT, "SCALAR", length, ELEMENT_ARRAY_BUFFER))
         triangles += length // 3
     return {"name": str(tree.get("m_Name") or "mesh"), "attributes": attributes,
-            "submeshes": submeshes, "vertices": count, "triangles": triangles}
+            "submeshes": submeshes, "vertices": count, "triangles": triangles,
+            "skin": skin_accessors(glb, handler, tree, reflect=False)
+                    if skin else None}
 
 
 def _texture_index(glb, record, path_id, cache):
@@ -323,7 +343,7 @@ def _material_properties(tree, glb, record, tex_cache):
             continue
         number = float(value)
         if math.isfinite(number):
-            floats[str(name)] = round(number, 6)
+            floats[str(name)] = number
         else:
             non_finite[str(name)] = repr(number)
     for entry in props.get("m_Colors") or []:
@@ -336,7 +356,7 @@ def _material_properties(tree, glb, record, tex_cache):
         for channel in "rgba":
             number = float(value.get(channel, 0.0))
             if math.isfinite(number):
-                channels.append(round(number, 6))
+                channels.append(number)
             else:
                 # JSON has no infinity, and substituting a finite number would
                 # invent a limit the author did not set -- `_CameraFadeParams`
@@ -356,10 +376,10 @@ def _material_properties(tree, glb, record, tex_cache):
         scale = value.get("m_Scale") or {}
         offset = value.get("m_Offset") or {}
         scale_offset[str(name)] = [
-            round(float(scale.get("x", 1.0)), 6),
-            round(float(scale.get("y", 1.0)), 6),
-            round(float(offset.get("x", 0.0)), 6),
-            round(float(offset.get("y", 0.0)), 6)]
+            float(scale.get("x", 1.0)),
+            float(scale.get("y", 1.0)),
+            float(offset.get("x", 0.0)),
+            float(offset.get("y", 0.0))]
         path_id = (value.get("m_Texture") or {}).get("m_PathID", 0)
         if not path_id:
             continue
@@ -442,20 +462,28 @@ def _resolve(store, record, pointer):
 
 
 def _renderer_mesh_and_materials(record, component_id, kind):
-    """The mesh pointer and material pointers a renderer draws, or why none."""
+    """The mesh pointer, material pointers and bones a renderer draws.
+
+    Returns ``(mesh pointer, material pointers, bones, reason)``; ``bones`` is
+    the ``(bone transform ids, root bone id)`` pair of a ``SkinnedMeshRenderer``
+    and ``None`` for a plain one, and ``reason`` says why there is no mesh.
+    """
     tree = _tree(record, component_id)
     if not tree:
-        return None, [], NO_RENDERER
+        return None, [], None, NO_RENDERER
     goid = (tree.get("m_GameObject") or {}).get("m_PathID")
     if kind == "MeshRenderer":
         for cid, ckind in _components(record, goid):
             if ckind == "MeshFilter":
                 mesh = (_tree(record, cid) or {}).get("m_Mesh") or {}
-                return mesh, _materials(tree), None
-        return None, [], NO_RENDERER
+                return mesh, _materials(tree), None, None
+        return None, [], None, NO_RENDERER
     if kind == "SkinnedMeshRenderer":
-        return (tree.get("m_Mesh") or {}), _materials(tree), None
-    return None, [], NO_RENDERER
+        bones = ([(bone or {}).get("m_PathID", 0)
+                  for bone in tree.get("m_Bones") or []],
+                 (tree.get("m_RootBone") or {}).get("m_PathID", 0))
+        return (tree.get("m_Mesh") or {}), _materials(tree), bones, None
+    return None, [], None, NO_RENDERER
 
 
 def _materials(tree):
@@ -474,6 +502,7 @@ def _walk(glb, record, store, tpid, parent, ctx):
             "extras": {"sourcePathId": tpid, "gameObjectId": goid}}
     index = len(glb.g["nodes"])
     glb.g["nodes"].append(node)
+    ctx["nodeIndex"][tpid] = index
     ctx["report"]["nodeNames"].add(name)
     ctx["variantGoids"].add(goid)
     if goid in ctx["fixtureView"]:
@@ -482,8 +511,9 @@ def _walk(glb, record, store, tpid, parent, ctx):
     for cid, kind in _components(record, goid):
         if kind not in ("MeshRenderer", "SkinnedMeshRenderer"):
             continue
-        mesh_pointer, material_pointers, reason = _renderer_mesh_and_materials(
-            record, cid, kind)
+        skinned = kind == "SkinnedMeshRenderer"
+        mesh_pointer, material_pointers, bones, reason = (
+            _renderer_mesh_and_materials(record, cid, kind))
         if not (mesh_pointer or {}).get("m_PathID"):
             ctx["report"]["anomalies"].append(
                 {"type": "no-mesh", "node": name, "kind": kind})
@@ -494,8 +524,16 @@ def _walk(glb, record, store, tpid, parent, ctx):
                 {"type": "mesh-unresolved", "node": name, "kind": kind})
             continue
         mesh_record, mesh_id = target
-        if mesh_id in ctx["mesh_cache"]:
-            node["mesh"] = ctx["mesh_cache"][mesh_id]
+        # ``skinned`` joins the key because glTF binds the joint attributes into
+        # the primitive: one Unity mesh drawn by both a plain and a skinned
+        # renderer needs two glTF meshes, and a primitive carrying ``JOINTS_0``
+        # on a node with no ``skin`` is invalid.
+        cache_key = (mesh_id, skinned)
+        if cache_key in ctx["mesh_cache"]:
+            node["mesh"] = ctx["mesh_cache"][cache_key]
+            if skinned:
+                _plan_skin(ctx, node, index, name, bones,
+                           ctx["skin_cache"].get(mesh_id))
             continue
         mesh_obj = mesh_record.objects.get(mesh_id)
         if mesh_obj is None:
@@ -504,7 +542,7 @@ def _walk(glb, record, store, tpid, parent, ctx):
             continue
         try:
             mesh_tt = mesh_obj.read_typetree()
-            buffers = _mesh_channels(glb, mesh_obj, mesh_tt)
+            buffers = _mesh_channels(glb, mesh_obj, mesh_tt, skin=skinned)
         except Exception:
             ctx["report"]["anomalies"].append(
                 {"type": "mesh-unreadable", "node": name, "kind": kind})
@@ -526,9 +564,13 @@ def _walk(glb, record, store, tpid, parent, ctx):
             except ValueError:
                 ctx["report"]["anomalies"].append(
                     {"type": "material-unresolved", "node": name})
-        mesh_index = compose_mesh(glb, buffers, None, materials)
-        ctx["mesh_cache"][mesh_id] = mesh_index
+        mesh_index = compose_mesh(glb, buffers, None, materials,
+                                  skinned and bool(buffers.get("skin")))
+        ctx["mesh_cache"][cache_key] = mesh_index
+        ctx["skin_cache"][mesh_id] = buffers.get("skin")
         node["mesh"] = mesh_index
+        if skinned:
+            _plan_skin(ctx, node, index, name, bones, buffers.get("skin"))
         ctx["report"]["vertexCount"] += buffers["vertices"]
         ctx["report"]["meshCount"] += 1
         if not buffers["vertices"]:
@@ -547,6 +589,67 @@ def _walk(glb, record, store, tpid, parent, ctx):
     return index
 
 
+def _plan_skin(ctx, node, index, name, bones, skin):
+    """Record what a skinned renderer needs before its joints can be nodes.
+
+    The bone list is transform path ids, and the walk that turns those into glTF
+    node indices has not finished when the renderer is read — a bone is very
+    often a sibling the walk reaches later.  So the binding is planned here and
+    closed by :func:`_bind_skins` once the variant's whole tree has nodes.  A
+    renderer whose mesh has no skin data, or whose bone list and bind pose
+    disagree on how many joints there are, is reported and left as plain
+    geometry rather than bound to a skeleton that does not match it.
+    """
+    bone_ids, root_bone = bones or ([], 0)
+    if skin is None:
+        ctx["report"]["anomalies"].append(
+            {"type": "skin-omitted", "node": name, "bones": len(bone_ids),
+             "reason": NO_SKIN_DATA})
+        return
+    if len(bone_ids) != skin["joints"]:
+        ctx["report"]["anomalies"].append(
+            {"type": "skin-omitted", "node": name, "bones": len(bone_ids),
+             "bindPoses": skin["joints"], "reason": BONES_DISAGREE})
+        return
+    ctx["pendingSkins"].append(
+        {"node": index, "name": name, "bones": bone_ids, "rootBone": root_bone,
+         "joints": skin["joints"], "influences": skin["influences"],
+         "inverseBindMatrices": skin["inverseBindMatrices"]})
+
+
+def _bind_skins(glb, ctx):
+    """Turn each planned skin's bone list into glTF node indices.
+
+    Runs after one variant's walk, when every transform of that variant has a
+    node.  A bone naming a transform outside the variant cannot be a joint here,
+    and that is reported rather than guessed at: the alternative is a skin whose
+    joints silently point at the wrong nodes.  Returns how many skins were
+    written for this variant.
+    """
+    written = 0
+    for plan in ctx["pendingSkins"]:
+        joints = [ctx["nodeIndex"].get(bone) for bone in plan["bones"]]
+        missing = sum(1 for joint in joints if joint is None)
+        if missing:
+            ctx["report"]["anomalies"].append(
+                {"type": "skin-omitted", "node": plan["name"],
+                 "bones": len(plan["bones"]), "unresolvedBones": missing,
+                 "reason": BONES_OUTSIDE_ROOT})
+            continue
+        entry = {"joints": joints,
+                 "inverseBindMatrices": plan["inverseBindMatrices"]}
+        skeleton = ctx["nodeIndex"].get(plan["rootBone"])
+        if skeleton is not None:
+            entry["skeleton"] = skeleton
+        glb.g["skins"].append(entry)
+        glb.g["nodes"][plan["node"]]["skin"] = len(glb.g["skins"]) - 1
+        ctx["report"]["skinCount"] += 1
+        ctx["report"]["jointCount"] += len(joints)
+        written += 1
+    ctx["pendingSkins"] = []
+    return written
+
+
 def _variants(glb, record, store, transforms, gameobjects, roots, ctx,
               container):
     """Export every root transform tree as one scene variant."""
@@ -557,8 +660,11 @@ def _variants(glb, record, store, transforms, gameobjects, roots, ctx,
         root_name = str((root_go or {}).get("m_Name", ""))
         ctx["root"] = root
         ctx["variantGoids"] = set()
+        ctx["nodeIndex"] = {}
+        ctx["pendingSkins"] = []
         before = ctx["report"]["nodeNames"].copy()
         node_index = _walk(glb, record, store, root, None, ctx)
+        skins = _bind_skins(glb, ctx)
         container_paths = [path for path, goid in container
                            if goid in ctx["variantGoids"]]
         variants.append({
@@ -567,6 +673,7 @@ def _variants(glb, record, store, transforms, gameobjects, roots, ctx,
             "containerPaths": container_paths,
             "nodeCount": len(set(ctx["report"]["nodeNames"]) - before),
             "hasFixtureView": root in ctx["fvRoots"],
+            "skins": skins,
         })
         root_nodes.append(node_index)
     return root_nodes, variants
@@ -619,10 +726,11 @@ def _export_package(store, name, out_dir):
     glb = GLB(generator="moly-root fixture extractor")
     report = {"name": name, "nodeNames": set(), "vertexCount": 0,
               "meshCount": 0, "zeroVertexMeshes": 0, "hasGeometry": False,
-              "anomalies": []}
+              "skinCount": 0, "jointCount": 0, "anomalies": []}
     ctx = {"fixtureView": set(), "fvRoots": set(), "root": None,
            "variantGoids": set(), "mesh_cache": {}, "material_cache": {},
-           "tex_cache": {}, "report": report}
+           "tex_cache": {}, "skin_cache": {}, "nodeIndex": {},
+           "pendingSkins": [], "report": report}
     variants, root_nodes, container = [], [], []
     for record in package.files:
         if not record.kinds:
@@ -688,6 +796,8 @@ def _export_package(store, name, out_dir):
         "meshCount": report["meshCount"],
         "vertexCount": report["vertexCount"],
         "zeroVertexMeshes": report["zeroVertexMeshes"],
+        "skinCount": report["skinCount"],
+        "jointCount": report["jointCount"],
         "hasFixtureView": bool(ctx["fixtureView"]),
         "nodeNames": sorted(report["nodeNames"]),
         "anomalies": report["anomalies"],
@@ -717,6 +827,8 @@ def extract_from_store(store, out_dir):
     prefabs = 0
     zero_mesh_packages = 0
     mesh_packages = 0
+    skins = joints = 0
+    skinned_packages = 0
     anomalies_by_type = {}
 
     for name in names:
@@ -732,6 +844,10 @@ def extract_from_store(store, out_dir):
             continue
         packages[name] = document
         prefabs += len(document["variants"])
+        skins += document.get("skinCount", 0)
+        joints += document.get("jointCount", 0)
+        if document.get("skinCount", 0):
+            skinned_packages += 1
         if document["status"] == "exported":
             exported += 1
             mesh_packages += 1
@@ -756,6 +872,9 @@ def extract_from_store(store, out_dir):
         "meshPackages": mesh_packages,
         "zeroVertexPackages": zero_mesh_packages,
         "nonZeroVertexPackages": mesh_packages - zero_mesh_packages,
+        "skins": skins,
+        "skinJoints": joints,
+        "skinnedPackages": skinned_packages,
         "anomalies": anomalies_by_type,
         "noMeshNames": resolution,
         "failedNames": failures,

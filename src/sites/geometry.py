@@ -63,7 +63,7 @@ MESH_UNREADABLE = "mesh could not be decoded"
 
 
 def _vec(node, keys):
-    return [round(float((node or {}).get(key, 0.0)), 6) for key in keys]
+    return [float((node or {}).get(key, 0.0)) for key in keys]
 
 
 def component_ids(tree):
@@ -244,10 +244,10 @@ def material_document(store, record, path_id, textures):
     """One material: its shader, its texture bindings and its property block."""
     tree = record.tree(path_id)
     properties = tree.get("m_SavedProperties") or {}
-    floats = {str(name): round(float(value), 6)
+    floats = {str(name): float(value)
               for name, value in pairs(properties.get("m_Floats"))
               if isinstance(value, (int, float))}
-    colors = {str(name): [round(float((value or {}).get(channel, 0.0)), 6)
+    colors = {str(name): [float((value or {}).get(channel, 0.0))
                           for channel in "rgba"]
               for name, value in pairs(properties.get("m_Colors"))
               if isinstance(value, dict)}
@@ -255,10 +255,10 @@ def material_document(store, record, path_id, textures):
     for name, value in pairs(properties.get("m_TexEnvs")):
         entry = value or {}
         scale, offset = entry.get("m_Scale") or {}, entry.get("m_Offset") or {}
-        scale_offset[str(name)] = [round(float(scale.get("x", 1.0)), 6),
-                                   round(float(scale.get("y", 1.0)), 6),
-                                   round(float(offset.get("x", 0.0)), 6),
-                                   round(float(offset.get("y", 0.0)), 6)]
+        scale_offset[str(name)] = [float(scale.get("x", 1.0)),
+                                   float(scale.get("y", 1.0)),
+                                   float(offset.get("x", 0.0)),
+                                   float(offset.get("y", 0.0))]
         pointer = entry.get("m_Texture") or {}
         if not pointer.get("m_PathID", 0):
             slots[str(name)] = None
@@ -405,7 +405,7 @@ class Builder:
             return self._images[path], slot
         return None
 
-    def mesh(self, record, pointer, materials=None):
+    def mesh(self, record, pointer, materials=None, skinned=False):
         """``(glTF mesh index, reason)``; the reason is why there is no mesh."""
         pointer = pointer or {}
         if not pointer.get("m_PathID", 0):
@@ -421,7 +421,9 @@ class Builder:
         owner, path_id = target
         mesh_key = (owner.archive, path_id)
         self.mesh_keys.add(mesh_key)
-        combination = (mesh_key, tuple(sorted((materials or {}).items())))
+        # ``skinned`` joins the key: the same geometry is drawn both rigidly and
+        # skinned in one package, and the two need different primitives.
+        combination = (mesh_key, tuple(sorted((materials or {}).items())), skinned)
         if combination in self._meshes:
             return self._meshes[combination], None
         tree = owner.tree(path_id)
@@ -437,9 +439,27 @@ class Builder:
         buffers = self._buffers[mesh_key]
         if buffers is None:
             return None, MESH_UNREADABLE
-        index = compose_mesh(self.glb, buffers, buffers["name"], materials)
+        index = compose_mesh(self.glb, buffers, buffers["name"], materials, skinned)
         self._meshes[combination] = index
         return index, None
+
+    def mesh_skin(self, record, pointer):
+        """The skin buffers of an already-added mesh pointer, or ``None``."""
+        target = self.store.follow(record, pointer or {})
+        if target is None:
+            return None
+        buffers = self._buffers.get((target[0].archive, target[1]))
+        return buffers.get("skin") if buffers else None
+
+    def skin(self, joints, skeleton, inverse_bind_matrices):
+        """Add one glTF skin binding *joints* (node indices, in the mesh's
+        bind-pose order) to a mesh's inverse bind matrices."""
+        entry = {"joints": list(joints),
+                 "inverseBindMatrices": inverse_bind_matrices}
+        if skeleton is not None:
+            entry["skeleton"] = skeleton
+        self.glb.g["skins"].append(entry)
+        return len(self.glb.g["skins"]) - 1
 
     def mesh_size(self, record, pointer):
         """``(vertices, triangles)`` of an already-added mesh pointer."""
@@ -519,10 +539,10 @@ def collider_document(store, record, path_id, kind, node_path):
         entry["size"] = _vec(tree.get("m_Size"), "xyz")
     elif kind == "SphereCollider":
         entry["center"] = _vec(tree.get("m_Center"), "xyz")
-        entry["radius"] = round(float(tree.get("m_Radius", 0.0)), 6)
+        entry["radius"] = float(tree.get("m_Radius", 0.0))
     elif kind == "CapsuleCollider":
         entry["center"] = _vec(tree.get("m_Center"), "xyz")
-        entry["radius"] = round(float(tree.get("m_Radius", 0.0)), 6)
-        entry["height"] = round(float(tree.get("m_Height", 0.0)), 6)
+        entry["radius"] = float(tree.get("m_Radius", 0.0))
+        entry["height"] = float(tree.get("m_Height", 0.0))
         entry["direction"] = tree.get("m_Direction")
     return entry

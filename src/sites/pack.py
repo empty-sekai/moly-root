@@ -78,6 +78,11 @@ SEMANTICS = dict(PLACEMENT_SEMANTICS, **{
     "inactiveNodes": ("nodes that ship hidden. They are kept in the geometry, because "
                       "the pack is the authored scene, and listed so a consumer does "
                       "not draw what the game never shows"),
+    "skins": ("a skinned renderer's joint binding: which glTF nodes drive the mesh, "
+              "in the mesh's own bind-pose order, with the vertex influences and "
+              "inverse bind matrices written into the binary. One entry per "
+              "renderer, not per mesh -- one mesh can be driven by several "
+              "renderers naming different bones, and the site packages do that"),
     "verbatimComponents": ("a component with no structured reader is exported with its "
                            "serialized fields as they are, pointers named where they "
                            "resolve; that is extraction without interpretation, not a "
@@ -103,7 +108,7 @@ SEMANTICS = dict(PLACEMENT_SEMANTICS, **{
 
 COUNTERS = ("packages", "scenes", "geometryFiles", "meshes", "vertices", "triangles",
             "collisionSurfaces", "navmeshes", "navmeshTiles", "heightMeshes",
-            "materials", "textures", "emitters", "clips", "omitted",
+            "materials", "textures", "emitters", "clips", "skins", "omitted",
             "unsupported")
 
 
@@ -206,6 +211,7 @@ def extract_sites(bundles, out_dir, bundle_root=None, master=None, master_cache=
             document = {"package": name, "kind": kind, "key": key, "roots": [],
                         "collision": [], "navmesh": [], "materials": [],
                         "textures": [], "components": {}, "particles": [],
+                        "skins": [],
                         "geometry": None, "objects": None,
                         "animations": {"clips": []}, "omitted": [],
                         "timelineSockets": [],
@@ -229,6 +235,7 @@ def extract_sites(bundles, out_dir, bundle_root=None, master=None, master_cache=
         totals["textures"] += len(document["textures"])
         totals["emitters"] += len(document["particles"])
         totals["clips"] += len(document["animations"]["clips"])
+        totals["skins"] += len(document.get("skins") or [])
         unsupported.extend(dict(gap, package=name) for gap in document["unsupported"])
         omitted.extend(dict(gap, package=name) for gap in document.get("omitted") or [])
         per_bundle[name] = {
