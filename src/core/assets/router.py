@@ -64,6 +64,18 @@ CAMERA_PACKAGE = "mysekai__camera"
 # the table sizes so "the constants were read" is a count rather than a claim.
 TALK_CONSTANTS_PACKAGE = "mysekai__talk__scenario__lib"
 
+# Player-appearance packages live under one path prefix shared by more than the
+# three families chara.avatar_parts reads (skin/decoration/penlight): the
+# avatar body model and its motion library share the same prefix but not the
+# category shape (``chara.avatar_parts.split_flat`` raises on them), so the
+# prefix alone is not enough here -- only the three known categories are
+# claimed.  The category list is duplicated from ``chara.avatar_parts
+# .CATEGORIES`` rather than imported, the same way every other domain's shape
+# is stated here without importing its extractor module; the two must be kept
+# in step by hand.
+AVATAR_PART_PREFIX = "virtual_live__avatar__"
+AVATAR_PART_CATEGORIES = ("skin", "decoration", "penlight")
+
 
 @dataclass(frozen=True)
 class Route:
@@ -88,6 +100,10 @@ def route(name):
         return Route("talk-constants", "fixture-talks")
     if name == CAMERA_PACKAGE:
         return Route("camera", "perf")
+    if name.startswith(AVATAR_PART_PREFIX):
+        rest = name[len(AVATAR_PART_PREFIX):]
+        if any(rest.startswith(category + "__") for category in AVATAR_PART_CATEGORIES):
+            return Route("avatar-part", "avatar-parts")
     if PHENOMENA_BUNDLE.match(name) or name == PHENOMENA_THUMBNAIL:
         return Route("phenomena", "phenomena")
     if name.startswith(SITE_PREFIX):

@@ -72,6 +72,8 @@ DOMAIN_OBJECT_TYPES = {
                           "SkinnedMeshRenderer", "Material", "Texture2D"},
     "cutscene-timeline": {"MonoBehaviour", "PlayableDirector", "AnimationClip"},
     "fixture-timeline": {"MonoBehaviour", "PlayableDirector", "AnimationClip"},
+    "avatar-part": {"Mesh", "MeshFilter", "MeshRenderer", "Material", "Texture2D",
+                    "Shader"},
 }
 
 
@@ -217,6 +219,7 @@ FIXED_ARTIFACT_PATHS = (
     "alone-actions.json",
     "talks.json",
     "emoticons/emoticons.json",
+    "avatar-parts/avatar-parts.json",
     "phenomena/index.json",
     "site/index.json",
     "fixture-interface/attach-points.json",
@@ -627,6 +630,32 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 lookup_bundles=[str(path) for path in lookup_paths])
         except Exception as exc:
             emoticon_error = f"{type(exc).__name__}: {exc}"
+    # Each avatar-part package is fully self-contained (own textures, own
+    # materials, own in-package shaders, probed) so unlike the phenomena or
+    # site families there is no cross-package lookup pass -- but the family
+    # still writes one shared index across every package extracted this run,
+    # so, like the overhead-item packages above, every package is collected
+    # first and the job runs once over all of them.
+    avatar_part_paths = {}
+    avatar_part_errors = {}
+    for name in names:
+        target = route(name)
+        if target is None or target.domain != "avatar-part":
+            continue
+        try:
+            avatar_part_paths[name] = _bundle_path(bundles, name)
+        except Exception as exc:
+            avatar_part_errors[name] = f"{type(exc).__name__}: {exc}"
+    avatar_part_result = None
+    avatar_part_error = None
+    if avatar_part_paths:
+        try:
+            from chara.avatar_parts import extract_avatar_parts
+            avatar_part_result = extract_avatar_parts(
+                [str(path) for path in avatar_part_paths.values()],
+                str(out / "avatar-parts"))
+        except Exception as exc:
+            avatar_part_error = f"{type(exc).__name__}: {exc}"
     # A phenomenon spans several packages (a global one, a shared one, and one per
     # site), so its packages are extracted together in one job rather than one at a
     # time, and the shared index is written once from what that job produced.
@@ -964,6 +993,12 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 if emoticon_error:
                     raise RuntimeError(emoticon_error)
                 result = emoticon_result or {}
+            elif target.domain == "avatar-part":
+                if name in avatar_part_errors:
+                    raise FileNotFoundError(avatar_part_errors[name])
+                if avatar_part_error:
+                    raise RuntimeError(avatar_part_error)
+                result = avatar_part_result or {}
             elif target.domain == "phenomena":
                 if name in phenomena_errors:
                     raise FileNotFoundError(phenomena_errors[name])

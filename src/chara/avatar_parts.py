@@ -80,8 +80,18 @@ def _containers(env, objects):
     return sorted(paths), by_object
 
 
-def _texture_file(package, name):
-    return f"{package}__{name}.png"
+def _texture_file(package, name, disambiguator=None):
+    """PNG file name for a texture, qualified by its package name.
+
+    *disambiguator*, when given, is appended so that a second Texture2D
+    object sharing the same ``m_Name`` inside one package (probed:
+    penlight_0011 carries two objects both named ``light`` -- one imported
+    from a ``.png`` source, one from a ``.tga`` source) gets its own file
+    instead of silently overwriting the first one written.
+    """
+    if not disambiguator:
+        return f"{package}__{name}.png"
+    return f"{package}__{name}__{disambiguator}.png"
 
 
 def _local_trs(tree):
@@ -165,15 +175,41 @@ def extract_package(bundle, out_root, category, package):
         parsed = (trees[o.path_id].get("m_ParsedForm") or {}).get("m_Name")
         shaders[o.path_id] = str(parsed) if parsed else None
 
+    texture_objects = [o for o in objects if o.type.name == "Texture2D"]
+    # Counted up front so a same-named pair (probed: penlight_0011 carries two
+    # Texture2D objects both named "light") is detected before either file is
+    # written, instead of discovering the collision only when the second write
+    # silently clobbers the first.
+    name_counts = {}
+    for o in texture_objects:
+        name = str(trees[o.path_id].get("m_Name", "") or package)
+        name_counts[name] = name_counts.get(name, 0) + 1
+
     texture_files = {}
+    used_files = set()
     tex_dir = os.path.join(directory, "tex")
     os.makedirs(tex_dir, exist_ok=True)
-    for o in objects:
-        if o.type.name != "Texture2D":
-            continue
+    for o in texture_objects:
         tree = trees[o.path_id]
         name = str(tree.get("m_Name", "") or package)
-        file_name = _texture_file(package, name)
+        disambiguator = None
+        if name_counts[name] > 1:
+            # The container path is unique per object within a package and is
+            # already carried in the record, so a name built from it is
+            # recomputable from ``package.json`` in both directions -- the
+            # source-file extension (``light.tga`` vs ``light.png``, the
+            # observed case) is the natural qualifier.
+            container = container_of.get(o.path_id) or ""
+            ext = os.path.splitext(container)[1].lstrip(".").lower()
+            disambiguator = ext or None
+        file_name = _texture_file(package, name, disambiguator)
+        if file_name in used_files:
+            # Extension alone still collides (e.g. two same-named,
+            # same-extension objects) -- path_id is unique per object in the
+            # package and always breaks the tie, and is recorded below so the
+            # name stays recomputable from package.json.
+            file_name = _texture_file(package, name, str(o.path_id))
+        used_files.add(file_name)
         try:
             o.read().image.save(os.path.join(tex_dir, file_name))
         except Exception as exc:  # unreadable texture format
@@ -184,7 +220,8 @@ def extract_package(bundle, out_root, category, package):
         record["textures"].append({"name": name, "file": file_name,
                                    "width": tree.get("m_Width"),
                                    "height": tree.get("m_Height"),
-                                   "container": container_of.get(o.path_id)})
+                                   "container": container_of.get(o.path_id),
+                                   "pathId": o.path_id})
 
     # Materials resolve against the package's own textures; a texture pointer
     # that leaves the package keeps its raw path id in the record, flagged.

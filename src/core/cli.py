@@ -150,6 +150,8 @@ def main(argv=None):
 
     e = sub.add_parser("emoticons", help="extract overhead-item effect packages")
     e.add_argument("--bundle", action="append", required=True); e.add_argument("--out-dir", required=True)
+    v = sub.add_parser("avatar-parts", help="extract player-appearance packages (skin/decoration/penlight)")
+    v.add_argument("--bundle", action="append", required=True); v.add_argument("--out-dir", required=True)
     w = sub.add_parser("phenomena", help="extract weather (phenomena) environment packages")
     w.add_argument("--bundle", action="append", required=True,
                    help="an environment package, or the shared phenomena thumbnail package")
@@ -326,6 +328,10 @@ def main(argv=None):
     if args.cmd == "emoticons":
         from chara.emoticons import extract_emoticons
         print(json.dumps(extract_emoticons(args.bundle, args.out_dir), ensure_ascii=False))
+        return 0
+    if args.cmd == "avatar-parts":
+        from chara.avatar_parts import extract_avatar_parts
+        print(json.dumps(extract_avatar_parts(args.bundle, args.out_dir), ensure_ascii=False))
         return 0
     if args.cmd == "phenomena":
         from .assets.packages import builtin_archive_paths
