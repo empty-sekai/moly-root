@@ -37,6 +37,7 @@ the clip name prefix alone, for packages that ship no folder to read), and
 any of these, since its caller already knows its own package's layout.
 """
 import collections
+import io
 import os
 import re
 
@@ -44,6 +45,7 @@ import UnityPy
 
 from core.gltf import GLB
 from core.jsonio import write_json
+from core.mesh import compose_mesh, mesh_accessors
 from perf.animations import (
     CLASS_GLTF,
     CLASS_NO_BINDING,
@@ -56,6 +58,7 @@ from perf.animations import (
     curve_accounting,
     decode_clip,
 )
+from .emoticons import _material, _pairs, _shader_name
 
 # examples/viewer/segments.js:3-5 (accepted demo, not a true-source citation):
 # "The public clip convention uses _S, _L, _E, and _O suffixes for Start,
@@ -147,6 +150,308 @@ def _clip_frame_info(tree):
     return sample_rate, duration, frame_count
 
 
+# --- player body mesh (SkinnedMeshRenderer) --------------------------------
+#
+# The model bundle carries the body mesh twice: once under the instantiated
+# ``audience.prefab`` and once under the inert ``fbx/audience.fbx`` import
+# scaffold -- the same duplicate-tree pattern ``chara.characters`` documents
+# for NPC bundles. ``characters.read_scene`` tells the two trees apart by
+# which root GameObject carries script components (``has_scripts()``); this
+# bundle carries zero MonoBehaviour objects (probed 2026-09-03: a type count
+# of ``list(env.objects)`` for ``virtual_live__avatar__model__default``), so
+# the same "pick the instantiated tree, not the import scaffold" principle is
+# applied through ``env.container`` instead, mirroring
+# ``avatar_parts._containers``: the instantiated root is the one registered
+# under a path ending ``.prefab``.
+
+
+def _game_object_names(objects):
+    return {o.path_id: str(o.read_typetree().get("m_Name", "") or "")
+            for o in objects if o.type.name == "GameObject"}
+
+
+def _transform_trees(objects):
+    # Same type filter as NodeHierarchy._read_objects's Transform branch, so
+    # the full-path strings computed below line up with hierarchy.node_index.
+    return {o.path_id: o.read_typetree()
+            for o in objects if o.type.name in ("Transform", "RectTransform")}
+
+
+def _walk_transforms(transform_trees, game_object_names):
+    """Per Transform path_id: its "/"-joined GameObject-name path from the
+    tree's own root (the same string ``perf.animations.NodeHierarchy``
+    computes as a node's ``fullPath``), and that root's own Transform
+    path_id.
+
+    Verified 2026-09-02/03 against the audience rig: stripping
+    ``hierarchy.anchors[0]`` from a path computed here and calling
+    ``hierarchy.node_index()`` on the result resolves every one of a
+    renderer's ``m_Bones`` entries and its own transform node to the exact
+    indices ``NodeHierarchy`` assigned.
+    """
+    paths, roots = {}, {}
+
+    def walk(path_id):
+        if path_id in paths:
+            return paths[path_id], roots[path_id]
+        tree = transform_trees.get(path_id)
+        if tree is None:
+            paths[path_id] = paths.get(path_id, "")
+            roots[path_id] = path_id
+            return paths[path_id], roots[path_id]
+        name = game_object_names.get(
+            (tree.get("m_GameObject") or {}).get("m_PathID", 0), "")
+        father = (tree.get("m_Father") or {}).get("m_PathID", 0)
+        if father and father in transform_trees:
+            prefix, root = walk(father)
+            path = f"{prefix}/{name}" if prefix else name
+        else:
+            path, root = name, path_id
+        paths[path_id], roots[path_id] = path, root
+        return path, root
+
+    for path_id in transform_trees:
+        walk(path_id)
+    return paths, roots
+
+
+def _relative_to_anchor(full_path, anchor):
+    """Strip *anchor* the way ``NodeHierarchy._build`` strips the primary
+    anchor's ``fullPath`` from every node's ``fullPath`` to get its ``path``
+    -- the string ``node_index`` looks up."""
+    if not anchor:
+        return full_path
+    if full_path == anchor:
+        return ""
+    prefix = anchor + "/"
+    if full_path.startswith(prefix):
+        return full_path[len(prefix):]
+    return full_path
+
+
+def _container_of(env, objects):
+    """Container path per registered path_id (mirrors
+    ``avatar_parts._containers``, reimplemented locally since that module is
+    out of scope for this change)."""
+    by_pid = {}
+    container = getattr(env, "container", None) or {}
+    for path, obj in container.items():
+        if obj is not None and getattr(obj, "path_id", None) is not None:
+            by_pid[obj.path_id] = str(path)
+    return by_pid
+
+
+def _select_body_renderer(objects, container_of, transform_of_go, roots,
+                          transform_trees):
+    """The one SkinnedMeshRenderer to export, or ``None`` if this bundle
+    carries none (the caller must not fabricate a skeleton attachment then).
+
+    A single renderer needs no disambiguation. More than one (the audience
+    rig's prefab/fbx duplicate-tree pattern): keep only renderers whose
+    ultimate root GameObject is registered under a ``.prefab`` container path
+    -- the instantiated tree, never the import scaffold -- and fail loudly
+    rather than guess if that does not land on exactly one.
+    """
+    renderers = [o for o in objects if o.type.name == "SkinnedMeshRenderer"]
+    if not renderers:
+        return None
+    if len(renderers) == 1:
+        return renderers[0]
+    candidates = []
+    for o in renderers:
+        tree = o.read_typetree()
+        go_pid = (tree.get("m_GameObject") or {}).get("m_PathID", 0)
+        transform_pid = transform_of_go.get(go_pid)
+        root_pid = roots.get(transform_pid) if transform_pid is not None else None
+        root_go = ((transform_trees.get(root_pid) or {}).get("m_GameObject") or {}
+                  ).get("m_PathID", 0)
+        path = container_of.get(root_go)
+        if path and path.endswith(".prefab"):
+            candidates.append(o)
+    if len(candidates) != 1:
+        raise ValueError(
+            "expected exactly one prefab-rooted SkinnedMeshRenderer among "
+            f"{len(renderers)} found, got {len(candidates)} via container path")
+    return candidates[0]
+
+
+def _same_file(pointer):
+    """Resolve a same-file PPtr's path_id, raising on a cross-file one.
+
+    Every pointer this module resolves (mesh, material, texture slots,
+    shader) was confirmed 2026-09-02/03 to carry ``m_FileID == 0`` in the
+    player-avatar model bundle; a cross-file pointer raises rather than
+    silently returning ``None``, so a bundle that does carry one is not
+    silently mishandled.
+    """
+    path_id = int((pointer or {}).get("m_PathID", 0) or 0)
+    if not path_id:
+        return None
+    file_id = int((pointer or {}).get("m_FileID", 0) or 0)
+    if file_id:
+        raise ValueError(f"cross-file pointer (m_FileID={file_id}) is not "
+                         "supported for the player body mesh")
+    return path_id
+
+
+def read_player_mesh(env, glb, hierarchy):
+    """The player body's skinned mesh, material and textures -> *glb*.
+
+    Returns ``None`` when this bundle carries no ``SkinnedMeshRenderer`` (a
+    motion-only bundle) -- callers must not fabricate a skin for it.
+    Otherwise ``{"nodePath", "meshIndex", "skinIndex", "joints",
+    "vertexCount", "materialName", "textures"}``: ``nodePath`` is the
+    hierarchy-relative path of the renderer's own node, which the caller
+    resolves through ``hierarchy.node_index()`` -- the caller must not
+    mutate ``glb.g["nodes"]`` until after ``hierarchy.write_scene`` has
+    populated them.
+    """
+    objects = list(env.objects)
+    game_object_names = _game_object_names(objects)
+    transform_trees = _transform_trees(objects)
+    paths, roots = _walk_transforms(transform_trees, game_object_names)
+    transform_of_go = {}
+    for pid, tree in transform_trees.items():
+        go_pid = (tree.get("m_GameObject") or {}).get("m_PathID", 0)
+        if go_pid:
+            transform_of_go[go_pid] = pid
+    container_of = _container_of(env, objects)
+
+    renderer = _select_body_renderer(objects, container_of, transform_of_go,
+                                     roots, transform_trees)
+    if renderer is None:
+        return None
+    renderer_tree = renderer.read_typetree()
+    go_pid = (renderer_tree.get("m_GameObject") or {}).get("m_PathID", 0)
+    renderer_transform_pid = transform_of_go.get(go_pid)
+    if renderer_transform_pid is None:
+        raise ValueError("SkinnedMeshRenderer's GameObject has no Transform")
+    node_full_path = paths.get(renderer_transform_pid)
+    if node_full_path is None:
+        raise ValueError("SkinnedMeshRenderer's Transform is missing from "
+                         "this bundle's Transform set")
+    anchor = hierarchy.anchors[0] if hierarchy.anchors else ""
+    node_rel_path = _relative_to_anchor(node_full_path, anchor)
+
+    assets_file = renderer.assets_file
+
+    def deref(pointer):
+        # Same convention as CharacterAssets.deref's m_FileID==0 branch:
+        # direct indexing, not .get() -- a same-file pointer that does not
+        # resolve is a corrupt bundle, not an absent reference.
+        path_id = _same_file(pointer)
+        if path_id is None:
+            return None
+        return assets_file.objects[path_id]
+
+    mesh_obj = deref(renderer_tree.get("m_Mesh"))
+    if mesh_obj is None:
+        raise ValueError("SkinnedMeshRenderer without a resolvable mesh")
+    mesh_tree = mesh_obj.read_typetree()
+
+    material_ptrs = renderer_tree.get("m_Materials") or []
+    if not material_ptrs:
+        raise ValueError("SkinnedMeshRenderer without a material")
+    material_obj = deref(material_ptrs[0])
+    if material_obj is None:
+        raise ValueError("SkinnedMeshRenderer with an unresolvable material")
+    material_tree = material_obj.read_typetree()
+
+    shader_trees = {o.path_id: o.read_typetree() for o in objects
+                    if o.type.name == "Shader" and o.assets_file is assets_file}
+    shader_name = _shader_name(material_tree, shader_trees)
+
+    texture_files, texture_index = {}, {}
+    for _slot, value in _pairs((material_tree.get("m_SavedProperties") or {})
+                               .get("m_TexEnvs")):
+        tex_obj = deref((value or {}).get("m_Texture"))
+        if tex_obj is None:
+            continue
+        pid = tex_obj.path_id
+        if pid in texture_files:
+            continue
+        tex_name = str(tex_obj.read_typetree().get("m_Name") or f"tex_{pid}")
+        # Keyed by the texture's own bare name (not a package-qualified file
+        # name), matching what _material() below writes into a material's
+        # "textures" slot -- the same string is looked up against
+        # texture_index for the baseColorTexture binding.
+        texture_files[pid] = tex_name
+        buf = io.BytesIO()
+        tex_obj.read().image.convert("RGBA").save(buf, format="PNG",
+                                                   optimize=True)
+        vi = glb.view(buf.getvalue())
+        glb.g["images"].append({"bufferView": vi, "mimeType": "image/png",
+                                "name": tex_name})
+        glb.g["textures"].append({"sampler": 0,
+                                  "source": len(glb.g["images"]) - 1,
+                                  "name": tex_name})
+        texture_index[tex_name] = len(glb.g["textures"]) - 1
+
+    entry = _material(material_tree, texture_files, shader=shader_name)
+    main = entry["textures"].get("_MainTex")
+    gltf_material = {"name": entry["name"] or "material",
+                     "doubleSided": True,
+                     "pbrMetallicRoughness": {"metallicFactor": 0.0,
+                                              "roughnessFactor": 1.0},
+                     "extras": {"shader": entry["shader"],
+                                "renderQueue": entry["renderQueue"],
+                                "floats": entry["floats"],
+                                "colors": entry["colors"],
+                                "textures": entry["textures"],
+                                "textureScaleOffset": entry["textureScaleOffset"]}}
+    if main and main in texture_index:
+        gltf_material["pbrMetallicRoughness"]["baseColorTexture"] = {
+            "index": texture_index[main]}
+    glb.g["materials"].append(gltf_material)
+    material_index = len(glb.g["materials"]) - 1
+
+    buffers = mesh_accessors(glb, mesh_obj, mesh_tree, skin=True)
+    if buffers["skin"] is None:
+        # The negative-path guard: a SkinnedMeshRenderer whose mesh carries
+        # no bind pose would otherwise silently be composed as an unskinned
+        # mesh instead.
+        raise ValueError("SkinnedMeshRenderer's mesh carries no bind pose "
+                         "(m_BindPose empty or no bone indices)")
+    mesh_index = compose_mesh(glb, buffers, name=mesh_tree.get("m_Name"),
+                              materials={0: material_index}, skinned=True)
+
+    joints = []
+    for pointer in renderer_tree.get("m_Bones") or []:
+        bone_pid = (pointer or {}).get("m_PathID", 0)
+        bone_path = paths.get(bone_pid)
+        if bone_path is None:
+            raise ValueError(f"bone transform {bone_pid} is missing from "
+                             "this bundle's Transform set")
+        rel = _relative_to_anchor(bone_path, anchor)
+        idx = hierarchy.node_index(rel)
+        if idx is None:
+            raise ValueError(f"bone path {rel!r} does not resolve to an "
+                             "exported hierarchy node")
+        joints.append(idx)
+    if len(set(joints)) != len(joints):
+        raise ValueError("resolved joint node indices are not distinct")
+
+    root_bone_pid = (renderer_tree.get("m_RootBone") or {}).get("m_PathID", 0)
+    root_bone_path = paths.get(root_bone_pid)
+    skeleton_index = None
+    if root_bone_path is not None:
+        skeleton_index = hierarchy.node_index(
+            _relative_to_anchor(root_bone_path, anchor))
+    if skeleton_index is None:
+        skeleton_index = joints[0] if joints else None
+
+    skin_index = len(glb.g["skins"])
+    glb.g["skins"].append({
+        "joints": joints,
+        "inverseBindMatrices": buffers["skin"]["inverseBindMatrices"],
+        "skeleton": skeleton_index})
+
+    return {"nodePath": node_rel_path, "meshIndex": mesh_index,
+            "skinIndex": skin_index, "joints": joints,
+            "vertexCount": buffers["vertices"],
+            "materialName": entry["name"], "textures": sorted(texture_index)}
+
+
 def export_player_avatar(bundle_paths, out_dir, name="mysekai__player_avatar"):
     """Export the player (audience) skeleton + every AnimationClip found across
     *bundle_paths*, merged into one UnityPy ``Environment``.
@@ -169,12 +474,17 @@ def export_player_avatar(bundle_paths, out_dir, name="mysekai__player_avatar"):
       ``export_package`` records, since a single-package caller already knows
       its own package's naming convention.
     - ``counts.harvest``: how many exported clips have a harvest container.
+    - ``playerMesh``: ``{"meshes", "skins", "vertexCount", "joints",
+      "materialName", "textures"}`` for the body's ``SkinnedMeshRenderer``
+      (see :func:`read_player_mesh`), or ``None`` when *bundle_paths* carries
+      none (e.g. a motion-only bundle set).
     """
     for p in bundle_paths:
         assert os.path.exists(p), f"bundle path does not exist: {p}"
     env = UnityPy.load(*bundle_paths)
     hierarchy = NodeHierarchy(list(env.objects), foreign=None, prefer=name)
     glb = GLB(generator="moly-root player avatar")
+    body_mesh = read_player_mesh(env, glb, hierarchy)
 
     clips, seen, duplicates = [], {}, []
     for obj in env.objects:
@@ -244,6 +554,14 @@ def export_player_avatar(bundle_paths, out_dir, name="mysekai__player_avatar"):
 
     roots = hierarchy.write_scene(glb)
     glb.g["scenes"][0]["nodes"] = roots
+    if body_mesh is not None:
+        body_node_index = hierarchy.node_index(body_mesh["nodePath"])
+        if body_node_index is None:
+            raise ValueError(
+                f"player body node {body_mesh['nodePath']!r} not found in "
+                "the exported hierarchy after write_scene")
+        glb.g["nodes"][body_node_index]["mesh"] = body_mesh["meshIndex"]
+        glb.g["nodes"][body_node_index]["skin"] = body_mesh["skinIndex"]
     if hierarchy.foreign_roots:
         glb.g["scenes"].append({"name": "foreign-rigs",
                                 "nodes": list(hierarchy.foreign_roots)})
@@ -302,6 +620,12 @@ def export_player_avatar(bundle_paths, out_dir, name="mysekai__player_avatar"):
                           sorted(hierarchy.foreign_hits.items())},
         "readFailures": hierarchy.read_failures,
         "bindingCoverage": binding_coverage,
+        "playerMesh": ({"meshes": 1, "skins": 1,
+                       "vertexCount": body_mesh["vertexCount"],
+                       "joints": len(body_mesh["joints"]),
+                       "materialName": body_mesh["materialName"],
+                       "textures": body_mesh["textures"]}
+                      if body_mesh is not None else None),
         "clips": {c["name"]: c["channels"] for c in clips},
         "clipRecords": clips,
         "anomalies": [a for c in clips for a in c["anomalies"]] +
