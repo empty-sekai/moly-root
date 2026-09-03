@@ -13,14 +13,23 @@ bundle is parsed here.  The merge is **append-only** toward the base glb:
 
 Mount points are the rig's own named attachment bones (read from the base
 glb's node array): ``Accessory_face`` under ``Head`` for decoration
-accessories, ``Accessory_body`` under ``Hips`` for coordinate fullset
-overlays, ``Penlight_L``/``Penlight_R`` under the forearms for penlights.
+accessories -- coordinate fullset overlays included -- and
+``Penlight_L``/``Penlight_R`` under the forearms for penlights.
 Which copy of a duplicated node name to use is fixed by the skin itself:
 the bound skeleton (``skins[0].skeleton``) is the tree every animation
-channel targets (verified in O18: 5320/5320 channels target its 20 nodes),
-so a mount name must resolve to exactly one node among that skeleton's
-descendants -- the same-named duplicates in the inert tree are never
-candidates.
+channel targets (all 5320 channels resolve to its 20 nodes), so a mount
+name must resolve to exactly one node among that skeleton's descendants --
+the same-named duplicates in the inert tree are never candidates.
+
+The rig also carries an ``Accessory_body`` bone under ``Hips``, and nothing
+mounts there.  It is an art bone: the client's string table holds every
+bone name the code can look up by name, and that name is absent from it
+while ``Accessory_face``, ``Head``, ``Hips`` and both penlight bones are
+present; every by-name bone lookup in the avatar code has been enumerated
+and none targets it.  Geometry alone suggested fullset overlays belonged
+there, which is why this is written down: the bone exists, it looks like
+the obvious home for a torso overlay, and it is still not the one the
+game uses.
 
 Which *package* mounts to which *bone* is only partly a data fact:
 
@@ -28,14 +37,19 @@ Which *package* mounts to which *bone* is only partly a data fact:
   ``accessory_*``; ``avatarCoordinates`` references ``fullset_*`` in both
   its costume and accessory slots; the eight avatar master tables carry no
   bone/attach column at all);
-* the *bone* for a slot rests on the rig's naming plus geometry (an
-  accessory's bounding box lands on the head only when parented at
-  ``Accessory_face`` -- O18 measured this) plus client literals
-  (``Accessory_face``/``Penlight_L``/``Penlight_R`` occur in
-  ``global-metadata.dat``; ``Accessory_body`` does not).  The hand choice
-  (L vs R) and the coordinate-vs-individual equip rules are client policy
-  and are **not** invented here: ``--penlight-hand`` defaults to ``L`` and
-  every record says so.
+* the *bone* for a slot is client code: the avatar setup finds the
+  attachment root by the literal name ``Accessory_face`` and the combine
+  step offsets vertices by that bone's world position while weighting them
+  entirely to ``Head``.  An accessory's bounding box landing on the head
+  when parented there is a consequence, not the evidence.
+
+The hand choice (L vs R) is **not** a game fact and is not invented here:
+the source hardcodes both hands in three separate places with three
+different conventions -- the live-stage path instantiates one penlight per
+hand rather than choosing, the handheld animation dispatches on a
+direction baked into the command, and the ornament builder writes both --
+and no master table carries a hand column.  ``--penlight-hand`` defaults
+to ``L`` as a local convention and every record says so.
 
 The skin (costume texture) half *is* a data fact end to end: the body
 material's serialized texture slots (``_ColorTex``/``_MainTex``, extracted
@@ -237,7 +251,7 @@ class SubtreeCopier:
                 continue
             assert isinstance(tex, int), (
                 f"material {mat.get('name')!r} slot {slot}: extras.textures "
-                f"must carry glTF texture indices (O6 convention), got {tex!r}")
+                f"must carry glTF texture indices, not file names, got {tex!r}")
             textures[slot] = self._texture(tex)
         base_color = (mat.get("pbrMetallicRoughness") or {}).get(
             "baseColorTexture")
@@ -304,7 +318,7 @@ def _split_part_glb(path, wanted_root_name):
     Every part glb carries its package twice (fbx import scaffold plus
     instantiated prefab tree -- the pattern ``avatar_parts`` documents);
     *wanted_root_name* is the instantiated tree's root node name, probed
-    per package in O18 via the container path ending ``.prefab``.
+    read per package from the container path ending ``.prefab``.
     """
     js, binary = read_glb(path)
     hits = [i for i, n in enumerate(js["nodes"])
