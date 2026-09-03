@@ -452,6 +452,49 @@ def read_player_mesh(env, glb, hierarchy):
             "materialName": entry["name"], "textures": sorted(texture_index)}
 
 
+def _scene_roots(hierarchy, root_indexes, body_mesh):
+    """Scene roots of the instantiated tree, never the import scaffold.
+
+    The model bundle carries the body transform tree twice (see the module
+    comment above ``_select_body_renderer``): the instantiated ``.prefab``
+    tree and the inert ``fbx`` import scaffold, 22 nodes each with identical
+    node names, so ``NodeHierarchy``'s forest -- and ``write_scene``'s
+    returned roots -- cover both, and the default scene would present the
+    scaffold as a second, unreferenced-by-anything skeleton.  This applies
+    the same "instantiated, not scaffold" rule to the scene graph through
+    its outcome: the renderer ``_select_body_renderer`` picked (by the
+    ``.prefab`` container rule) lives in the instantiated tree, so the root
+    its parent chain climbs to is the tree the skin, its joints and every
+    resolved animation channel land in -- ``hierarchy.node_index`` keeps the
+    first node per relative path, and both trees share relative paths, so
+    all of them resolve into one and the same tree (verified 2026-09-03
+    against the rerun record: mesh node 3, all 16 joint indices, and all
+    5320 glTF channels inside the kept tree).
+
+    Pruning is scene-level only: the scaffold's nodes stay in the node array
+    (skin joints and animation channels reference array positions; removing
+    the block would renumber them) and become unreachable from the scene,
+    which is inert in glTF.  With no body renderer (a motion-only bundle
+    set) or a single root there is nothing to disambiguate, so every root is
+    kept; a body node that resolves to nothing or to a non-root tree raises
+    rather than guessing.
+    """
+    if body_mesh is None or len(root_indexes) <= 1:
+        return list(root_indexes)
+    node = hierarchy.node_index(body_mesh["nodePath"])
+    if node is None:
+        raise ValueError(
+            f"player body node {body_mesh['nodePath']!r} not found in the "
+            "exported hierarchy; cannot tell the instantiated tree from "
+            "the fbx import scaffold")
+    while hierarchy.nodes[node]["parent"] >= 0:
+        node = hierarchy.nodes[node]["parent"]
+    if node not in root_indexes:
+        raise ValueError(f"the body mesh's tree root {node} is not among "
+                         f"the exported scene roots {root_indexes}")
+    return [node]
+
+
 def export_player_avatar(bundle_paths, out_dir, name="mysekai__player_avatar"):
     """Export the player (audience) skeleton + every AnimationClip found across
     *bundle_paths*, merged into one UnityPy ``Environment``.
@@ -553,7 +596,7 @@ def export_player_avatar(bundle_paths, out_dir, name="mysekai__player_avatar"):
             })
 
     roots = hierarchy.write_scene(glb)
-    glb.g["scenes"][0]["nodes"] = roots
+    glb.g["scenes"][0]["nodes"] = _scene_roots(hierarchy, roots, body_mesh)
     if body_mesh is not None:
         body_node_index = hierarchy.node_index(body_mesh["nodePath"])
         if body_node_index is None:

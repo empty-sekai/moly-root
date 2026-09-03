@@ -22,8 +22,12 @@ index (containers, dependencies, per-object records, every pointer that did
 not resolve), decoded PNGs under ``tex/``, and — when the package holds a
 hierarchy — one ``<package>.glb`` whose materials carry the serialized shader
 inputs in ``extras``, the convention the character domain established.  One
-index document, ``avatar-parts.json``, spans every package and is recomputed
-from what was written, never from what was attempted.
+index document, ``avatar-parts.json``, spans every package.  It is recomputed
+after each run by reading back every ``package.json`` already on disk under
+the output directory — never from the bundles one run happened to be handed —
+so a run that extracts a single package cannot shrink an index that spans
+every package on disk (that clobber is not hypothetical: a one-bundle repair
+run once overwrote the 634-package index down to 1).
 """
 import argparse
 import json
@@ -253,6 +257,13 @@ def extract_package(bundle, out_root, category, package):
     glb.g["samplers"].append({"magFilter": 9728, "minFilter": 9728,
                               "wrapS": 33071, "wrapT": 33071})
     texture_index = {}
+    # Same table keyed by the PNG file name instead of the texture name. A
+    # package can carry two Texture2D objects sharing one m_Name (the
+    # ``penlight_0011`` double ``light`` documented at ``_texture_file``), so
+    # the name-keyed table cannot tell the material's exact texture apart --
+    # the file name can, and ``entry["textures"]`` (built from
+    # ``texture_files``) is keyed in file-name terms to begin with.
+    file_texture_index = {}
     for entry in record["textures"]:
         path = os.path.join(directory, "tex", entry["file"])
         if not os.path.exists(path):
@@ -265,9 +276,20 @@ def extract_package(bundle, out_root, category, package):
                                   "source": len(glb.g["images"]) - 1,
                                   "name": entry["name"]})
         texture_index[entry["name"]] = len(glb.g["textures"]) - 1
+        file_texture_index[entry["file"]] = len(glb.g["textures"]) - 1
 
     # glTF material per Unity material: engine-viewer fields from the main
     # texture, everything serialized stays verbatim in extras.
+    #
+    # extras.textures carries the glTF texture index (``file_texture_index``),
+    # never the tex/ file name: a disk file name is an output-side naming
+    # convention, not a reference into this glb, and nothing inside the file
+    # (textures[].name / images[].name / images[].uri) carries it -- the
+    # consumer would have to reverse the ``<package>__<name>.png`` convention
+    # to resolve it.  A slot whose texture points outside the package (or
+    # whose file never made it into the glb) stays ``null`` -- the same
+    # encoding ``_material`` already uses for out-of-package slots and the
+    # consumer already skips.
     gltf_material = {}
     for path_id, entry in material_records.items():
         main = entry["textures"].get("_MainTex")
@@ -279,7 +301,9 @@ def extract_package(bundle, out_root, category, package):
                                "renderQueue": entry["renderQueue"],
                                "floats": entry["floats"],
                                "colors": entry["colors"],
-                               "textures": entry["textures"],
+                               "textures": {slot: file_texture_index.get(file_name)
+                                            for slot, file_name
+                                            in entry["textures"].items()},
                                "textureScaleOffset": entry["textureScaleOffset"]}}
         if main and main in texture_index:
             material["pbrMetallicRoughness"]["baseColorTexture"] = {
@@ -364,6 +388,62 @@ def _write_json(path, document):
         f.write(dumps(document))
 
 
+def _index_entry(record):
+    """The per-package entry the index carries, derived from its package.json."""
+    return {"glb": record["glb"],
+            "textures": len(record["textures"]),
+            "materials": len(record["materials"]),
+            "meshes": len(record["meshes"]),
+            "renderers": len(record["renderers"]),
+            "unsupported": len(record["unsupported"])}
+
+
+def _index_from_disk(out_dir):
+    """Rebuild the index document from every package.json already on disk.
+
+    Every ``<out_dir>/<category>/<package>/package.json`` is read back and
+    aggregated — the same entry shape a run produces, but the input is what
+    previous runs wrote, not what this run attempted.  A package directory
+    whose ``package.json`` is missing or unreadable is skipped and returned
+    in ``skipped`` (as ``<category>/<package>``) so the caller can say so:
+    the directory cannot contribute an index entry no matter what, but it
+    must not be silently treated as absent.
+    """
+    documents = {}
+    skipped = []
+    totals = {"textures": 0, "meshes": 0, "materials": 0, "unsupported": 0}
+    for category in sorted(os.listdir(out_dir)):
+        category_dir = os.path.join(out_dir, category)
+        if not os.path.isdir(category_dir):
+            continue
+        for package in sorted(os.listdir(category_dir)):
+            package_dir = os.path.join(category_dir, package)
+            if not os.path.isdir(package_dir):
+                continue
+            try:
+                with open(os.path.join(package_dir, "package.json"),
+                          "r", encoding="utf-8") as f:
+                    entry = _index_entry(json.load(f))
+            except (OSError, ValueError, KeyError, TypeError):
+                # Missing file, undecodable JSON, or a record the entry shape
+                # cannot be read from -- all mean "no index data here", and all
+                # are reported the same way instead of guessed around.
+                skipped.append(f"{category}/{package}")
+                continue
+            documents[f"{category}/{package}"] = entry
+            totals["textures"] += entry["textures"]
+            totals["meshes"] += entry["meshes"]
+            totals["materials"] += entry["materials"]
+            totals["unsupported"] += entry["unsupported"]
+
+    by_category = {}
+    for key, document in sorted(documents.items()):
+        by_category.setdefault(key.split("/", 1)[0], {})[key.split("/", 1)[1]] = document
+    index = {"version": 1, "categories": by_category,
+             "summary": {"packages": len(documents), **totals}}
+    return index, skipped
+
+
 def extract_avatar_parts(bundles, out_dir):
     """Extract avatar-part packages into ``out_dir``.
 
@@ -371,37 +451,31 @@ def extract_avatar_parts(bundles, out_dir):
     each other's contents (each package carries its own materials, shaders
     and textures, probed), so unlike the phenomena or site domains this is
     one job per package with no shared lookup pass.
+
+    The shared index is rebuilt after the bundles are extracted by reading
+    back every ``package.json`` on disk under ``out_dir`` (:func:`_index_from_disk`),
+    so a run that extracts one package — the usual repair case — leaves the
+    index covering every package on disk, not only the one this run attempted.
+    No bundle is re-parsed for this; the records earlier runs wrote are the
+    whole input.  A directory whose ``package.json`` is missing or unreadable
+    (an interrupted run leaves these behind) is skipped and counted in the
+    returned ``skippedPackages`` rather than treated as fatal or as absent:
+    skipping because one leftover directory would wedge the whole shared
+    output directory, and counting because a dropped package must be visible
+    to whoever reads the CLI's output.
     """
     os.makedirs(out_dir, exist_ok=True)
-    documents = {}
-    totals = {"textures": 0, "meshes": 0, "materials": 0, "unsupported": 0}
     for bundle in bundles:
         flat = _flat_name(bundle)
         category, package = split_flat(flat)
         if category is None:
             raise ValueError(f"not an avatar-part package: {flat}")
-        record = extract_package(bundle, out_dir, category, package)
-        documents[f"{category}/{package}"] = {
-            "glb": record["glb"],
-            "textures": len(record["textures"]),
-            "materials": len(record["materials"]),
-            "meshes": len(record["meshes"]),
-            "renderers": len(record["renderers"]),
-            "unsupported": len(record["unsupported"]),
-        }
-        totals["textures"] += len(record["textures"])
-        totals["meshes"] += len(record["meshes"])
-        totals["materials"] += len(record["materials"])
-        totals["unsupported"] += len(record["unsupported"])
+        extract_package(bundle, out_dir, category, package)
 
-    by_category = {}
-    for key, document in sorted(documents.items()):
-        by_category.setdefault(key.split("/", 1)[0], {})[key.split("/", 1)[1]] = document
-    index = {"version": 1, "categories": by_category,
-             "summary": {"packages": len(documents), **totals}}
+    index, skipped = _index_from_disk(out_dir)
     path = os.path.join(out_dir, INDEX_NAME)
     _write_json(path, index)
-    return {"path": path, "packages": len(documents), **totals}
+    return {"path": path, **index["summary"], "skippedPackages": skipped}
 
 
 def main(argv=None):
