@@ -33,6 +33,7 @@ from UnityPy.helpers.MeshHelper import MeshHandler
 
 from core.quat import trs_matrix, mat_mul, mat_inv
 from core.gltf import GLB, unity_to_gltf_pos, unity_to_gltf_quat, flip_winding
+from core.mesh import _normalized_colors
 from sites.geometry import shader_reference, valid_keywords
 from .mecanim import Rig, rig_doc, pose_bone, pose_root, sample_frames
 from .mecanim.traits import GAME_TO_HUMAN
@@ -632,7 +633,7 @@ def extract_character(bundle, out_dir, name, sampled=None, aux=(),
                 attrs[slot] = glb.acc(
                     b"".join(struct.pack("<2f", v[0], 1.0 - v[1]) for v in arr),
                     5126, "VEC2", nv, 34962)
-        colors = getattr(mh, "m_Colors", None)
+        colors = _normalized_colors(mh)
         if colors:
             attrs["COLOR_0"] = glb.acc(
                 b"".join(struct.pack("<4f", *c[:4]) for c in colors),

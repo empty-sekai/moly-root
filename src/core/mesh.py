@@ -33,6 +33,55 @@ INDEX_RANGE = "mesh submesh index out of range"
 # bound mesh stores one) or more (dropped, matching Unity's own import limit).
 INFLUENCES = 4
 
+# glTF's COLOR_0 accessor is FLOAT and requires values in [0,1].  UnityPy's
+# ``MeshHandler.m_Colors`` does not uniformly satisfy that: it is populated by one
+# of three different internal paths, and only two of them already scale into
+# [0,1] (a legacy per-mesh color array divided by 255 on the way in, and Unity's
+# runtime mesh compression, whose float-color and packed-color branches both
+# normalize before handing the values back) -- those two always come back as
+# Python ``float``. The remaining path -- reading the ordinary per-vertex stream,
+# which is what every mesh actually observed here uses -- copies the channel's
+# raw, format-dependent value verbatim and comes back as Python ``int``: a
+# vertex-format value of 0 or 1 (Float / Float16) means that raw value already
+# is the [0,1] color; a value of 2 (the byte-packed color format, called
+# ``kVertexFormatUNorm8`` from Unity 2019 and ``kVertexFormatColor`` before that)
+# means it is an unsigned byte 0..255 that still needs dividing by 255.
+# Distinguishing float already-scaled data from int raw data by Python type is
+# exact, because ``struct`` only ever returns float for the Float/Float16 codes
+# and int for every byte/short code.
+_COLOR_CHANNEL_FLOAT_FORMATS = (0, 1)   # Float, Float16: raw value already [0,1]
+_COLOR_CHANNEL_UNORM8_FORMAT = 2        # byte-packed color: raw value is 0..255
+
+
+def _normalized_colors(handler):
+    """``handler.m_Colors`` rescaled into glTF's [0,1], or ``None`` without any.
+
+    Only the raw-int case (the ordinary per-vertex-stream path) needs the
+    channel's declared vertex format looked up; the channel index matches the
+    one UnityPy itself uses to populate ``m_Colors`` (``assign_channel_vertex_data``
+    in its mesh helper). Every color channel format observed across this
+    project's site, fixture, character and avatar-part meshes was the
+    byte-packed one, so anything else is refused rather than guessed at -- a
+    wrong guess would silently write an out-of-range or corrupted color instead
+    of failing where it can be noticed.
+    """
+    colors = getattr(handler, "m_Colors", None)
+    if not colors:
+        return None
+    if isinstance(colors[0][0], float):
+        return colors  # already scaled by UnityPy (legacy field or compressed mesh)
+    channel_index = 3 if handler.version[0] >= 2018 else 2
+    channels = handler.src.m_VertexData.m_Channels
+    channel = channels[channel_index] if channel_index < len(channels) else None
+    channel_format = channel.format if channel and channel.dimension > 0 else None
+    if channel_format in _COLOR_CHANNEL_FLOAT_FORMATS:
+        return colors
+    if channel_format != _COLOR_CHANNEL_UNORM8_FORMAT:
+        raise ValueError(
+            f"unhandled vertex color channel format {channel_format!r}; only "
+            "float and byte-packed (UNorm8/Color) formats are implemented")
+    return [tuple(v / 255.0 for v in c) for c in colors]
+
 
 def skin_accessors(glb, handler, tree, reflect=True):
     """Write one Unity mesh's skin buffers into *glb*, or ``None`` if it has none.
@@ -146,7 +195,7 @@ def mesh_accessors(glb, mesh_object, tree, skin=True):
             attributes[slot] = glb.acc(
                 b"".join(struct.pack("<2f", v[0], 1.0 - v[1]) for v in values),
                 FLOAT, "VEC2", count, ARRAY_BUFFER)
-    colors = getattr(handler, "m_Colors", None)
+    colors = _normalized_colors(handler)
     if colors:
         attributes["COLOR_0"] = glb.acc(
             b"".join(struct.pack("<4f", *c[:4]) for c in colors),
