@@ -218,6 +218,7 @@ FIXED_ARTIFACT_PATHS = (
     "facial-tables.json",
     "alone-actions.json",
     "talks.json",
+    "tweets.json",
     "emoticons/emoticons.json",
     "avatar-parts/avatar-parts.json",
     "phenomena/index.json",

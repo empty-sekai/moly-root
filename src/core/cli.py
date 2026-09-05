@@ -148,6 +148,13 @@ def main(argv=None):
     k.add_argument("--bundle", required=True, help="talk scenario bundle")
     k.add_argument("--out", required=True)
 
+    tw = sub.add_parser("tweets", help="extract tweet texts and per-character after-edit pools")
+    tw.add_argument("--master", help="directory of caller-supplied master tables")
+    tw.add_argument("--master-url", nargs="?", const="", default=None,
+                    help="base URL to append <table>.json to; no value uses the public default base")
+    tw.add_argument("--master-cache", help="where fetched tables are cached")
+    tw.add_argument("--out", required=True)
+
     e = sub.add_parser("emoticons", help="extract overhead-item effect packages")
     e.add_argument("--bundle", action="append", required=True); e.add_argument("--out-dir", required=True)
     v = sub.add_parser("avatar-parts", help="extract player-appearance packages (skin/decoration/penlight)")
@@ -323,6 +330,15 @@ def main(argv=None):
         source, cache = _master_source(args)
         print(json.dumps(extract_talks(source, args.bundle, args.out,
                                        master_cache=cache), ensure_ascii=False))
+        return 0
+
+    if args.cmd == "tweets":
+        source, cache = _master_source(args)
+        if not source:
+            ap.error("tweets needs master tables: pass --master <dir> or --master-url")
+        from chara.tweets import extract_tweets
+        print(json.dumps(extract_tweets(source, args.out, master_cache=cache),
+                         ensure_ascii=False))
         return 0
 
     if args.cmd == "emoticons":
