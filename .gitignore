@@ -9,6 +9,8 @@ build/
 
 # Extracted game data (user-provided, never committed)
 local-data/
+# pull's download and decryption intermediates -- game data, same rule.
+moly-pull-output/
 
 # Forensics lanes belong to the private outer repo, never here.
 # A subagent whose cwd is this repo will write a *relative* lane path and land it
