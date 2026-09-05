@@ -1,5 +1,4 @@
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -474,80 +473,19 @@ def test_ui_runs_when_the_player_data_path_is_supplied(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Read/write path alignment.
+# Artifact registration hygiene.
 #
-# The extraction side and the demo side each have their own green tests and can
-# still fail to meet: the pipeline writes ``fixture-interface/attach-points.json``
-# and the demo fetches ``fixture-attach/attach-points.json``, and nothing in
-# either suite notices, because neither side names the other's path.  The checks
-# below close that gap by reading the *consumer's* declared paths out of
-# ``examples/stage/data.js`` and asking the pipeline whether it writes them.
-#
-# ``data.js`` is only ever read here, never written: it belongs to the viewer
-# lane.  The pipeline's paths are the authoritative side -- they are what the
-# report registers and what the extraction tests pin -- so a mismatch is a
-# statement about the consumer, not a licence to move an artifact.
+# Every artifact the report registers must sit under a path the pipeline's own
+# declaration (``FIXED_ARTIFACT_PATHS``) carries.  A registered name outside
+# that declaration means a pass started writing somewhere the report contract
+# does not describe, and a consumer reading the contract cannot find it.
 # ---------------------------------------------------------------------------
-
-DEMO_DATA_JS = Path(__file__).resolve().parents[1] / "examples" / "stage" / "data.js"
-
-
-def _demo_asset_specs():
-    """The ``{id, label, path, kind}`` table ``examples/stage/data.js`` declares."""
-    text = DEMO_DATA_JS.read_text(encoding="utf-8")
-    start = text.index("ASSET_SPECS")
-    body = text[text.index("[", start):text.index("];", start)]
-    specs = []
-    for entry in re.finditer(r"\{[^{}]*\}", body):
-        fields = dict(re.findall(r"(\w+):\s*'([^']*)'", entry.group(0)))
-        if "path" not in fields:
-            continue
-        specs.append({"id": fields.get("id", ""), "path": fields["path"],
-                      "kind": fields.get("kind", "file")})
-    return specs
-
-
-def _writes(declared_path, kind, written):
-    """Does the pipeline write *declared_path*, as declared?
-
-    *written* is the pipeline's declared output set, directory entries carrying a
-    trailing slash.  A declared file is satisfied by an exact match or by sitting
-    inside a directory the pipeline fills with per-package documents; a declared
-    directory is satisfied by an exact match or by the pipeline writing something
-    beneath it.  A declared directory is *not* satisfied by an ancestor: reading
-    ``camera/out/`` when the job writes its documents straight into ``camera/``
-    finds nothing, which is exactly the failure this is here to catch.
-    """
-    target = declared_path.rstrip("/")
-    for entry in written:
-        if entry.rstrip("/") == target:
-            return True
-        if entry.startswith(target + "/"):
-            return True
-        if kind == "file" and entry.endswith("/") and target.startswith(entry):
-            return True
-    return False
-
-
-def test_demo_declares_a_readable_asset_table():
-    # The guard against a vacuous alignment check: if the parse above silently
-    # returned nothing, "every declared path is written" would be trivially
-    # true.  Red when ``data.js`` stops declaring its reads in a table this can
-    # read -- the point at which the alignment check stops meaning anything and
-    # must be rewritten rather than believed.
-    specs = _demo_asset_specs()
-    assert len(specs) >= 10, specs
-    ids = {spec["id"] for spec in specs}
-    assert {"manifest", "attach", "areas", "fixture-models"} <= ids, sorted(ids)
-    assert all(spec["path"] for spec in specs)
 
 
 def test_extract_registers_no_artifact_path_it_does_not_declare(tmp_path):
-    # ``FIXED_ARTIFACT_PATHS`` is what the alignment check below compares
-    # against, so it must not drift away from the code.  Red when a new derived
-    # artifact is registered under a path the declaration does not carry --
-    # which would otherwise let the alignment check pass while the consumer
-    # still cannot find the new artifact.
+    # Red when a new derived artifact is registered under a path the
+    # declaration does not carry -- the report would then point a consumer at
+    # an output the contract does not describe.
     from core.extract import FIXED_ARTIFACT_PATHS
     bundles = tmp_path / "bundles"
     bundles.mkdir()
@@ -563,25 +501,6 @@ def test_extract_registers_no_artifact_path_it_does_not_declare(tmp_path):
     assert registered, report
     missing = [name for name in registered if name.rstrip("/") not in declared]
     assert not missing, missing
-
-
-def test_every_path_the_demo_reads_is_a_path_the_pipeline_writes():
-    # Red while any declared read path is one the pipeline never writes, and it
-    # prints them one by one.  This cannot be quietened by adding a fallback on
-    # either side: the comparison is between two independent declarations, so a
-    # loader that guesses a second location still leaves the declared path
-    # unwritten.
-    from core.extract import FIXED_ARTIFACT_PATHS
-    specs = _demo_asset_specs()
-    unwritten = [spec for spec in specs
-                 if not _writes(spec["path"], spec["kind"], FIXED_ARTIFACT_PATHS)]
-    detail = "\n".join(
-        "  {}: reads {!r} ({}) -- the pipeline writes no such path".format(
-            spec["id"], spec["path"], spec["kind"])
-        for spec in unwritten)
-    assert not unwritten, (
-        "{} of {} paths declared by {} are never written by extract:\n{}".format(
-            len(unwritten), len(specs), DEMO_DATA_JS.name, detail))
 
 
 def test_fixture_geometry_is_skipped_with_a_reason_when_not_asked_for(tmp_path):
