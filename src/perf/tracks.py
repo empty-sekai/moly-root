@@ -79,7 +79,16 @@ class _Walker:
             self.bad += 1
         node = self.nodes.get(key)
         if node is None:
-            node = {"class": cls, "name": tree.get("m_Name", ""), "children": []}
+            # The path id rides on every node (decimal string, an int64 is not
+            # exactly holdable in a JSON number) because the tree view is only
+            # half the story: the clip view keys each track's clips by this id
+            # (``clips`` documents carry it; ``keyedClips`` pairs on it).  A
+            # track's *name* cannot do that pairing -- most packages carry
+            # several tracks of the same class under the same name, in
+            # different timelines of the one package -- so a consumer joining
+            # the tree to the clips without it pairs the wrong tracks.
+            node = {"pathId": str(path_id), "class": cls,
+                    "name": tree.get("m_Name", ""), "children": []}
             self.nodes[key] = node
             for child in tree.get("m_Children") or []:
                 target = _resolve(self.store, record, child)
