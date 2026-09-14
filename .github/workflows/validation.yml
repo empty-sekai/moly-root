@@ -1,0 +1,52 @@
+name: Validate asset pipeline
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'codex/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install validation dependencies
+        run: python -m pip install . pytest build
+      - name: Validate the checked-out commit
+        run: python tests/run_validation.py --work-dir "${{ runner.temp }}/moly-validation" --service-user-check
+      - name: Upload source-bound validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-${{ matrix.os }}-${{ github.event.pull_request.head.sha || github.sha }}
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/moly-validation/*.json
+            ${{ runner.temp }}/moly-validation/*.log
+            ${{ runner.temp }}/moly-validation/*.xml
+            ${{ runner.temp }}/moly-validation/source.zip
+            ${{ runner.temp }}/moly-validation/install-check/*.json
+            ${{ runner.temp }}/moly-validation/install-check/*.log
+            ${{ runner.temp }}/moly-validation/install-check/dist/*

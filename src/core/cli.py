@@ -51,6 +51,12 @@ def _write_programs(directory, entries, platform=None):
     return written
 
 
+def _extract_failed(report):
+    """A failed derived artifact is a failed extraction, not a skipped option."""
+    return bool(report["summary"]["failed"]) or any(
+        entry.get("status") == "failed" for entry in report.get("derived", []))
+
+
 def _print_extract_summary(report, out_dir):
     s = report["summary"]
     print(f"extracted {s['succeeded']}/{s['requested']} bundles -> {out_dir} "
@@ -58,6 +64,9 @@ def _print_extract_summary(report, out_dir):
     for entry in report["bundles"]:
         if entry["status"] == "failed":
             print(f"  failed: {entry['bundle']}: {entry['error']}")
+    for entry in report.get("derived", []):
+        if entry.get("status") == "failed":
+            print(f"  failed artifact: {entry['artifact']}: {entry.get('error', '')}")
     print(f"report: {report['report']}")
     if str(out_dir) == "local-data":
         print("view: python -m http.server 8000 (from the repository root), then open\n"
@@ -381,7 +390,7 @@ def main(argv=None):
                       f"are not in this manifest: "
                       f"{', '.join(audio['notInManifest'])}")
             _print_extract_summary(report["extraction"], args.extract_out or "local-data")
-        return 0 if not report["extraction"]["summary"]["failed"] else 1
+        return 1 if _extract_failed(report["extraction"]) else 0
     if args.cmd == "shader":
         import UnityPy
         from shaders import census as shader_census
@@ -443,7 +452,7 @@ def main(argv=None):
                 print(f"discovered {d['selected']} pack bundles under {args.bundles} "
                       f"(ignored {d['ignored']} unrelated files)")
             _print_extract_summary(report, args.out)
-        return 0 if not report["summary"]["failed"] else 1
+        return 1 if _extract_failed(report) else 0
     from chara import characters
     if args.cmd == "motion-library":
         from chara.motion_library import export_motion_library

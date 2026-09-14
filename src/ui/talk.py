@@ -289,6 +289,18 @@ def decode_layoutgroup(r: Reader):
     return d
 
 
+def decode_gridlayoutgroup(r: Reader):
+    """LayoutGroup followed by corner, axis, cell/spacing vectors and constraint."""
+    d = decode_layoutgroup(r)
+    d["m_StartCorner"] = r.i32()
+    d["m_StartAxis"] = r.i32()
+    d["m_CellSize"] = r.vec2()
+    d["m_Spacing"] = r.vec2()
+    d["m_Constraint"] = r.i32()
+    d["m_ConstraintCount"] = r.i32()
+    return d
+
+
 def decode_horizontallayoutgroup(r: Reader):
     """HorizontalLayoutGroup 基类 = LayoutGroup + HOVLG（Spacing + 7 bool）。"""
     d = decode_layoutgroup(r)

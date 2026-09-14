@@ -39,6 +39,17 @@ configure_fallback_unity_version()
 
 from core.jsonio import write_json
 import ui.talk as talk
+from ui.window_animation import DECODERS as WINDOW_ANIMATION_DECODERS
+from ui.font_face import read_tmp_face_info
+from ui.editor_layout import (
+    DECODERS as EDITOR_LAYOUT_DECODERS,
+    PREFABS as EDITOR_LAYOUT_PREFABS,
+    LOADING as EDITOR_LAYOUT_LOADING,
+    RUNTIME_VALUES as EDITOR_LAYOUT_RUNTIME_VALUES,
+    component_runtime_sprites,
+)
+from ui.pointer_fields import collect_pointer_fields
+from ui.clip_material import component_clip_material
 
 # ---------------------------------------------------------------------------
 # Which prefabs this extractor exports, by screen family.
@@ -60,6 +71,8 @@ SCREENS = {
             "MysekaiWeatherDialog"),
     "shell": ("ScreenLayerMysekaiHome", "ScreenLayerMysekaiMyRoom",
               "ScreenLayerMysekaiHarvest", "ScreenLayerMysekaiDelivery"),
+    "talk": ("ScreenLayerMysekaiTalk",),
+    "editor": EDITOR_LAYOUT_PREFABS,
 }
 
 # How each family is fetched at runtime; stated per name because it is the
@@ -69,6 +82,8 @@ LOADING = {
     "menu": 'Resources.Load("Dialog/" + dialogType.ToString())',
     "hud": 'Resources.Load("Screen/Prefabs/…") / "Dialog/…" per name',
     "shell": 'Resources.Load("Screen/Prefabs/" + layerData.name)',
+    "talk": 'Resources.Load("Screen/Prefabs/" + layerData.name)',
+    "editor": EDITOR_LAYOUT_LOADING,
 }
 
 SEMANTICS = {
@@ -107,6 +122,9 @@ RUNTIME_VALUES = {
     "shell": ["MysekaiMenuUIContent.ContentData (site/owner and UI callbacks)",
               "MysekaiMissionHomePanel (current mission state)",
               "site-specific action availability (runtime state)"],
+    "talk": ["MySekaiTalkEngine speaker/body from the active selected script",
+             "ScenarioPlayerData local auto/hide-UI state"],
+    "editor": EDITOR_LAYOUT_RUNTIME_VALUES,
 }
 
 
@@ -164,6 +182,22 @@ def decode_custom_toggle(r: talk.Reader) -> dict:
     return d
 
 
+def decode_custom_index_toggle_group(r: talk.Reader) -> dict:
+    """ToggleGroup and the serialized CustomIndexToggleGroup field chain.
+
+    The two optional caption references belong to the source client's group;
+    runtime selection and callbacks are not serialized. The ordered PPtr list
+    defines option indices, including when inactive template siblings exist.
+    """
+    return {
+        "m_AllowSwitchOff": r.bool4(),
+        "indexToggles": talk.decode_pptr_list(r),
+        "selectedOnAwake": r.bool4(),
+        "allText": r.pptr(),
+        "otherText": r.pptr(),
+    }
+
+
 def decode_menu_dialog_cell(r: talk.Reader) -> dict:
     """Sekai.MenuDialogCell : MonoBehaviour -- badge(PPtr) + button(PPtr).
 
@@ -178,6 +212,34 @@ def decode_menu_dialog_cell(r: talk.Reader) -> dict:
 def decode_mysekai_info_page(r: talk.Reader) -> dict:
     """ScreenLayerMysekaiInfoPage: the two serialized CanvasGroup references."""
     return {name: r.pptr() for name in ("_leftCanvasGroups", "_rightCanvasGroups")}
+
+
+def decode_mysekai_info_option_page(r: talk.Reader) -> dict:
+    """Option page component references, including the review-state tip."""
+    return {name: r.pptr() for name in (
+        "_voiceDLButton", "_voiceDLText", "_mysekaiVisitSettingToggleGroup",
+        "_mysekaiImageQualityToggleGroup", "_mysekaiFPSSettingToggleGroup",
+        "_mysekaiConvertFixtureNotificationSettingToggleGroup", "_reviewTip",
+    )}
+
+
+def decode_mysekai_info_tab(r: talk.Reader) -> dict:
+    """Tab setup reads its toggle and changes the two referenced images."""
+    return {name: r.pptr() for name in ("_toggle", "_offImage", "_onImage")}
+
+
+def decode_mysekai_info(r: talk.Reader) -> dict:
+    """ScreenLayer serialized base, then the information screen's bindings."""
+    d = {"layerCamera": r.pptr(), "isBootDone": r.bool4()}
+    d.update({name: r.pptr() for name in ("_noteImage", "_noteTabGroup")})
+    d["_mysekaiInfoPages"] = talk.decode_pptr_list(r)
+    d.update({name: r.pptr() for name in (
+        "_particleRoot", "_pageFlickGestureListener", "_rankInfoButton",
+        "_leftArrowButton", "_rightArrowButton",
+    )})
+    d["_infoTabs"] = talk.decode_pptr_list(r)
+    d.update({name: r.pptr() for name in ("_rankPage", "_option1Page")})
+    return d
 
 
 def decode_mysekai_stamina_view(r: talk.Reader) -> dict:
@@ -275,15 +337,23 @@ def decode_tmp_settings(r: talk.Reader) -> dict:
 
 
 EXTRA_DECODERS = {
+    **WINDOW_ANIMATION_DECODERS,
+    **EDITOR_LAYOUT_DECODERS,
+    "UnityEngine.UI.Toggle": decode_unity_toggle,
     "Sekai.UI.CustomRawImage": decode_raw_image_base,
     "Sekai.UI.CustomToggle": decode_custom_toggle,
+    "Sekai.UI.CustomIndexToggleGroup": decode_custom_index_toggle_group,
     "Sekai.MenuDialogCell": decode_menu_dialog_cell,
     "Sekai.Mysekai.MysekaiStaminaView": decode_mysekai_stamina_view,
     "Sekai.Mysekai.ScreenLayerMysekaiInfoPage": decode_mysekai_info_page,
+    "Sekai.Mysekai.MysekaiInfoOption1Page": decode_mysekai_info_option_page,
+    "Sekai.Mysekai.ScreenLayerMysekaiInfoTab": decode_mysekai_info_tab,
+    "Sekai.Mysekai.ScreenLayerMysekaiInfo": decode_mysekai_info,
     "Sekai.Mysekai.MysekaiMenuUIContent": decode_mysekai_menu_ui_content,
     "Sekai.Mysekai.MysekaiCustomButton": decode_mysekai_custom_button,
     "Coffee.UISoftMask.SoftMask": decode_soft_mask,
     "UnityEngine.UI.CanvasScaler": decode_canvas_scaler,
+    "UnityEngine.UI.GridLayoutGroup": talk.decode_gridlayoutgroup,
     "Sekai.ScreenCanvasScaler": decode_canvas_scaler,
     "TMPro.TMP_Settings": decode_tmp_settings,
 }
@@ -487,6 +557,7 @@ class Resolver:
             else:
                 name = scriptable_object_name(obj.get_raw_data())
                 entry.update(state="ok" if name else "unnamed", name=name)
+                entry["sourceFace"] = read_tmp_face_info(obj, self.mono_index)
         self._font_cache[key] = entry
         return entry
 
@@ -699,6 +770,16 @@ def _component_record(env, obj, resolver):
         out["rawLength"] = record.get("raw_len")
         return out
     out["fields"] = fields
+    # Reader.pptr tuples are still typed here; never infer PPtrs from the
+    # serialized [fileId,pathId] shape (a Vector2Int has the same JSON shape).
+    out["pointerFields"] = collect_pointer_fields(
+        fields, decoded_pptr_tuples=record.get("hand_decoded", False))
+    clip_material = component_clip_material(obj, cls, fields, resolver)
+    if clip_material is not None:
+        out["clipMaterial"] = clip_material
+    runtime_sprites = component_runtime_sprites(cls, fields, resolver)
+    if runtime_sprites:
+        out["runtimeSprites"] = runtime_sprites
 
     # Reference resolution per component family.
     if cls in ("Sekai.UI.CustomImage", "Sekai.AtlasImage", "UnityEngine.UI.Image"):
@@ -1008,6 +1089,7 @@ def extract_layout(player_data: str, out_dir, bundles_root=None,
     write_json(out / "host-canvas.json", host_canvas)
     resolver = Resolver(objects, mono_index, out / "textures")
     runtime_textures = {}
+    runtime_sprites = {}
     if bundles_root and (selected is None or "MysekaiMenuDialog" in selected):
         package = Path(bundles_root) / "mysekai__ui__mysekai_menu"
         if not package.is_file():
@@ -1020,9 +1102,6 @@ def extract_layout(player_data: str, out_dir, bundles_root=None,
             relative = f"textures/menu-{obj.path_id}.png"
             texture.image.save(out / relative)
             runtime_textures[texture.m_Name] = relative
-    if selected is None or runtime_textures:
-        write_json(out / "textures.json", runtime_textures)
-
     written, failures = [], []
     for family, prefabs in SCREENS.items():
         for prefab in prefabs:
@@ -1036,10 +1115,23 @@ def extract_layout(player_data: str, out_dir, bundles_root=None,
             go_pid, transform_pid = roots[0]
             document = extract_prefab(env, objects, go_pid, transform_pid,
                                       resolver, prefab, family)
+            for node in document["nodes"]:
+                for component in node["components"]:
+                    for alias, sprite in component.get("runtimeSprites", {}).items():
+                        image = sprite["image"]
+                        if alias in runtime_textures and runtime_textures[alias] != image:
+                            raise ValueError(f"UI runtime texture alias collision: {alias}")
+                        runtime_textures[alias] = image
+                        runtime_sprites[alias] = sprite
             path = write_json(out / family / f"{prefab}.json", document)
             written.append({"prefab": prefab, "family": family,
                             "path": str(path),
                             "summary": document["summary"]})
+
+    if selected is None or runtime_textures:
+        write_json(out / "textures.json", runtime_textures)
+    if runtime_sprites:
+        write_json(out / "runtime-sprites.json", runtime_sprites)
 
     census = {}
     if selected is None:

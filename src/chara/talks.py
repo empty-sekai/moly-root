@@ -449,12 +449,21 @@ def _step(op, args, tables, scalars):
         step["pattern"] = values[1][0] if len(values) > 1 else None
         if len(values) > 1:
             step["alias"] = args[1].strip()
+        # Both source bridges take the third argument as a float delay. Present
+        # null records an omitted/nil argument; a missing key in an older export
+        # cannot prove that its original delay was zero.
+        step["delaySeconds"] = (
+            values[2][0] if len(values) > 2 and args[2].strip() != "nil" else None
+        )
     elif op in ("change_npc_mouth", "change_fixture_character_mouth"):
         key = "who" if op == "change_npc_mouth" else "fixture"
         step[key] = values[0][0] if values else None
         step["pattern"] = values[1][0] if len(values) > 1 else None
         if len(values) > 1:
             step["alias"] = args[1].strip()
+        step["delaySeconds"] = (
+            values[2][0] if len(values) > 2 and args[2].strip() != "nil" else None
+        )
     elif op in ("change_animation", "play_animation"):
         if values:
             step["who"] = values[0][0]

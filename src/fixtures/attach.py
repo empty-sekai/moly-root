@@ -44,6 +44,9 @@ NOT_A_GAME_OBJECT = "attach point pointer resolves to an object that is not a ga
 NO_TRANSFORM = "the game object carries no local transform"
 
 SEMANTICS = {
+    "views": ("every actual FixtureView component and its owning GameObject/Transform "
+              "source identities, including views whose attach array is empty; "
+              "a prefab variant containing a view is not necessarily that view's node"),
     "pairs": ("every `_attachPoints` entry of every `FixtureView` behaviour is one pair. "
               "A pair whose objects do not match the `loc_start`/`loc_end` pattern is "
               "still a pair; it is additionally listed in `anomalies`"),
@@ -163,6 +166,28 @@ def _pair(store, record, entry):
     return pair, (start, end)
 
 
+def _view_identity(store, record, path_id, tree):
+    def identity(target):
+        if target is None:
+            return None
+        owner, object_id = target
+        return {"file": owner.archive, "pathId": str(object_id)}
+
+    game_object = store.follow(record, tree.get("m_GameObject") or {})
+    transform = None
+    if game_object is not None:
+        owner, object_id = game_object
+        for component in owner.tree(object_id).get("m_Component") or []:
+            pointer = component.get("component", component)
+            target = store.follow(owner, pointer)
+            if target is not None and target[0].kinds.get(target[1]) in TRANSFORMS:
+                if transform is not None:
+                    raise ValueError("FixtureView GameObject has multiple transforms")
+                transform = target
+    return {"component": identity((record, path_id)),
+            "gameObject": identity(game_object), "transform": identity(transform)}
+
+
 def _unreferenced(records, referenced):
     """Attach-named game objects no pair references, per package."""
     out = []
@@ -240,6 +265,7 @@ def extract_from_store(store, out_dir, master=None):
             continue
         records = list(package.files)
         view_found = False
+        views = []
         entries = []
         referenced = set()
         package_anomalies = []
@@ -251,8 +277,11 @@ def extract_from_store(store, out_dir, master=None):
                     continue
                 view_found = True
                 tree = record.tree(path_id)
-                for entry in tree.get("_attachPoints") or []:
+                views.append(_view_identity(store, record, path_id, tree))
+                for entry_index, entry in enumerate(tree.get("_attachPoints") or []):
                     pair, targets = _pair(store, record, entry)
+                    pair["source"] = {"file": record.archive, "fixtureViewId": str(path_id),
+                                      "entryIndex": entry_index}
                     referenced.update(t for t in targets if t is not None)
                     entries.append(pair)
                     pairs_total += 1
@@ -270,7 +299,7 @@ def extract_from_store(store, out_dir, master=None):
                                       "names": leftover})
         if entries:
             packages_with_pairs += 1
-        packages[name] = {"hasFixtureView": view_found, "entries": entries,
+        packages[name] = {"hasFixtureView": view_found, "views": views, "entries": entries,
                           "anomalies": package_anomalies}
 
     found = sorted(ids)

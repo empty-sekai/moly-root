@@ -56,6 +56,7 @@ import struct
 import zlib
 
 from chara.mecanim.clip import TRANSFORM_TYPEID, curve_index_map, decode, hermite_keyframes
+from core.assets.identity import identity, json_pointers
 
 # Unity Transform generic-binding attribute -> glTF channel property, and the
 # component width each carries.  Attribute 4 is Euler rotation: three source
@@ -324,6 +325,9 @@ def embed(glb, package, tables, report):
                      "slots": slots})
             index = len(glb.g.get("animations", []))
             anim = _write_channels(glb, name, channels)
+            anim.setdefault("extras", {}).update(
+                sourceClip=identity(record, pid),
+                sourceEvents=json_pointers(tt.get("m_Events", [])))
             glb.g.setdefault("animations", []).append(anim)
             summary["clipCount"] += 1
             summary["gltfChannels"] += len(channels)

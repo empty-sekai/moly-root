@@ -81,7 +81,7 @@ def test_a_fetched_table_is_cached_and_not_fetched_twice(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(master_mod.urllib.request, "urlopen", _fake_urlopen(calls))
     Master("https://example.invalid/m", cache_dir=str(tmp_path)).table("gameCharacterUnits")
-    assert (tmp_path / "gameCharacterUnits.json").is_file()
+    assert len(list(tmp_path.glob("*/gameCharacterUnits.json"))) == 1
     # 新实例走缓存,不再发请求
     second = Master("https://example.invalid/m", cache_dir=str(tmp_path))
     assert second.table("gameCharacterUnits") == ROWS

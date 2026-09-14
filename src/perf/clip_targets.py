@@ -29,8 +29,8 @@ in walk order — the order the serialized file stores its objects in, which no
 consumer reproduces — and its positions mean nothing outside this reader.
 ``keyedClips`` carries the same records with the key a consumer pairs on: the
 owning track's path id (``trackPathId``) and the clip's index within that
-track's ``m_Clips`` (``clipIndex``).  A playable asset shared by two clips is
-still reported once, keyed at the first clip that named it.
+track's ``m_Clips`` (``clipIndex``). The flat list keeps each playable asset
+once; ``keyedClips`` keeps every occurrence, including shared playable assets.
 """
 import os
 from pathlib import Path
@@ -215,8 +215,22 @@ def _clip_record(store, record, clip):
     if target is None:
         return {"unresolved": True,
                 "wantedArchive": store.archive_of(record, m_clip)}
-    return {"targetPackage": target[0].bundle,
-            "clipName": target[0].tree(target[1]).get("m_Name", "")}
+    target_file, target_id = target
+    tree = target_file.tree(target_id)
+    muscle = tree.get("m_MuscleClip")
+    metadata = {}
+    missing = []
+    for output, field in (("sourceStartTime", "m_StartTime"),
+                          ("sourceStopTime", "m_StopTime"),
+                          ("sourceLoopTime", "m_LoopTime")):
+        if isinstance(muscle, dict) and field in muscle:
+            metadata[output] = muscle[field]
+        else:
+            metadata[output] = None
+            missing.append(f"m_MuscleClip.{field}")
+    return {"targetPackage": target_file.bundle, "clipName": tree.get("m_Name", ""),
+            "sourceClip": {"file": target_file.archive, "pathId": str(target_id)},
+            **metadata, "sourceMetadataMissing": missing}
 
 
 def _walk_package(store, name, out, index_compare=False):
@@ -237,7 +251,7 @@ def _walk_package(store, name, out, index_compare=False):
               "unresolved": 0, "cross": 0, "same": 0,
               "targets": {}, "classes": {}, "empty": True,
               "indexDisagree": 0}
-    seen = set()
+    resolved_assets = {}
     for record in package.files:
         for path_id, kind in record.kinds.items():
             if kind != "MonoBehaviour":
@@ -254,18 +268,21 @@ def _walk_package(store, name, out, index_compare=False):
                 if trecord.script_of(tpid) != PLAYABLE_CLASS:
                     continue
                 key = (trecord, tpid)
-                if key in seen:
+                first_occurrence = key not in resolved_assets
+                if first_occurrence:
+                    resolved_assets[key] = _clip_record(store, trecord, trecord.tree(tpid))
+                record_ = resolved_assets[key]
+                document["keyedClips"].append({"trackPathId": str(path_id),
+                                               "track": {"file": record.archive, "pathId": str(path_id)},
+                                               "clipIndex": clip_index,
+                                               "target": record_})
+                if not first_occurrence:
                     continue
-                seen.add(key)
                 counts["classes"][PLAYABLE_CLASS] = \
                     counts["classes"].get(PLAYABLE_CLASS, 0) + 1
                 playable_tree = trecord.tree(tpid)
-                record_ = _clip_record(store, record, playable_tree)
                 counts["clips"] += 1
                 document["clips"].append(record_)
-                document["keyedClips"].append({"trackPathId": str(path_id),
-                                               "clipIndex": clip_index,
-                                               "target": record_})
                 if record_ is None:
                     counts["null"] += 1
                 elif record_.get("unresolved"):
@@ -300,8 +317,9 @@ def read_clip_targets(bundles, out_dir, bundle_root=None, load_deps=True,
     list, one entry per ``AnimationPlayableAsset.m_Clip``, each ``None`` for a
     null pointer, an ``unresolved`` record for a pointer the store cannot
     follow, or ``{"targetPackage", "clipName"}`` for a resolved clip; and its
-    ``keyedClips`` list, the same records in the same order but each carrying
-    the ``trackPathId`` / ``clipIndex`` key a consumer pairs on.
+    ``keyedClips`` list, one record per occurrence with the full source track
+    identity and ``clipIndex`` a consumer pairs on. Shared playable assets do
+    not erase a later occurrence's binding.
 
     Dependencies are loaded first, because a package's pointers reach other
     packages and the store only knows a CAB once the package that owns it has

@@ -1220,8 +1220,9 @@ def load_clip_targets(targets_dir):
 
 
 def _repo_data_dir():
-    here = os.path.dirname(os.path.abspath(__file__))          # src/perf
-    return os.path.join(os.path.dirname(os.path.dirname(here)), "local-data")
+    # Generated data belongs to the caller's workspace, including after a
+    # wheel install where this module lives under site-packages.
+    return os.path.join(os.getcwd(), "local-data")
 
 
 def main(argv=None):

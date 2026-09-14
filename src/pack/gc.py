@@ -13,6 +13,21 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
+
+from .verify import verify_catalog
+
+
+def catalog_garbage(output):
+    """List unused blobs only after validating every retained release root."""
+    output = Path(output)
+    errors, info = verify_catalog(output / "asset-packs.json", root=output)
+    if errors:
+        raise ValueError("cannot determine catalog garbage: " + "; ".join(errors))
+    return {"delete": info["orphan_blobs"],
+            "delete_bytes": sum((output / "blobs" / path).stat().st_size for path in info["orphan_blobs"]),
+            "retained_catalogs": info["retained_catalogs"],
+            "referenced_blobs": info["referenced_blobs"]}
 
 
 def _blob_bytes_index(manifest: dict) -> dict[str, int]:
@@ -67,10 +82,19 @@ def diff_manifests(old: dict, new: dict) -> dict:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="pack.gc", description="upgrade diff between two manifests")
-    ap.add_argument("--old", required=True, help="old manifest.json")
-    ap.add_argument("--new", required=True, help="new manifest.json")
+    ap.add_argument("--old", help="old standalone manifest.json")
+    ap.add_argument("--new", help="new standalone manifest.json")
+    ap.add_argument("--out", help="grouped output directory; retain all archived catalogs")
     ap.add_argument("--json", action="store_true", help="print the full result as JSON")
     args = ap.parse_args(argv)
+
+    if args.out:
+        if args.old or args.new:
+            ap.error("use --out or both --old/--new")
+        print(json.dumps(catalog_garbage(args.out), ensure_ascii=False, indent=2))
+        return 0
+    if not args.old or not args.new:
+        ap.error("need --out or both --old/--new")
 
     with open(args.old, encoding="utf-8") as fh:
         old = json.load(fh)

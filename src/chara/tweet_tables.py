@@ -131,7 +131,9 @@ def extract_tweet_tables(master_source, out_path, master_cache=None):
         {"id": row["id"],
          "talkId": row.get("mysekaiCharacterTalkId"),
          "tweetId": _ref(row, "mysekaiCharacterTalkTweetId", tweet_ids,
-                         PRE_ACTION_TABLE, TWEETS_TABLE)}
+                         PRE_ACTION_TABLE, TWEETS_TABLE),
+         "timelineGroupId": row.get("mysekaiCharacterTalkFixtureTimelineGroupId"),
+         "fixtureTogetherCommunicationId": row.get("mysekaiCharacterTalkFixtureTogetherCommunicationId")}
         for row in pre_actions]
     absent_talks = [row["id"] for row in pre_action_rows
                     if row["talkId"] is None]
@@ -172,7 +174,9 @@ def extract_tweet_tables(master_source, out_path, master_cache=None):
                 "the deterministic link: one talk id names the tweet shown as "
                 "that talk's opening pre-action; no draw is involved. talkId "
                 "is opaque here — the talk rows live in the talk corpus "
-                "product, not in this chain"
+                "product, not in this chain. timelineGroupId retains the "
+                "authored fixture-timeline group reference, or null when "
+                "that field is absent; it is not inferred from the tweet"
             ),
             "chain": [GREETING_TABLE, GREETING_CONDITION_TABLE, WRT_TABLE,
                       SITE_ENTRY_TABLE, PRE_ACTION_TABLE],

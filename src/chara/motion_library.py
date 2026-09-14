@@ -1,4 +1,9 @@
-"""Export the shared, character-independent humanoid motion library."""
+"""Export humanoid motion libraries with source-owned playback metadata.
+
+Index format v2 stores authored sourceLoopTime separately from the informational
+legacySuffixLoop name convention. UseSourceAsset playback must use the source
+value, never infer looping from a clip's suffix.
+"""
 import json
 import math
 import os
@@ -8,26 +13,70 @@ import time
 
 from core.gltf import GLB, unity_to_gltf_pos, unity_to_gltf_quat
 from .mecanim import Rig, rig_doc, pose_bone, pose_root, sample_frames
+from .mecanim.clip import ANIMATOR_TYPEID
 from .mecanim.traits import GAME_TO_HUMAN
 from .characters import CharacterAssets, read_scene
 
 _SUFFIX = re.compile(r"_(Start|Loop|End|OneShot|S|L|E|O)$", re.IGNORECASE)
+INDEX_FORMAT_VERSION = 2
+INDEX_SEMANTICS = {
+    "sourceClip": "original serialized-file name and signed path ID of the AnimationClip",
+    "sourceStartTime": "verbatim AnimationClip.m_MuscleClip.m_StartTime; null when missing",
+    "sourceStopTime": "verbatim AnimationClip.m_MuscleClip.m_StopTime; null when missing",
+    "sourceLoopTime": ("verbatim AnimationClip.m_MuscleClip.m_LoopTime; null when missing; "
+                       "the source value used by UseSourceAsset, with no suffix fallback"),
+    "sourceMetadataMissing": "original field paths absent from the source record",
+    "legacySuffixLoop": ("informational name-suffix convention only; must not determine "
+                         "UseSourceAsset looping"),
+    "duration": "last sampled frame time, distinct from the authored sourceStopTime",
+}
 
 
-def _clip_meta(name, frames, rate):
+def _clip_meta(name, frames, rate, source_metadata):
     match = _SUFFIX.search(name)
     suffix = (match.group(1) if match else "").upper()
     suffix = {"START": "S", "LOOP": "L", "END": "E", "ONESHOT": "O"}.get(suffix, suffix)
     base = name[:match.start()] if match else name
     return {"name": name, "base": base, "suffix": suffix or None,
             "frames": len(frames), "duration": frames[-1][0] if frames else 0.0,
-            "sampleRate": rate, "loop": suffix == "L"}
+            "sampleRate": rate, "legacySuffixLoop": suffix == "L",
+            **source_metadata}
+
+
+def _source_clip_metadata(obj, tree):
+    """Clip ownership and the three authored MuscleClip timing fields.
+
+    A false LoopTime is a real value. Missing fields remain None and are named;
+    neither a clip-name suffix nor the resampled frame range fills them in.
+    """
+    source_file = getattr(getattr(obj, "assets_file", None), "name", None)
+    path_id = getattr(obj, "path_id", None)
+    missing = []
+    if source_file is None:
+        missing.append("sourceClip.file")
+    if path_id is None:
+        missing.append("sourceClip.pathId")
+    metadata = {"sourceClip": {"file": source_file,
+                               "pathId": str(path_id) if path_id is not None else None}}
+    muscle = tree.get("m_MuscleClip")
+    for field, source in (("sourceStartTime", "m_StartTime"),
+                          ("sourceStopTime", "m_StopTime"),
+                          ("sourceLoopTime", "m_LoopTime")):
+        if isinstance(muscle, dict) and source in muscle:
+            metadata[field] = muscle[source]
+        else:
+            metadata[field] = None
+            missing.append(f"m_MuscleClip.{source}")
+    metadata["sourceMetadataMissing"] = missing
+    return metadata
 
 
 def discover_and_sample(motion_bundle, names=None):
     """Decode every requested (or every present) AnimationClip.
 
     Returns successful samples and a structured, per-clip failure list.
+    Generic Transform clips need their own binding decoder; absence of Animator
+    curves must not be converted into an apparently successful default pose.
     """
     import UnityPy
     env = UnityPy.load(motion_bundle)
@@ -43,10 +92,24 @@ def discover_and_sample(motion_bundle, names=None):
             if not name or (wanted is not None and name not in wanted) or name in seen:
                 continue
             seen.add(name)
+            bindings = (tt.get("m_ClipBindingConstant") or {}).get("genericBindings") or []
+            if not any(binding.get("typeID") == ANIMATOR_TYPEID for binding in bindings):
+                failures.append({
+                    "name": name,
+                    "reason": "unsupported",
+                    "detail": "non-humanoid generic requires its own Transform binding decoder",
+                    "sourceFile": obj.assets_file.name,
+                    "pathId": str(obj.path_id),
+                    "bindingTypes": sorted({binding.get("typeID") for binding in bindings
+                                            if isinstance(binding.get("typeID"), int)}),
+                    "bindingCount": len(bindings),
+                })
+                continue
             rate, frames = sample_frames(tt)
             if not frames:
                 raise ValueError("empty sampled frame set")
-            samples[name] = {"rate": rate, "frames": frames}
+            samples[name] = {"rate": rate, "frames": frames,
+                             "sourceMetadata": _source_clip_metadata(obj, tt)}
         except Exception as exc:
             failures.append({"name": name, "reason": type(exc).__name__, "detail": str(exc)})
     if wanted is not None:
@@ -124,8 +187,17 @@ def _add_animation(glb, rig, sampled, node_by_name, node_by_hash):
 
 
 def export_motion_library(reference_bundle, motion_bundle, out_dir, name="motion-library",
-                          aux=(), names=None):
-    """Export ``name.glb``, ``name.index.json`` and return a complete report."""
+                          aux=(), names=None, binding_root=None):
+    """Export ``name.glb``, ``name.index.json`` and return a complete report.
+
+    Optional ``binding_root`` changes only the exported animation path prefix.
+    Pose evaluation still uses the supplied reference bundle's Avatar, rest
+    skeleton, bone lengths and muscles. Both root names are retained as metadata
+    when an alias is requested; omitting it leaves root naming and pose evaluation
+    unchanged. All newly exported indexes use the current metadata schema.
+    """
+    if binding_root is not None and (not isinstance(binding_root, str) or not binding_root):
+        raise ValueError("binding_root must be a non-empty string")
     started = time.perf_counter()
     rig, nodes, by_name, by_hash = _reference_skeleton(reference_bundle, aux)
     glb = GLB(generator="moly-root shared motion library")
@@ -139,6 +211,14 @@ def export_motion_library(reference_bundle, motion_bundle, out_dir, name="motion
     roots = [i for i, node in enumerate(nodes) if node["parent"] < 0]
     glb.g["scenes"][0]["nodes"] = roots
     glb.g["asset"]["extras"] = {"binding": "humanoid-bone-name", "referenceSkeleton": "export-only"}
+    binding_metadata = {}
+    if binding_root is not None:
+        if len(roots) != 1:
+            raise ValueError("binding_root requires one reference skeleton root")
+        root = glb.g["nodes"][roots[0]]
+        binding_metadata = {"sourceRootName": root["name"], "bindingRootName": binding_root}
+        root["name"] = binding_root
+        glb.g["asset"]["extras"].update(binding_metadata)
 
     samples, failures = discover_and_sample(motion_bundle, names)
     index, baked = {}, 0
@@ -147,7 +227,7 @@ def export_motion_library(reference_bundle, motion_bundle, out_dir, name="motion
             item = dict(samples[clip_name])
             item["name"] = clip_name
             _add_animation(glb, rig, item, by_name, by_hash)
-            meta = _clip_meta(clip_name, item["frames"], item["rate"])
+            meta = _clip_meta(clip_name, item["frames"], item["rate"], item["sourceMetadata"])
             index.setdefault(meta["base"], {"segments": {}})["segments"][meta["suffix"] or "?"] = meta
             baked += 1
         except Exception as exc:
@@ -156,8 +236,9 @@ def export_motion_library(reference_bundle, motion_bundle, out_dir, name="motion
     glb_path = os.path.join(out_dir, f"{name}.glb")
     index_path = os.path.join(out_dir, f"{name}.index.json")
     glb.save(glb_path)
-    document = {"version": 1, "binding": {"type": "humanoid-bone-name",
-                 "referenceSkeletonNodes": len(nodes)}, "clips": index,
+    document = {"version": INDEX_FORMAT_VERSION, "semantics": INDEX_SEMANTICS,
+                "binding": {"type": "humanoid-bone-name",
+                 "referenceSkeletonNodes": len(nodes), **binding_metadata}, "clips": index,
                "counts": {"discovered": len(samples) + len(failures), "exported": baked,
                            "failed": len(failures)}, "failures": failures}
     with open(index_path, "w", encoding="utf-8", newline="\n") as fh:

@@ -64,6 +64,10 @@ class FakeResponse:
 
     def __init__(self, payload: bytes):
         self.stream = io.BytesIO(payload)
+        self.headers = {"Content-Length": str(len(payload))}
+
+    def geturl(self):
+        return "https://example.invalid/download"
 
     def read(self, size: int = -1) -> bytes:
         return self.stream.read(size)

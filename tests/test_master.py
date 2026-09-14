@@ -113,3 +113,27 @@ def test_predicate_drops_both_kinds_and_says_which(master):
 def test_furniture_condition_set_is_the_documented_three(master):
     assert set(FURNITURE_CONDITIONS) == {"mysekai_fixture_id", "mysekai_fixture_tag_id",
                                         "after_set_fixture"}
+
+
+@pytest.mark.parametrize("missing", ["condition", "type", "condition_group", "unit_group"])
+def test_unresolved_foreign_keys_are_not_confirmed_solo_talks(master, missing):
+    talk = {"id": 7, "mysekaiGameCharacterUnitGroupId": 1,
+            "mysekaiCharacterTalkConditionGroupId": 10}
+    if missing == "condition":
+        _write(master.source, "mysekaiCharacterTalkConditions", [])
+    elif missing == "type":
+        _write(master.source, "mysekaiCharacterTalkConditions", [{"id": 100}])
+    elif missing == "condition_group":
+        talk["mysekaiCharacterTalkConditionGroupId"] = 999
+    else:
+        talk["mysekaiGameCharacterUnitGroupId"] = 999
+    _write(master.source, "mysekaiCharacterTalks", [talk])
+    kept, report = master.solo_talks()
+    assert not kept
+    assert report["unresolvedCount"] == 1
+    assert report["excluded"] == 0
+    assert report["dropped"] == {}
+    assert report["unresolvedTalks"][0]["talkId"] == 7
+    assert report["talksTotal"] == report["kept"] + report["excluded"] + report["unresolvedCount"]
+    if missing in {"condition", "type"}:
+        assert report["unresolvedTalks"][0]["conditions"][0]["conditionId"] == 100

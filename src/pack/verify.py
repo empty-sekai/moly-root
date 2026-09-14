@@ -48,8 +48,11 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
+
+DEFAULT_SCHEMA_PATH = Path(__file__).with_name("manifest.schema.json")
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -113,6 +116,10 @@ PATH_FORBIDDEN_DOTDOT = "'..' path segment"
 
 def _path_problems(path: str) -> list[str]:
     problems = []
+    if not path or any(not part for part in path.split("/")):
+        problems.append("empty path segment")
+    if ":" in path:
+        problems.append("drive or URL prefix")
     if path.startswith("/"):
         problems.append(PATH_FORBIDDEN_LEADING_SLASH)
     if "\\" in path:
@@ -155,21 +162,57 @@ def _load_schema_validator(schema: dict):
     return run, "schema_lite fallback (jsonschema package not installed, or PACK_FORCE_SCHEMA_LITE=1)"
 
 
-def verify(manifest_path, blobs_dir, schema_path) -> tuple[list[str], dict]:
+def verify_blob(entry, blobs_dir) -> list[str]:
+    """Check actual bytes independently of the producer and its codec helpers."""
+    errors = []
+    try:
+        blob, codec, encoding = entry["blob"], entry["codec"], entry["http_encoding"]
+        if codec not in {"identity", "gzip", "brotli"} or encoding not in {"identity", "br"}:
+            return ["unknown blob codec/encoding"]
+        if encoding == "br" and codec != "identity":
+            errors.append("http_encoding='br' requires codec='identity'")
+        if not isinstance(blob, str) or _path_problems(blob):
+            return ["invalid blob path"]
+        if blob != _derive_blob_path(entry["blob_sha256"], codec, encoding):
+            errors.append("blob path does not match blob_sha256 and codec")
+        root = Path(blobs_dir).resolve()
+        path = (root / blob).resolve()
+        if not path.is_relative_to(root):
+            return ["blob path escapes the blob store"]
+        raw = path.read_bytes()
+        if len(raw) != entry["blob_bytes"]:
+            errors.append("blob file size does not match blob_bytes")
+        if _sha256_bytes(raw) != entry["blob_sha256"]:
+            errors.append("blob file sha256 does not match blob_sha256")
+        content = _decode_content(raw, codec, encoding)
+        if len(content) != entry["bytes"]:
+            errors.append("decoded length does not match bytes")
+        if _sha256_bytes(content) != entry["content_sha256"]:
+            errors.append("decoded content sha256 does not match content_sha256")
+    except Exception as exc:
+        errors.append(f"cannot verify blob: {exc}")
+    return errors
+
+
+def verify(manifest_path, blobs_dir, schema_path=None, *, check_orphans=True) -> tuple[list[str], dict]:
     """Returns (errors, info). errors is empty iff *out* is fully valid."""
-    manifest_path = Path(manifest_path)
+    with open(manifest_path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    return verify_manifest(manifest, blobs_dir, schema_path, check_orphans=check_orphans)
+
+
+def verify_manifest(manifest, blobs_dir, schema_path=None, *, check_orphans=True) -> tuple[list[str], dict]:
     blobs_dir = Path(blobs_dir)
-    schema_path = Path(schema_path)
+    schema_path = Path(schema_path) if schema_path else DEFAULT_SCHEMA_PATH
     errors: list[str] = []
 
     with open(schema_path, encoding="utf-8") as fh:
         schema = json.load(fh)
-    with open(manifest_path, encoding="utf-8") as fh:
-        manifest = json.load(fh)
-
     run_schema, backend_name = _load_schema_validator(schema)
     schema_errors = run_schema(manifest)
     errors += [f"schema: {msg}" for msg in schema_errors]
+    if schema_errors:
+        return errors, {"schema_backend": backend_name, "entries": 0}
 
     entries = manifest.get("entries", [])
     if not isinstance(entries, list):
@@ -187,6 +230,7 @@ def verify(manifest_path, blobs_dir, schema_path) -> tuple[list[str], dict]:
     blob_info: dict[str, dict] = {}
     logical_bytes_sum = 0
     xf_values_used: set[str] = set()
+    checked_blobs = set()
 
     for i, e in enumerate(entries):
         if not isinstance(e, dict):
@@ -210,53 +254,13 @@ def verify(manifest_path, blobs_dir, schema_path) -> tuple[list[str], dict]:
             for problem in _path_problems(path):
                 errors.append(f"entries[{i}]: path {path!r} contains {problem}")
 
-        # (7) br implies identity codec
-        if http_encoding == "br" and codec != "identity":
-            errors.append(
-                f"entries[{i}]: http_encoding='br' but codec={codec!r} (must be 'identity')")
-
-        # (2) blob path derivation
-        if isinstance(blob_sha256, str) and isinstance(codec, str) and isinstance(http_encoding, str):
-            expected_blob = _derive_blob_path(blob_sha256, codec, http_encoding)
-            if blob != expected_blob:
-                errors.append(
-                    f"entries[{i}]: blob={blob!r} but derives to {expected_blob!r} "
-                    f"from blob_sha256[0:2]/blob_sha256+suffix")
-
-        # (3) blob file existence, size, hash
-        blob_file = None
-        if isinstance(blob, str):
-            referenced_blobs.add(blob)
-            blob_file = blobs_dir / blob
-            if not blob_file.is_file():
-                errors.append(f"entries[{i}]: blob file does not exist: {blob_file}")
-                blob_file = None
-            else:
-                actual_size = blob_file.stat().st_size
-                if isinstance(blob_bytes, int) and actual_size != blob_bytes:
-                    errors.append(
-                        f"entries[{i}]: blob file size {actual_size} != blob_bytes {blob_bytes} ({blob_file})")
-                actual_sha = _sha256_file(blob_file)
-                if isinstance(blob_sha256, str) and actual_sha != blob_sha256:
-                    errors.append(
-                        f"entries[{i}]: blob file sha256 {actual_sha} != blob_sha256 {blob_sha256} ({blob_file})")
-
-        # (4) decode -> bytes, content_sha256
-        if blob_file is not None and isinstance(codec, str) and isinstance(http_encoding, str):
-            try:
-                raw = blob_file.read_bytes()
-                content = _decode_content(raw, codec, http_encoding)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"entries[{i}]: failed to decode blob ({codec=}, {http_encoding=}): {exc}")
-            else:
-                if isinstance(content_bytes, int) and len(content) != content_bytes:
-                    errors.append(
-                        f"entries[{i}]: decoded length {len(content)} != bytes {content_bytes}")
-                actual_content_sha = _sha256_bytes(content)
-                if isinstance(content_sha256, str) and actual_content_sha != content_sha256:
-                    errors.append(
-                        f"entries[{i}]: decoded content sha256 {actual_content_sha} != "
-                        f"content_sha256 {content_sha256}")
+        # Verify each distinct representation once, but never reuse a check
+        # when another entry changes any part of that representation's contract.
+        signature = (blob, blob_sha256, blob_bytes, content_bytes, content_sha256, codec, http_encoding)
+        if signature not in checked_blobs:
+            errors.extend(f"entries[{i}]: {message}" for message in verify_blob(e, blobs_dir))
+            checked_blobs.add(signature)
+        referenced_blobs.add(blob)
 
         # (6) per-blob fields, collected once per distinct blob + agreement
         # check across every entry that references it; and the one per-entry
@@ -275,12 +279,13 @@ def verify(manifest_path, blobs_dir, schema_path) -> tuple[list[str], dict]:
                 "bytes": content_bytes,
                 "codec": codec,
                 "http_encoding": http_encoding,
+                "content_sha256": content_sha256,
             }
             prior = blob_info.get(blob)
             if prior is None:
                 blob_info[blob] = this_info
             else:
-                for field_name in ("blob_bytes", "blob_sha256", "bytes", "codec", "http_encoding"):
+                for field_name in ("blob_bytes", "blob_sha256", "bytes", "codec", "http_encoding", "content_sha256"):
                     if prior[field_name] != this_info[field_name]:
                         errors.append(
                             f"entries[{i}]: blob {blob!r} disagrees with an earlier entry on "
@@ -312,6 +317,10 @@ def verify(manifest_path, blobs_dir, schema_path) -> tuple[list[str], dict]:
     # direction of this equality is ever checked.
     transforms_obj = manifest.get("transforms")
     if isinstance(transforms_obj, dict):
+        for name, recipe in transforms_obj.items():
+            if (not isinstance(recipe, dict)
+                    or not all(key in recipe for key in ("tool", "tool_version", "params"))):
+                errors.append(f"transforms: invalid recipe for {name!r}")
         transforms_keys = set(transforms_obj.keys())
         used_but_undescribed = sorted(xf_values_used - transforms_keys)
         described_but_unused = sorted(transforms_keys - xf_values_used)
@@ -327,7 +336,7 @@ def verify(manifest_path, blobs_dir, schema_path) -> tuple[list[str], dict]:
     # not an object; nothing further to check here without one.
 
     # (8) no blob on disk that nothing references
-    if blobs_dir.is_dir():
+    if check_orphans and blobs_dir.is_dir():
         on_disk = set()
         for p in blobs_dir.rglob("*"):
             if p.is_file():
@@ -335,14 +344,158 @@ def verify(manifest_path, blobs_dir, schema_path) -> tuple[list[str], dict]:
         orphans = sorted(on_disk - referenced_blobs)
         for orphan in orphans:
             errors.append(f"orphan blob (not referenced by any entry): {orphan}")
-    else:
+    elif not blobs_dir.is_dir():
         errors.append(f"blobs directory does not exist: {blobs_dir}")
 
     info = {
         "schema_backend": backend_name,
         "entries": len(entries),
         "unique_blobs_referenced": len(referenced_blobs),
+        "referenced_blobs": sorted(referenced_blobs),
     }
+    return errors, info
+
+
+def verify_catalog_data(catalog, root, schema_path=None) -> tuple[list[str], dict]:
+    """Check package identities, ownership, dependencies and every referenced blob."""
+    root = Path(root).resolve()
+    errors, referenced, sizes = [], set(), {}
+    info = {"entries": 0, "packages": 0, "unique_blobs_referenced": 0,
+            "referenced_blobs": [], "blob_sizes": {}}
+    if (not isinstance(catalog, dict) or catalog.get("schema") != "moly-asset-packs/1"
+            or not isinstance(catalog.get("version"), str) or not catalog["version"]
+            or not isinstance(catalog.get("packages"), list) or not catalog["packages"]):
+        return ["invalid or empty asset catalog"], info
+    owners, manifests, dependencies = {}, set(), {}
+    for index, package in enumerate(catalog["packages"]):
+        label = f"packages[{index}]"
+        if not isinstance(package, dict) or not isinstance(package.get("id"), str):
+            errors.append(f"{label}: missing package id")
+            continue
+        group = package["id"]
+        label = f"package {group!r}"
+        if _path_problems(group) or group in dependencies:
+            errors.append(f"{label}: invalid or duplicate package id")
+        deps = package.get("dependencies")
+        if not isinstance(deps, list) or not all(isinstance(dep, str) for dep in deps):
+            errors.append(f"{label}: invalid dependencies")
+            deps = []
+        if len(set(deps)) != len(deps):
+            errors.append(f"{label}: duplicate dependency")
+        dependencies[group] = deps
+        paths = package.get("paths")
+        if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+            errors.append(f"{label}: invalid paths")
+            paths = []
+        for path in paths:
+            if _path_problems(path):
+                errors.append(f"{label}: invalid asset path {path!r}")
+            if path in owners:
+                errors.append(f"{label}: path {path!r} already owned by {owners[path]!r}")
+            owners[path] = group
+        name = package.get("manifest")
+        if not isinstance(name, str) or _path_problems(name):
+            errors.append(f"{label}: invalid manifest path")
+            continue
+        path = (root / name).resolve()
+        if not path.is_relative_to(root) or name in manifests:
+            errors.append(f"{label}: escaping or duplicate manifest path")
+            continue
+        manifests.add(name)
+        try:
+            raw = path.read_bytes()
+            document = json.loads(raw)
+            if re.fullmatch(r"packages/[0-9a-f]{64}\.json", name) \
+                    and path.stem != _sha256_bytes(raw):
+                errors.append(f"{label}: manifest content address mismatch")
+            failures, checked = verify_manifest(document, root / "blobs", schema_path, check_orphans=False)
+        except (OSError, ValueError) as exc:
+            errors.append(f"{label}: cannot read manifest: {exc}")
+            continue
+        errors.extend(f"{label}: {message}" for message in failures)
+        if failures:
+            continue
+        if document["version"] != catalog["version"]:
+            errors.append(f"{label}: version differs from catalog")
+        if document["blob_prefix"] != "blobs/":
+            errors.append(f"{label}: blob_prefix must be relative to the catalog root: 'blobs/'")
+        entries = document["entries"]
+        if sorted(paths) != sorted(entry["path"] for entry in entries):
+            errors.append(f"{label}: catalog and manifest paths differ")
+        for field in ("download_bytes", "content_bytes"):
+            if package.get(field) != document[field]:
+                errors.append(f"{label}: catalog {field} differs from manifest")
+        referenced.update(checked["referenced_blobs"])
+        for entry in entries:
+            if entry["blob"] in sizes and sizes[entry["blob"]] != entry["blob_bytes"]:
+                errors.append(f"{label}: conflicting blob size")
+            sizes[entry["blob"]] = entry["blob_bytes"]
+        info["entries"] += len(entries)
+    visited, active = set(), set()
+
+    def visit(group):
+        if group in active:
+            errors.append(f"dependency cycle at {group!r}")
+            return
+        if group in visited:
+            return
+        active.add(group)
+        for dependency in dependencies[group]:
+            if dependency not in dependencies:
+                errors.append(f"package {group!r}: missing dependency {dependency!r}")
+            else:
+                visit(dependency)
+        active.remove(group)
+        visited.add(group)
+
+    for group in dependencies:
+        visit(group)
+    info.update(packages=len(catalog["packages"]), unique_blobs_referenced=len(referenced),
+                referenced_blobs=sorted(referenced), blob_sizes=sizes)
+    return errors, info
+
+
+def verify_catalog(catalog_path, schema_path=None, *, retained_catalogs=None, root=None):
+    """Verify a release and its retained generations; report unreferenced files.
+
+    Extra blobs are GC candidates, not release-integrity failures. Failed builds
+    can legitimately leave them behind. All retained catalogs are roots, not
+    just one package's manifest or the active generation.
+    """
+    catalog_path = Path(catalog_path).resolve()
+    raw = catalog_path.read_bytes()
+    historical = (catalog_path.parent.name == "catalogs"
+                  and re.fullmatch(r"[0-9a-f]{64}\.json", catalog_path.name))
+    if historical and catalog_path.stem != _sha256_bytes(raw):
+        raise ValueError("historical catalog content address mismatch")
+    if root is not None:
+        root = Path(root).resolve()
+    else:
+        root = catalog_path.parent
+        if historical:
+            root = root.parent
+    catalog = json.loads(raw)
+    errors, info = verify_catalog_data(catalog, root, schema_path)
+    active = set(info["referenced_blobs"])
+    retained = set()
+    archives = list((root / "catalogs").glob("*.json")) if retained_catalogs is None else list(retained_catalogs)
+    for archive in archives:
+        archive = Path(archive)
+        try:
+            raw = archive.read_bytes()
+            if re.fullmatch(r"[0-9a-f]{64}", archive.stem) and archive.stem != _sha256_bytes(raw):
+                errors.append(f"retained catalog {archive.name}: content address mismatch")
+            failures, prior = verify_catalog_data(json.loads(raw), root, schema_path)
+            errors.extend(f"retained catalog {archive.name}: {message}" for message in failures)
+            retained.update(prior["referenced_blobs"])
+            info["blob_sizes"].update(prior["blob_sizes"])
+        except (OSError, ValueError) as exc:
+            errors.append(f"retained catalog {archive.name}: {exc}")
+    on_disk = {path.relative_to(root / "blobs").as_posix()
+               for path in (root / "blobs").rglob("*") if path.is_file()}
+    info.update(retained_catalogs=len(archives), retained_blobs=sorted(retained - active),
+                orphan_blobs=sorted(on_disk - active - retained),
+                referenced_blobs=sorted(active | retained))
     return errors, info
 
 
@@ -350,9 +503,30 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="pack.verify", description="independently verify a packed manifest + blob store")
     ap.add_argument("--out", default=None, help="a pack.build output directory (manifest.json + blobs/)")
     ap.add_argument("--manifest", default=None, help="explicit manifest.json path (overrides --out)")
+    ap.add_argument("--catalog", default=None, help="verify a grouped release and all retained catalogs")
     ap.add_argument("--blobs", default=None, help="explicit blobs directory (overrides --out)")
-    ap.add_argument("--schema", required=True, help="path to manifest.schema.json")
+    ap.add_argument("--schema", default=None, help="alternate manifest schema (default: bundled)")
     args = ap.parse_args(argv)
+
+    catalog = args.catalog
+    if catalog is None and args.out and not args.manifest and (Path(args.out) / "asset-packs.json").is_file():
+        catalog = Path(args.out) / "asset-packs.json"
+    if catalog is not None:
+        if args.manifest or args.blobs:
+            ap.error("--catalog cannot be combined with --manifest or --blobs")
+        try:
+            errors, info = verify_catalog(catalog, args.schema, root=args.out)
+        except (OSError, ValueError) as exc:
+            print(f"FAIL {exc}")
+            return 1
+        for error in errors:
+            print(f"FAIL {error}")
+        if errors:
+            return 1
+        print(f"OK {info['packages']} packages, {info['entries']} entries, "
+              f"{info['retained_catalogs']} retained catalogs; "
+              f"{len(info['orphan_blobs'])} unreferenced blobs")
+        return 0
 
     if args.manifest:
         manifest_path = Path(args.manifest)

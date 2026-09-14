@@ -2272,9 +2272,14 @@ class _FakeResponse:
 
     status = 200
 
-    def __init__(self, payload):
+    def __init__(self, payload, url):
         self.payload = payload
         self.offset = 0
+        self.headers = {"Content-Length": str(len(payload))}
+        self.url = url
+
+    def geturl(self):
+        return self.url
 
     def read(self, size=-1):
         end = len(self.payload) if size is None or size < 0 else self.offset + size
@@ -2297,7 +2302,7 @@ def _pull(tmp_path, monkeypatch, mapping, master=None):
 
     _store(monkeypatch, mapping)
     monkeypatch.setattr(urllib.request, "urlopen",
-                        lambda request, timeout=None: _FakeResponse(b"UnityFS probe"))
+                        lambda request, timeout=None: _FakeResponse(b"UnityFS probe", request.full_url))
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps(
         {name.replace("__", "/"): {"bundleName": name.replace("__", "/"),

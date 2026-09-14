@@ -683,12 +683,7 @@ function sharedMotionLibrary() {
       const index = await fetchJson(`${BASE}/motion-library.index.json`);
       if (!index) return null;
       const gltf = await loader.loadAsync(`${BASE}/motion-library.glb`);
-      const loop = new Map();
-      for (const clip of Object.values(index.clips || {})) {
-        for (const seg of Object.values(clip.segments || {})) {
-          if (seg && seg.name) loop.set(seg.name, !!seg.loop);
-        }
-      }
+      const loop = Seg.loopByNameFromIndex(index, gltf.animations || []);
       app.dataInfo.motionLibrary = (gltf.animations || []).length;
       return { clips: gltf.animations || [], loop };
     })().catch((err) => {
@@ -943,7 +938,9 @@ async function loadUnit(unit) {
     const lib = await sharedMotionLibrary();
     if (lib) {
       clips = lib.clips;
-      for (const [name, loop] of lib.loop) if (!loopByName.has(name)) loopByName.set(name, loop);
+      // Playback metadata belongs to the library that actually supplied the
+      // clips; an old character entry cannot override its v2 source flags.
+      for (const [name, loop] of lib.loop) loopByName.set(name, loop);
     }
   }
   const mixer = clips.length ? new THREE.AnimationMixer(root) : null;
@@ -1264,10 +1261,12 @@ function hudStatus(html) { $('status').innerHTML = html; }
 // started 一旦为真就恒定推 mixer(和改动前一样),在此之前一帧都不推。
 function startFamily(f, seg) {
   if (!current || !current.segctl) return;
+  const started = seg && f.segs[seg]
+    ? current.segctl.playSegment(f.segs[seg], f)
+    : current.segctl.playFamily(f);
+  if (!started) return;
   current.started = true;
   app.currentFamily = f;
-  if (seg && f.segs[seg]) current.segctl.playSegment(f.segs[seg], f);
-  else current.segctl.playFamily(f);
 }
 
 // 长列表统一的筛选:按 data-key 里的小写串匹配,顺手更新计数徽标。
@@ -1336,7 +1335,9 @@ function buildFamilyList(families) {
 
 function updateClipUI(s) {
   document.querySelectorAll('#clips .fam').forEach((r) => r.classList.toggle('on', current && current.segctl && r.dataset.base === (s.family && s.family.base)));
-  $('phase').textContent = s.clip ? `${s.clip}(${s.phase})` : '—';
+  $('phase').textContent = s.unresolved
+    ? `${s.unresolved.clip}（缺少循环信息）`
+    : s.clip ? `${s.clip}(${s.phase})` : '—';
 }
 
 $('famFilter').oninput = (e) => applyFilter('clips', 'famCount', e.target.value);

@@ -30,6 +30,7 @@ from core.unity import configure_fallback_unity_version
 
 from core.assets.packages import PackageStore
 from core.jsonio import write_json
+from .directors import read_prefab_directors
 
 configure_fallback_unity_version()
 
@@ -89,6 +90,7 @@ class _Walker:
             # different timelines of the one package -- so a consumer joining
             # the tree to the clips without it pairs the wrong tracks.
             node = {"pathId": str(path_id), "class": cls,
+                    "asset": {"file": record.archive, "pathId": str(path_id)},
                     "name": tree.get("m_Name", ""), "children": []}
             self.nodes[key] = node
             for child in tree.get("m_Children") or []:
@@ -105,7 +107,8 @@ class _Walker:
 def _walk_package(store, name, out):
     """One package: its timelines, its documents, and its structural counts."""
     package = store.package(name)
-    document = {"package": name, "timelines": [], "unread": []}
+    document = {"package": name, "timelines": [], "unread": [],
+                "prefabs": read_prefab_directors(store, package)}
     counts = {"package": name, "missing": False, "timelineAssets": 0,
               "top": 0, "marker": 0, "children": 0, "childrenOfGroup": 0,
               "childrenOfNonGroup": 0, "nested": 0, "groupTracks": 0,
@@ -154,7 +157,8 @@ def _walk_package(store, name, out):
     counts["timelineAssets"] = len(timelines)
     for trecord, tpid in timelines:
         ttree = trecord.tree(tpid)
-        timeline = {"name": ttree.get("m_Name", ""), "tracks": [], "marker": None}
+        timeline = {"name": ttree.get("m_Name", ""), "tracks": [], "marker": None,
+                    "asset": {"file": trecord.archive, "pathId": str(tpid)}}
         # The asset's own settings, not just its track list.  `m_DurationMode`
         # is the one that decides what a timeline's length *is*: BasedOnClips=0
         # takes it from the clip extents, FixedLength=1 takes it from
@@ -222,6 +226,7 @@ def read_track_trees(bundles, out_dir, bundle_root=None):
     by_name = {os.path.basename(str(path)): str(path) for path in bundles}
     names = sorted(by_name)
     store = PackageStore(bundles, bundle_root)
+    store.load_dependencies([name for name in names if os.path.exists(by_name[name])])
     records = []
     for name in names:
         if not os.path.exists(by_name[name]):

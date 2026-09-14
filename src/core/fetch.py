@@ -5,13 +5,14 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
-import time
-import urllib.request
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+
+from .download import download_file
+from .master import record_master_inputs
 
 MAGIC = b"\x10\x00\x00\x00"
 
@@ -64,16 +65,37 @@ class BundleEntry:
 class Manifest:
     def __init__(self, bundles: dict | list, version: str | None = None):
         self.version = version
-        if isinstance(bundles, dict):
-            self.entries = {entry.bundle_name: entry for key, value in bundles.items()
-                            for entry in [BundleEntry.from_dict(value, key)]}
-        else:
-            self.entries = {entry.bundle_name: entry for entry in (BundleEntry.from_dict(v) for v in bundles)}
+        self.entries = {}
+        self._aliases = {}
+        by_key = {}
+        items = bundles.items() if isinstance(bundles, dict) else ((None, value) for value in bundles)
+        for key, value in items:
+            entry = BundleEntry.from_dict(value, key)
+            local_key = _bundle_key(entry.bundle_name)
+            previous = by_key.get(local_key.casefold())
+            if previous is not None:
+                if (flatten(previous.bundle_name) != local_key
+                        or _entry_definition(previous) != _entry_definition(entry)):
+                    raise ValueError(f"conflicting bundle definitions/local key: {previous.bundle_name!r}, {entry.bundle_name!r}")
+                self._aliases[entry.bundle_name] = previous.bundle_name
+                continue
+            by_key[local_key.casefold()] = entry
+            self.entries[entry.bundle_name] = entry
+            self._aliases[entry.bundle_name] = entry.bundle_name
+            self._aliases[local_key] = entry.bundle_name
+        reserved = {}
+        for entry in self.entries.values():
+            key = flatten(entry.bundle_name)
+            for suffix in ("", ".part", ".part.json", ".lock"):
+                path = (key + suffix).casefold()
+                if path in reserved:
+                    raise ValueError(f"bundle temporary-file collision: {entry.bundle_name!r}, {reserved[path]!r}")
+                reserved[path] = entry.bundle_name
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> "Manifest":
         with open(path, encoding="utf-8") as stream:
-            payload = json.load(stream)
+            payload = json.load(stream, object_pairs_hook=_unique_object)
         if isinstance(payload, dict):
             return cls(payload.get("bundles", payload.get("manifest", payload)), payload.get("version"))
         return cls(payload)
@@ -121,6 +143,7 @@ class Manifest:
         stack: list[str] = []
 
         def visit(name: str) -> None:
+            name = self._aliases.get(name, self._aliases.get(flatten(name), name))
             mark = state.get(name, 0)
             if mark == 1:
                 raise ValueError("dependency cycle: " + " -> ".join(stack[stack.index(name):] + [name]))
@@ -140,6 +163,36 @@ class Manifest:
 
 def flatten(name: str) -> str:
     return name.replace("/", "__")
+
+
+def _bundle_key(name: str) -> str:
+    if (not name or any(part in ("", ".", "..") or part.endswith((" ", "."))
+                        for part in name.split("/"))
+            or re.search(r'[\\<>:"|?*\x00-\x1f]', name)):
+        raise ValueError(f"invalid bundle name: {name!r}")
+    key = flatten(name)
+    if re.fullmatch(r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", key, re.IGNORECASE):
+        raise ValueError(f"reserved local bundle key: {name!r}")
+    return key
+
+
+def _entry_definition(entry: BundleEntry):
+    # Only spelling aliases may merge. All source metadata must agree, even
+    # fields not yet interpreted here, so a new upstream field cannot silently
+    # weaken the identity check.
+    extra = {key: value for key, value in entry.raw.items()
+             if key not in {"bundleName", "name", "dependencies"}}
+    return (entry.download_path, entry.cache_file_name, entry.file_size, entry.crc,
+            entry.in_player_build, tuple(sorted(flatten(name) for name in entry.dependencies)), extra)
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result and result[key] != value:
+            raise ValueError(f"conflicting duplicate JSON key: {key!r}")
+        result[key] = value
+    return result
 
 
 NO_AUDIO_MASTER = ("no master directory or base URL was supplied, and only master "
@@ -195,40 +248,25 @@ def build_download_url(asset_base_url: str, entry: BundleEntry) -> str:
 def expected_hash(entry: BundleEntry) -> str | None:
     for key in ("hash", "sha256", "sha256Hash"):
         value = entry.raw.get(key)
-        if isinstance(value, str) and len(value) == 64:
-            return value.lower()
+        if isinstance(value, str):
+            value = value.removeprefix("sha256:")
+            if re.fullmatch(r"[0-9a-fA-F]{64}", value):
+                return value.lower()
+        if value is not None and key in {"sha256", "sha256Hash"}:
+            raise ValueError(f"invalid expected SHA-256 for {entry.bundle_name!r}")
     return None
 
 
 def download_one(entry: BundleEntry, asset_base_url: str, raw_dir: Path, retries: int = 4) -> dict:
     url = build_download_url(asset_base_url, entry)
-    target = raw_dir / flatten(entry.bundle_name)
-    part = target.with_name(target.name + ".part")
-    last: Exception | None = None
-    for attempt in range(1, retries + 1):
-        try:
-            offset = part.stat().st_size if part.exists() else 0
-            headers = {"User-Agent": "UnityPlayer/2022.3.62f3"}
-            if offset:
-                headers["Range"] = f"bytes={offset}-"
-            request = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(request, timeout=180) as response:
-                append = bool(offset and response.status == 206)
-                with part.open("ab" if append else "wb") as stream:
-                    shutil.copyfileobj(response, stream)
-            digest = sha256(part)
-            wanted = expected_hash(entry)
-            if wanted and digest != wanted:
-                raise IOError(f"sha256 mismatch: expected {wanted}, got {digest}")
-            os.replace(part, target)
-            return {"bundleName": entry.bundle_name, "url": url, "sha256": digest, "bytes": target.stat().st_size}
-        except Exception as exc:  # noqa: BLE001
-            last = exc
-            if attempt < retries:
-                time.sleep(attempt)
-    raise RuntimeError(f"download failed after {retries} attempts: {url}: {last}")
+    target = Path(raw_dir) / _bundle_key(entry.bundle_name)
+    receipt = download_file(url, target, expected_hash=expected_hash(entry),
+                            identity=entry.raw, retries=retries,
+                            headers={"User-Agent": "UnityPlayer/2022.3.62f3"})
+    return {"bundleName": entry.bundle_name, "url": url, **receipt}
 
 
+@record_master_inputs
 def pull(manifest_path: str, out: str | os.PathLike[str] | None, asset_base_url: str,
          workers: int = 8, retries: int = 4, master: str | None = None,
          master_cache: str | None = None,

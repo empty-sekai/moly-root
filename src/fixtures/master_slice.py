@@ -37,6 +37,8 @@ _COLUMNS = (
     "assetbundleName",
     "mysekaiFixtureType",
     "mysekaiFixturePlayerActionType",
+    "mysekaiFixturePutType",
+    "mysekaiFixtureHandleType",
     "gridSize",
 )
 
@@ -92,6 +94,8 @@ def export_fixture_master_slice(
                 "fixtureTypeValue": _FIXTURE_TYPES[kind],
                 "playerActionType": action,
                 "playerActionTypeValue": _ACTION_TYPES[action],
+                "putType": row["mysekaiFixturePutType"],
+                "handleType": row["mysekaiFixtureHandleType"],
                 "gridWidth": int(grid["width"]),
                 "gridDepth": int(grid["depth"]),
                 "gridHeight": int(grid["height"]),

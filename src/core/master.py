@@ -11,10 +11,49 @@ its condition group asks nothing about furniture (furniture is not part of a
 character).  Both halves of that predicate are reported, so a consumer can see
 what was excluded and why instead of trusting a single number.
 """
+from contextvars import ContextVar
+from functools import wraps
+import hashlib
 import json
 import os
+from pathlib import Path
 import urllib.request
+from urllib.parse import urlsplit, urlunsplit
 from collections import Counter, defaultdict
+
+from .atomic import write_json
+
+_INPUT_REPORTS = ContextVar("master_input_reports", default=())
+
+
+def record_master_inputs(function):
+    """Attach the actual tables read by an extraction, including nested passes."""
+    @wraps(function)
+    def recorded(*args, **kwargs):
+        inputs = {}
+        token = _INPUT_REPORTS.set((*_INPUT_REPORTS.get(), inputs))
+        try:
+            report = function(*args, **kwargs)
+        finally:
+            _INPUT_REPORTS.reset(token)
+        report["masterInputs"] = sorted(inputs.values(), key=lambda row: (
+            row["sourceId"], row["table"], row["status"], row.get("sha256", "")))
+        if report.get("report"):
+            write_json(report["report"], report)
+        return report
+    return recorded
+
+
+def _source_identity(source):
+    parsed = urlsplit(source)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return str(Path(source).resolve())
+    auth, separator, host = parsed.netloc.rpartition("@")
+    netloc = (auth + separator if separator else "") + host.lower()
+    if (parsed.scheme.lower() == "http" and netloc.endswith(":80")) \
+            or (parsed.scheme.lower() == "https" and netloc.endswith(":443")):
+        netloc = netloc.rsplit(":", 1)[0]
+    return urlunsplit((parsed.scheme.lower(), netloc, parsed.path.rstrip("/"), parsed.query, ""))
 
 # Tables may be read from a directory or fetched one-by-one from a base URL by
 # appending "<table>.json".  This public mirror is the default base when the
@@ -57,39 +96,87 @@ class Master:
 
     *source* is either a directory of ``<table>.json`` files or a base URL that
     ``<table>.json`` is appended to.  With a URL, each table is fetched once and
-    written into *cache_dir* (when given) so a second run reads from disk.
+    written into a source/snapshot namespace in *cache_dir*. The default freezes
+    cached tables. Choose another *snapshot* (or a versioned URL) for another
+    input version; *refresh=True* explicitly fetches new bytes for this namespace.
     """
 
-    def __init__(self, source, cache_dir=None, timeout=30.0):
+    def __init__(self, source, cache_dir=None, timeout=30.0, *, snapshot=None, refresh=False):
         self.source = str(source)
-        self.remote = self.source.startswith(("http://", "https://"))
+        self.source_identity = _source_identity(self.source)
+        self.remote = self.source_identity.startswith(("http://", "https://"))
+        self.snapshot = snapshot
+        self.refresh = refresh
+        self.source_id = hashlib.sha256(json.dumps(
+            [self.source_identity, snapshot], ensure_ascii=False).encode("utf-8")).hexdigest()
         self.cache_dir = str(cache_dir) if cache_dir else None
         self.timeout = timeout
         self.fetched = []
         self._cache = {}
+        self.provenance = {}
+
+    def _record(self, name, status, payload=None, error=None):
+        row = {"table": name, "sourceId": self.source_id,
+               "source": self.source_identity, "snapshot": self.snapshot, "status": status}
+        if payload is not None:
+            row["sha256"] = hashlib.sha256(payload).hexdigest()
+        if error:
+            row["error"] = error
+        self.provenance[name] = row
+        for report in _INPUT_REPORTS.get():
+            report[(self.source_id, name, status, row.get("sha256"))] = row
 
     def _read_local(self, path, name):
         if not os.path.isfile(path):
+            self._record(name, "missing")
             raise MissingTable(f"master table not found: {name}")
-        with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
+        payload = Path(path).read_bytes()
+        try:
+            rows = json.loads(payload)
+        except (ValueError, UnicodeError) as exc:
+            self._record(name, "invalid", payload, str(exc))
+            raise
+        self._record(name, "local", payload)
+        return rows
 
     def _read_remote(self, name):
-        cached = os.path.join(self.cache_dir, f"{name}.json") if self.cache_dir else None
-        if cached and os.path.isfile(cached):
-            return self._read_local(cached, name)
-        url = f"{self.source.rstrip('/')}/{name}.json"
+        cached = Path(self.cache_dir) / self.source_id / f"{name}.json" if self.cache_dir else None
+        if cached and cached.is_file() and not self.refresh:
+            try:
+                envelope = json.loads(cached.read_bytes())
+                payload = envelope["payload"].encode("utf-8")
+                if (envelope.get("schema") != "moly-master-cache/1"
+                        or envelope.get("source") != self.source_identity
+                        or envelope.get("snapshot") != self.snapshot
+                        or envelope.get("table") != name
+                        or envelope.get("sha256") != hashlib.sha256(payload).hexdigest()):
+                    raise ValueError("cache identity or checksum mismatch")
+                rows = json.loads(payload)
+            except (OSError, ValueError, KeyError, AttributeError, TypeError) as exc:
+                self._record(name, "invalid", error=str(exc))
+                raise ValueError(f"invalid master cache for {name}; use refresh=True to fetch again") from exc
+            self._record(name, "cached", payload)
+            return rows
+        parsed = urlsplit(self.source_identity)
+        url = urlunsplit(parsed._replace(path=f"{parsed.path}/{name}.json"))
         try:
             with urllib.request.urlopen(url, timeout=self.timeout) as response:
                 payload = response.read()
         except Exception as exc:                       # 404, DNS, timeout...
+            self._record(name, "fetch_failed", error=str(exc))
             raise MissingTable(f"master table not retrievable: {name} ({exc})") from exc
-        rows = json.loads(payload.decode("utf-8"))
+        try:
+            text = payload.decode("utf-8")
+            rows = json.loads(text)
+        except (ValueError, UnicodeError) as exc:
+            self._record(name, "invalid", payload, str(exc))
+            raise
         self.fetched.append(name)
         if cached:
-            os.makedirs(self.cache_dir, exist_ok=True)
-            with open(cached, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(rows, handle, ensure_ascii=False, allow_nan=False)
+            write_json(cached, {"schema": "moly-master-cache/1", "source": self.source_identity,
+                                "snapshot": self.snapshot, "table": name,
+                                "sha256": hashlib.sha256(payload).hexdigest(), "payload": text})
+        self._record(name, "fetched", payload)
         return rows
 
     def table(self, name):
@@ -99,6 +186,8 @@ class Master:
         rows; known single-record payloads become one-element arrays.  Compact
         column objects and other unsupported shapes are not guessed at.
         """
+        if not name or not all(c.isalnum() or c in "_-" for c in name):
+            raise ValueError(f"invalid master table name: {name!r}")
         if name not in self._cache:
             rows = (self._read_remote(name) if self.remote
                     else self._read_local(os.path.join(self.source, f"{name}.json"), name))
@@ -219,11 +308,11 @@ class Master:
         The group table is a mapping table: one row per (group, condition) pair,
         keyed by ``groupId`` — not by its own ``id``.
         """
-        types = {row["id"]: row["mysekaiCharacterTalkConditionType"]
+        types = {row["id"]: row.get("mysekaiCharacterTalkConditionType")
                  for row in self.table("mysekaiCharacterTalkConditions")}
         out = defaultdict(list)
         for row in self.table("mysekaiCharacterTalkConditionGroups"):
-            out[row["groupId"]].append(types.get(row["mysekaiCharacterTalkConditionId"]))
+            out[row["groupId"]].append(types.get(row.get("mysekaiCharacterTalkConditionId")))
         return dict(out)
 
     def condition_entries(self):
@@ -243,7 +332,7 @@ class Master:
                    for row in self.table("mysekaiCharacterTalkConditions")}
         out = defaultdict(list)
         for row in self.table("mysekaiCharacterTalkConditionGroups"):
-            entry = entries.get(row["mysekaiCharacterTalkConditionId"]) or {}
+            entry = entries.get(row.get("mysekaiCharacterTalkConditionId")) or {}
             out[row["groupId"]].append({
                 "conditionType": entry.get("mysekaiCharacterTalkConditionType"),
                 "conditionTypeValue": entry.get(
@@ -280,15 +369,35 @@ class Master:
         and *report* counts the talks dropped by each half of the predicate.
         """
         solo = self.solo_unit_groups()
+        unit_groups = {row["id"] for row in self.table("mysekaiGameCharacterUnitGroups")}
         conditions = self.condition_types()
+        condition_links = defaultdict(list)
+        for row in self.table("mysekaiCharacterTalkConditionGroups"):
+            condition_links[row["groupId"]].append({
+                "groupRowId": row.get("id"),
+                "conditionId": row.get("mysekaiCharacterTalkConditionId")})
         tweet_of = self.talk_tweet_ids()
-        kept, dropped = [], Counter()
+        kept, dropped, unresolved = [], Counter(), []
         for talk in self.table("mysekaiCharacterTalks"):
-            unit = solo.get(talk.get("mysekaiGameCharacterUnitGroupId"))
+            unit_group = talk.get("mysekaiGameCharacterUnitGroupId")
+            condition_group = talk.get("mysekaiCharacterTalkConditionGroupId")
+            reason = None
+            if unit_group not in unit_groups:
+                reason = "missing unit group"
+            elif condition_group not in conditions:
+                reason = "missing condition group"
+            elif any(not isinstance(t, str) or not t for t in conditions[condition_group]):
+                reason = "unresolved condition"
+            if reason:
+                unresolved.append({"talkId": talk["id"], "reason": reason,
+                                   "unitGroupId": unit_group, "conditionGroupId": condition_group,
+                                   "conditions": condition_links.get(condition_group, [])})
+                continue
+            unit = solo.get(unit_group)
             if unit is None:
                 dropped["unit group holds more than one character"] += 1
                 continue
-            types = conditions.get(talk.get("mysekaiCharacterTalkConditionGroupId"), [])
+            types = conditions[condition_group]
             if any(t in FURNITURE_CONDITIONS for t in types):
                 dropped["gated on furniture"] += 1
                 continue
@@ -298,6 +407,10 @@ class Master:
             "talksTotal": len(self.table("mysekaiCharacterTalks")),
             "kept": len(kept),
             "dropped": dict(dropped),
+            "excluded": sum(dropped.values()),
+            "unresolved": dict(Counter(row["reason"] for row in unresolved)),
+            "unresolvedCount": len(unresolved),
+            "unresolvedTalks": unresolved,
             "soloUnitGroups": len(solo),
             "charactersCovered": len({row["unitId"] for row in kept}),
             "withoutTweet": sum(1 for row in kept if row["tweetId"] is None),

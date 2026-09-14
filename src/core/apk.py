@@ -13,6 +13,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, build_opener
 
+from .download import download_file
+
 DEFAULT_ENDPOINT = "https://pjsk.nvsgames.cn/"
 USER_AGENT = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
 CHUNK_SIZE = 1024 * 1024
@@ -93,37 +95,13 @@ def verify_hash(path: Path, expected: str, algorithm: str = "sha256") -> bool:
 
 def download(url: str, destination: Path, *, expected_hash: str | None = None,
              timeout: float = 1800.0, retries: int = 3) -> Path:
-    """Download an APK, resuming ``.part`` when the server supports ranges."""
-    if retries < 1:
-        raise ValueError("retries must be at least 1")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    part = destination.with_name(destination.name + ".part")
-    last: Exception | None = None
-    for attempt in range(retries):
-        offset = part.stat().st_size if part.exists() else 0
-        headers = {"Range": f"bytes={offset}-"} if offset else {}
-        try:
-            with _request(url, headers=headers, timeout=timeout) as response:
-                resumed = bool(offset and response.status == 206)
-                if offset and not resumed:
-                    offset = 0
-                    part.unlink()
-                mode = "ab" if resumed else "wb"
-                with part.open(mode) as stream:
-                    while True:
-                        chunk = response.read(CHUNK_SIZE)
-                        if not chunk:
-                            break
-                        stream.write(chunk)
-            if expected_hash and not verify_hash(part, expected_hash):
-                raise ApkError("download completed but hash verification failed")
-            part.replace(destination)
-            return destination
-        except (ApkError, OSError) as exc:
-            last = exc
-            if attempt + 1 < retries:
-                time.sleep(attempt + 1)
-    raise ApkError(f"download failed after {retries} attempt(s): {last}") from last
+    """Download an APK using the same integrity/continuation rules as bundles."""
+    try:
+        download_file(url, destination, expected_hash=expected_hash, timeout=timeout,
+                      retries=retries, headers={"User-Agent": USER_AGENT})
+    except (OSError, RuntimeError) as exc:
+        raise ApkError(str(exc)) from exc
+    return Path(destination)
 
 
 def inspect_assets_container(path: Path) -> dict[str, object]:

@@ -1013,6 +1013,32 @@ The action library is character-independent and can be downloaded once for membe
 
 For applying this library to another humanoid, see the [retargeting contract](retarget.en.md).
 
+## House Door References
+
+Each package in `fixture-gimmick/gimmicks.json` now has `houseViews`, containing
+`views` and `transforms`. These are serialized HouseView references, not ordinary
+FixtureView attach slots. A view keeps its exact `asset`, `gameObject`, `animator`,
+`insideDoorActionPoint` and `outsideDoorActionPoint` identities (`file`, decimal
+string `pathId`). Authored nulls and unresolved references remain distinct.
+
+`transforms` contains the action points and their ancestors, with exact parent
+references and authored local position, rotation and scale. Resolve these against
+the current instance; do not treat local coordinates as shared world positions.
+The animator identity joins the package's existing `animators` table, which leads
+to the existing controller clip table, curves and full animation event payloads.
+No duplicate controller parser or name-based clip selection is implied. Runtime
+AttachComponents, trigger/play semantics, sound eligibility and door lifecycle
+still belong to the consumer, not this serialization view.
+
+House model GLBs also carry `extras.houseViews`; their default scene is the
+prefab containing that exact view, not an unrelated FBX root. Animation extras
+retain `sourceClip` and `sourceEvents`. Room package root records carry
+`animators`, with exact controller slot-to-animation bindings and scene/node
+scope; their glTF animation extras also identify the source Animator and scene.
+An empty idle clip retains its duration with `animation: null`. Front-wall
+`roomDoorAnchors` lists source locator identities in authored traversal order;
+the consumer still chooses the actual wall instance and handles its visibility.
+
 ## Consumer Checklist
 
 1. Use glTF indices, not names, for skinning, cloth, and animation binding.

@@ -25,15 +25,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core.atomic import PUBLIC_FILE_MODE, json_bytes, write_bytes
+
 from . import codecs
 from .categories import VALID_XF, load_categories
-from .hashing import sha256_bytes
+from .hashing import sha256_bytes, sha256_file
+from .paths import canonical_inputs, output_path, separate_output
+from .verify import verify_blob, verify_manifest
 
 SCHEMA_ID = "moly-asset-manifest/1"
 DEFAULT_BLOB_PREFIX = "blobs/"
@@ -75,14 +80,18 @@ def iter_files(root: Path):
 def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_PREFIX,
           progress=None, xf_overlay=None, xf_name=None,
           xf_overlay_expect_files=None, xf_overlay_expect_bytes=None,
-          transforms_path=None, paths=None, manifest_name="manifest.json") -> dict:
+          transforms_path=None, paths=None, manifest_name="manifest.json",
+          previous_manifest=None) -> dict:
     """Pack *src* into *out*/blobs/ + *out*/manifest.json. Returns a report dict."""
-    src = Path(src)
-    out = Path(out)
-    assert src.is_dir(), (
-        f"--src is not a directory: {src!r} "
-        f"(an MSYS-style path such as /c/data resolves to nothing on Windows "
-        f"without raising, so pass a drive-qualified path instead)")
+    src, out = separate_output(src, out, xf_overlay)
+    if not isinstance(version, str) or not version:
+        raise ValueError("version must be a non-empty string")
+    manifest_path = output_path(out, manifest_name) if manifest_name is not None else None
+    if manifest_path is not None and manifest_path.is_relative_to(out / "blobs"):
+        raise ValueError("manifest must not be written inside the blob store")
+    # Freeze names before creating any output; canonical names are also the
+    # identities used by group ownership, overlays and the verifier.
+    inputs = canonical_inputs(src, iter_files(src) if paths is None else paths)
 
     if (xf_overlay is None) != (xf_name is None):
         raise ValueError("--xf-overlay and --xf-name must be given together (both or neither)")
@@ -94,7 +103,7 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
     if xf_overlay is not None:
         if xf_name not in (VALID_XF - {None}):
             raise ValueError(f"--xf-name {xf_name!r} is not a known xf (want one of {sorted(VALID_XF - {None})})")
-        xf_overlay = Path(xf_overlay)
+        xf_overlay = Path(xf_overlay).resolve()
         assert xf_overlay.is_dir(), (
             f"--xf-overlay is not a directory: {xf_overlay!r} "
             f"(an MSYS-style path such as /c/data resolves to nothing on Windows "
@@ -128,20 +137,17 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
                 f"({xf_overlay}) files total {overlay_bytes_total} bytes")
 
     table = load_categories(categories_path)
-    blobs_dir = out / "blobs"
+    blobs_dir = output_path(out, "blobs")
     blobs_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = out / manifest_name
-    if not manifest_path.resolve().is_relative_to(out.resolve()):
-        raise ValueError("manifest path must stay inside the output directory")
     previous_blobs = {}
-    if manifest_path.is_file():
-        previous = json.loads(manifest_path.read_text("utf-8"))
+    old_path = output_path(out, previous_manifest) if previous_manifest is not None else manifest_path
+    if old_path is not None and old_path.is_file():
+        previous = json.loads(old_path.read_text("utf-8"))
         if previous.get("schema") == SCHEMA_ID:
             for entry in previous.get("entries", []):
-                blob = blobs_dir / entry["blob"]
-                if blob.resolve().is_relative_to(blobs_dir.resolve()) and blob.is_file() and blob.stat().st_size == entry["blob_bytes"]:
-                    previous_blobs[(entry["content_sha256"], entry["codec"], entry["http_encoding"])] = (
-                        entry["blob"], entry["blob_bytes"], entry["blob_sha256"], entry["bytes"])
+                if isinstance(entry, dict) and all(isinstance(entry.get(key), str)
+                        for key in ("content_sha256", "codec", "http_encoding")):
+                    previous_blobs[(entry["content_sha256"], entry["codec"], entry["http_encoding"])] = entry
 
     entries = []
     # (content_sha256, codec, http_encoding) -> (blob_rel_path, blob_bytes_len, blob_sha256, content_len)
@@ -154,17 +160,7 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
     files_seen = 0
     overlay_applied = 0
 
-    if paths is None:
-        inputs = iter_files(src)
-    else:
-        inputs = []
-        for relative in sorted(set(paths)):
-            path = src / relative
-            if not path.resolve().is_relative_to(src.resolve()) or not path.is_file():
-                raise ValueError(f"asset path is outside the source or missing: {relative}")
-            inputs.append(path)
-    for path in inputs:
-        rel = path.relative_to(src).as_posix()
+    for rel, path in inputs.items():
         overlay_path = overlay_index.get(rel)
         if overlay_path is not None:
             content = overlay_path.read_bytes()
@@ -178,8 +174,10 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
 
         cached = blob_cache.get(cache_key)
         if cached is None and cache_key in previous_blobs:
-            cached = previous_blobs[cache_key]
-            blob_cache[cache_key] = cached
+            prior = previous_blobs[cache_key]
+            if not verify_blob(prior, blobs_dir):
+                cached = (prior["blob"], prior["blob_bytes"], prior["blob_sha256"], prior["bytes"])
+                blob_cache[cache_key] = cached
         if cached is None:
             encoded = codecs.encode_blob(content, rule.codec, rule.http_encoding)
             # Round-trip guard: an encoder that produced bytes which do not
@@ -193,10 +191,10 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
                     f"(codec={rule.codec}, http_encoding={rule.http_encoding})")
             blob_sha = sha256_bytes(encoded)
             blob_rel = codecs.derive_blob_path(blob_sha, rule.codec, rule.http_encoding)
-            dest = blobs_dir / blob_rel
+            dest = output_path(blobs_dir, blob_rel)
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if not dest.exists():
-                dest.write_bytes(encoded)
+            if not dest.is_file() or dest.stat().st_size != len(encoded) or sha256_file(dest) != blob_sha:
+                write_bytes(dest, encoded, mode=PUBLIC_FILE_MODE)
             cached = (blob_rel, len(encoded), blob_sha, len(content))
             blob_cache[cache_key] = cached
         blob_rel, blob_len, blob_sha, _content_len = cached
@@ -276,13 +274,20 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
         "entries": entries,
     }
 
-    manifest_path = out / manifest_name
-    if not manifest_path.resolve().is_relative_to(out.resolve()):
-        raise ValueError("manifest path must stay inside the output directory")
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-        encoding="utf-8", newline="\n")
+    # Reused bytes may have been produced with a previous private-file policy.
+    # They are public release objects too, even when no rewrite was necessary.
+    if os.name == "posix":
+        for blob_rel, *_ in blob_cache.values():
+            path = output_path(blobs_dir, blob_rel)
+            if path.stat().st_mode & 0o777 != PUBLIC_FILE_MODE:
+                path.chmod(PUBLIC_FILE_MODE)
+    errors, _ = verify_manifest(manifest, blobs_dir, check_orphans=False)
+    if errors:
+        raise RuntimeError("refusing to publish invalid manifest: " + "; ".join(errors))
+    data = json_bytes(manifest)
+    if manifest_path is None:
+        manifest_path = output_path(out, f"packages/{sha256_bytes(data)}.json")
+    write_bytes(manifest_path, data, mode=PUBLIC_FILE_MODE)
 
     # Dedup savings, in gen.mjs's own terms: logical_bytes minus content_bytes
     # (both already computed above) is exactly the decoded bytes that did not

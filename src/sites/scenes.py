@@ -43,6 +43,7 @@ from .clips import NO_CURVES, clip_document, path_hashes
 from .geometry import (Builder, Graph, Textures, collider_document,
                        component_ids, material_document)
 from .navmesh import NO_HEIGHT_MESH, height_mesh_blob, navmesh_document
+from . import source_nodes
 
 # Render mode that draws each particle as a copy of a mesh.
 MESH_RENDER_MODE = "Mesh"
@@ -245,7 +246,7 @@ class PackageExtract:
 
     # -- node walk --------------------------------------------------------
     def _component(self, record, graph, transform, path, node_paths, scene,
-                   root=None):
+                   root=None, node_extras=None):
         """Read every component of one node; returns the glTF mesh index or None."""
         components = graph.components(transform)
         kinds = {kind for kind, _ in components}
@@ -267,7 +268,7 @@ class PackageExtract:
                 # its layout geometry -- anchors, size, pivot -- is authored data
                 # no other reader covers, so it is exported as a component like
                 # every non-walked kind rather than being marked and dropped.
-                self._other_component(record, path_id, kind, path)
+                self._other_component(record, path_id, kind, path, node_extras)
                 continue
             if kind in ("MeshFilter", "MeshRenderer", "SkinnedMeshRenderer"):
                 self._mark(record, path_id, "exported", "geometry")
@@ -290,7 +291,7 @@ class PackageExtract:
             if kind == "PlayableDirector":
                 self._director(record, path_id, path)
                 continue
-            self._other_component(record, path_id, kind, path)
+            self._other_component(record, path_id, kind, path, node_extras)
         return mesh_index
 
     def _geometry_of(self, record, graph, transform, path, root=None):
@@ -400,6 +401,7 @@ class PackageExtract:
                                                      root=entry["name"])
             index = self.builder.node(graph, current, mesh_index)
             node = self.builder.glb.g["nodes"][index]
+            node.setdefault("extras", {}).update(source_nodes.identity(record, graph, current))
             active = bool(tree.get("m_IsActive", 1))
             if not active:
                 self.inactive.append(path)
@@ -427,10 +429,16 @@ class PackageExtract:
                     .setdefault("children", []).append(index)
             entry["nodes"] += 1
             self._component(record, graph, current, path, node_paths, scene,
-                            root=entry["name"])
+                            root=entry["name"], node_extras=node["extras"])
         entry["skins"] = self._bind_skins(pending, indices, entry["name"])
         scene = self.builder.scene(entry["name"], indices[transform])
         entry["scene"] = scene
+        from .animators import embed as embed_animators, room_door_anchors
+        entry["roomDoorAnchors"] = room_door_anchors(record, graph, indices)
+        entry["animators"], controllers = embed_animators(
+            self.store, record, graph, indices, scene, self.builder.glb)
+        for controller_file, controller_id in controllers:
+            self._mark(controller_file, controller_id, "exported", "Animator controller graph")
         if primary:
             self.slots = self._slot_table(record, graph, transform, node_paths)
         return entry
@@ -637,7 +645,7 @@ class PackageExtract:
             "state": BOUND_SOCKET if bound else EMPTY_SOCKET})
         self._mark(record, path_id, "exported", "timeline socket")
 
-    def _other_component(self, record, path_id, kind, node):
+    def _other_component(self, record, path_id, kind, node, node_extras=None):
         """Every other component: its class, its node, and its fields verbatim."""
         try:
             fields = verbatim(self.store, record, path_id)
@@ -653,6 +661,9 @@ class PackageExtract:
                                                   "instances": []})
         entry["count"] += 1
         entry["instances"].append({"node": node, "fields": fields})
+        if node_extras is not None:
+            source_nodes.attach_component(node_extras, path_id, kind, name,
+                                          record.tree(path_id))
         self._mark(record, path_id, "exported", "component fields")
 
     # -- loose assets -----------------------------------------------------

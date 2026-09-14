@@ -25,6 +25,14 @@ TABLES = {
 }
 
 OPTIONAL_TABLES = {
+    "mysekaiCharacterTalkNoTalkMysekaiFixtureActions": ("id", "mysekai-character-talk-no-talk-fixture-actions.json"),
+    "mysekaiCharacterTalks": ("id", "mysekai-character-talks.json"),
+    "mysekaiFixturePlayerTimelines": ("id", "mysekai-fixture-player-timelines.json"),
+    "mysekaiCharacterTalkFixtureTimelines": ("id", "mysekai-character-talk-fixture-timelines.json"),
+    "mysekaiCharacterTalkActionPoints": ("id", "mysekai-character-talk-action-points.json"),
+    "mysekaiCharacterTalkConditions": ("id", "mysekai-character-talk-conditions.json"),
+    "mysekaiCharacterTalkConditionGroups": ("id", "mysekai-character-talk-condition-groups.json"),
+    "mysekaiGameCharacterUnitGroups": ("id", "mysekai-game-character-unit-groups.json"),
     "mysekaiTools": ("id", "mysekai-tools.json"),
     "mysekaiStaminas": ("id", "mysekai-staminas.json"),
     "mysekaiStaminaRecovery": ("id", "mysekai-stamina-recovery.json"),
@@ -100,9 +108,11 @@ def extract_master_tables(master_source, out_dir, master_cache=None, *, tables=N
         keyed = _keyed_rows(table, key_field, rows)
         doc = {
             "version": 1,
+            "rowOrder": [row[key_field] for row in rows],
             "semantics": {
                 "table": table,
                 "keyField": key_field,
+                "rowOrder": "source row order, retained explicitly for ordered selection consumers",
                 "entries": (
                     "every row of the table, keyed by the field a consumer "
                     "looks it up by; the source carries no ordering the "

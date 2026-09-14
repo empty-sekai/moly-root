@@ -1,4 +1,4 @@
-"""Dialogue camera assets: the two MonoBehaviour classes a talk camera reads.
+"""Camera assets and the field presenter's exact view/configuration bindings.
 
 Cut-scene and dialogue camera movement is driven by two scriptable assets.
 :class:`CameraParam` is a ``ScriptableObject`` that carries **seven serialised
@@ -30,6 +30,12 @@ name substring.  A package can hold more than one ``CameraParam`` or
 ``CameraSetting``, so every instance is exported, and the container path it was
 reached from is recorded next to it so a reader can tell which one is which.
 
+``FieldCamera`` components additionally export the Camera their ``_view`` points
+at, including its authored clipping planes, and identities for the exact
+``_setting`` and ``_cameraParam`` assets.  Those identities include the serialized
+file and signed path id, so consumers do not guess a binding from array order.
+Referenced assets in declared dependency packages use the same pointer resolver.
+
 Every "field complete" judgement is made per instance and reported per instance.
 A curve that is part of the stub table but absent from a typetree, or a
 curve-shaped field in a typetree that is absent from the stub table, is listed
@@ -51,6 +57,7 @@ configure_fallback_unity_version()
 
 CAMERA_PARAM_CLASS = "CameraParam"
 CAMERA_SETTING_CLASS = "CameraSetting"
+FIELD_CAMERA_CLASS = "FieldCamera"
 
 CINEMACHINE_CLASSES = (
     "CinemachineVirtualCamera",
@@ -172,6 +179,70 @@ def _container_map(store, package):
     return result
 
 
+def _asset_identity(record, path_id):
+    """Signed path ids need their serialized-file identity, not an array index."""
+    return {"file": record.archive, "pathId": str(path_id)}
+
+
+def _script_class(store, record, path_id):
+    """Resolve the script PPtr too; a component's script may live in another file."""
+    pointer = record.tree(path_id).get("m_Script")
+    target = store.follow(record, pointer)
+    if target is None:
+        return ""
+    script_file, script_id = target
+    if script_file.kinds[script_id] != "MonoScript":
+        raise ValueError("camera component script reference is not a MonoScript")
+    return str(script_file.tree(script_id).get("m_ClassName", ""))
+
+
+def _required_target(store, record, tree, field, kind, script_class=None):
+    target = store.follow(record, tree.get(field))
+    if target is None:
+        raise ValueError(f"field camera reference is unresolved: {field}")
+    target_file, target_id = target
+    if target_file.kinds[target_id] != kind:
+        raise ValueError(f"field camera reference {field} is not {kind}")
+    if script_class is not None and _script_class(store, target_file, target_id) != script_class:
+        raise ValueError(f"field camera reference {field} is not {script_class}")
+    return target
+
+
+def _field_camera_entry(store, record, path_id, path):
+    """The live presenter identifies its view and settings through three PPtrs."""
+    tree = record.tree(path_id)
+    view_file, view_id = _required_target(store, record, tree, "_view", "Camera")
+    setting = _required_target(store, record, tree, "_setting", "MonoBehaviour", CAMERA_SETTING_CLASS)
+    param = _required_target(store, record, tree, "_cameraParam", "MonoBehaviour", CAMERA_PARAM_CLASS)
+    game_object = _required_target(store, record, tree, "m_GameObject", "GameObject")
+    view = view_file.tree(view_id)
+
+    def scalar(field):
+        value = view.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"field camera view has no finite {field}")
+        return float(value)
+
+    orthographic = view.get("orthographic")
+    if orthographic not in (False, True, 0, 1):
+        raise ValueError("field camera view has no orthographic mode")
+    return {
+        "class": FIELD_CAMERA_CLASS,
+        "asset": _asset_identity(record, path_id),
+        "gameObject": _asset_identity(*game_object),
+        "container": path,
+        "view": {
+            "asset": _asset_identity(view_file, view_id),
+            "nearClipPlane": scalar("near clip plane"),
+            "farClipPlane": scalar("far clip plane"),
+            "fieldOfView": scalar("field of view"),
+            "orthographic": bool(orthographic),
+        },
+        "setting": _asset_identity(*setting),
+        "cameraParam": _asset_identity(*param),
+    }, (setting, param)
+
+
 def _camera_param_entry(record, path_id, path, counts):
     """One CameraParam instance: its seven curves, and the field completeness
     check that says whether any of them is missing or went unexported."""
@@ -197,6 +268,7 @@ def _camera_param_entry(record, path_id, path, counts):
 
     return {
         "class": CAMERA_PARAM_CLASS,
+        "asset": _asset_identity(record, path_id),
         "name": tree.get("m_Name", ""),
         "container": path,
         "curves": curves,
@@ -211,7 +283,7 @@ def _camera_param_entry(record, path_id, path, counts):
     }
 
 
-def _camera_setting_entry(tree, path, counts):
+def _camera_setting_entry(record, path_id, path, counts):
     """One CameraSetting instance: its stored numeric parameters.
 
     ``distance`` is called out separately because it is the one field the
@@ -220,6 +292,7 @@ def _camera_setting_entry(tree, path, counts):
     ``counts["distance"]`` so the caller can see the actual distances at a
     glance.
     """
+    tree = record.tree(path_id)
     data_fields = [field for field in tree if not field.startswith("m_")]
     fields = {field: tree.get(field) for field in data_fields}
     distance_present = "distance" in tree
@@ -230,6 +303,7 @@ def _camera_setting_entry(tree, path, counts):
         counts["distanceMissing"] += 1
     return {
         "class": CAMERA_SETTING_CLASS,
+        "asset": _asset_identity(record, path_id),
         "name": tree.get("m_Name", ""),
         "container": path,
         "fields": fields,
@@ -287,11 +361,11 @@ def _cinemachine_entry(record, path_id, path, class_name, counts):
 def _walk_package(store, name, out):
     """One package: camera assets and timeline-owned Cinemachine instances."""
     package = store.package(name)
-    document = {"package": name, "cameraParams": [], "cameraSettings": []}
+    document = {"package": name, "cameraParams": [], "cameraSettings": [], "fieldCameras": []}
     for output in CINEMACHINE_OUTPUTS.values():
         document[output] = []
     counts = {"package": name, "missing": False, "packageObjects": 0,
-              "cameraParam": 0, "cameraSetting": 0, "keyframes": {},
+              "cameraParam": 0, "cameraSetting": 0, "fieldCamera": 0, "keyframes": {},
               "emptyCurves": 0, "distance": [], "distanceMissing": 0,
               "fieldIssues": [], "readButNotExported": 0,
               "cinemachine": {
@@ -302,26 +376,55 @@ def _walk_package(store, name, out):
                   for field, reason in CINEMACHINE_EDITOR_FIELDS.items()}}
 
     container = _container_map(store, package)
+    exported_assets = set()
+    linked_assets = []
     for record in package.files:
         counts["packageObjects"] += len(record.kinds)
         for path_id, kind in record.kinds.items():
             if kind != "MonoBehaviour":
                 continue
-            cls = record.script_of(path_id)
+            cls = _script_class(store, record, path_id)
             path = container.get((record, path_id), "")
             if cls == CAMERA_PARAM_CLASS:
                 counts["cameraParam"] += 1
                 document["cameraParams"].append(
                     _camera_param_entry(record, path_id, path, counts))
+                exported_assets.add((record.archive, path_id))
             elif cls == CAMERA_SETTING_CLASS:
                 counts["cameraSetting"] += 1
                 document["cameraSettings"].append(
-                    _camera_setting_entry(record.tree(path_id), path, counts))
+                    _camera_setting_entry(record, path_id, path, counts))
+                exported_assets.add((record.archive, path_id))
+            elif cls == FIELD_CAMERA_CLASS:
+                entry, references = _field_camera_entry(store, record, path_id, path)
+                if not entry["container"]:
+                    owner = store.follow(record, record.tree(path_id)["m_GameObject"])
+                    entry["container"] = container.get(owner, "")
+                counts["fieldCamera"] += 1
+                document["fieldCameras"].append(entry)
+                linked_assets.extend(references)
             elif cls in CINEMACHINE_OUTPUTS:
                 document[CINEMACHINE_OUTPUTS[cls]].append(
                     _cinemachine_entry(record, path_id, path, cls, counts))
 
-    if (document["cameraParams"] or document["cameraSettings"] or
+    # Preserve the existing instance arrays while making external linked assets
+    # available in the same document. A consumer joins identities, never [0].
+    for record, path_id in linked_assets:
+        key = (record.archive, path_id)
+        if key in exported_assets:
+            continue
+        cls = _script_class(store, record, path_id)
+        linked_container = _container_map(store, store.package(record.bundle))
+        path = linked_container.get((record, path_id), "")
+        if cls == CAMERA_SETTING_CLASS:
+            document["cameraSettings"].append(_camera_setting_entry(record, path_id, path, counts))
+            counts["cameraSetting"] += 1
+        else:
+            document["cameraParams"].append(_camera_param_entry(record, path_id, path, counts))
+            counts["cameraParam"] += 1
+        exported_assets.add(key)
+
+    if (document["cameraParams"] or document["cameraSettings"] or document["fieldCameras"] or
             any(document[output] for output in CINEMACHINE_OUTPUTS.values())):
         write_json(out / f"{name}.json", document)
     return counts
@@ -346,6 +449,7 @@ def read_camera_assets(bundles, out_dir, bundle_root=None):
     by_name = {os.path.basename(str(path)): str(path) for path in bundles}
     names = sorted(by_name)
     store = PackageStore(bundles, bundle_root)
+    store.load_dependencies([name for name in names if os.path.exists(by_name[name])])
     records = []
     for name in names:
         if not os.path.exists(by_name[name]):

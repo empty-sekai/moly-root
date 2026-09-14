@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .assets.manifest import parse_manifest
 from .assets.router import route
+from .master import record_master_inputs
 
 # Furniture geometry is the one pass whose output is measured in gigabytes: one
 # ``.glb`` per package over the whole ``mysekai__fixture__`` family.  Making it
@@ -97,6 +98,10 @@ DERIVED_PASS_COVERAGE = {
         "fixture-interface": {"AnimationClip"},
         "fixture-timeline": {"AnimationClip"},
         "cutscene-timeline": {"AnimationClip"},
+    },
+    "fixture-gimmick/gimmicks.json": {
+        "fixture-interface": {"Animator", "AnimatorController",
+                              "AnimatorOverrideController", "AnimationClip"},
     },
 }
 
@@ -229,6 +234,7 @@ FIXED_ARTIFACT_PATHS = (
     "fixture-interface/areas.json",
     "fixture-models/",
     "fixture-particles/index.json",
+    "fixture-gimmick/gimmicks.json",
     "fixture-talks/talks.json",
     "cutscene-timeline/tracks/",
     "cutscene-timeline/clips/",
@@ -586,6 +592,7 @@ def write_pack_manifest(out):
     return path
 
 
+@record_master_inputs
 def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                      player_data=None,
                      fixture_meshes=False,
@@ -616,6 +623,12 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
     lives there and in no downloadable package, so it is not a routed domain at
     all; without the path its artifact is likewise reported as skipped with the
     reason, never left out.
+
+    Furniture controller/event metadata is always written for the routed
+    furniture packages in this run, using the same opened PackageStore as
+    the interface pass. No placement list or independent package discovery
+    is used. Unsupported controllers and unresolved bindings stay in that
+    metadata and are counted separately from extraction failures.
 
     *fixture_meshes* asks for the furniture geometry pass, which writes one glTF
     binary per package of the whole fixture family into ``fixture-models/``.  It
@@ -815,6 +828,8 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
     fixture_mesh_error = None
     fixture_particle_result = None
     fixture_particle_error = None
+    fixture_gimmick_result = None
+    fixture_gimmick_error = None
     if fixture_paths:
         try:
             from core.assets.packages import PackageStore
@@ -826,7 +841,22 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 store, master, str(out / "fixture-interface"))
         except Exception as exc:
             fixture_error = f"{type(exc).__name__}: {exc}"
-        # Geometry is the third read of this same package family, and it reads
+        # Controller metadata is another view of these same source packages,
+        # not an opt-in geometry job or a consumer-specific on/off whitelist.
+        # Pass only the manifest/discovery selection, not dependency packages
+        # the shared store may have opened while resolving references.
+        try:
+            from core.assets.packages import PackageStore
+            from fixtures.gimmick import extract as extract_gimmicks
+            if fixture_store is None:
+                fixture_store = PackageStore(
+                    [str(path) for path in fixture_paths.values()], root=bundles)
+            fixture_gimmick_result = extract_gimmicks(
+                fixture_store, list(fixture_paths),
+                out / "fixture-gimmick" / "gimmicks.json")
+        except Exception as exc:
+            fixture_gimmick_error = f"{type(exc).__name__}: {exc}"
+        # Geometry is a separate read of this same package family, and it reads
         # the same opened store: the attach points, the placement grid and the
         # meshes are three views of one prefab tree, so re-opening the bundles
         # would be paying the load cost twice for the same objects.  It is a
@@ -1318,6 +1348,37 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             "status": particle_status,
             "counts": particle_counts,
             "error": particle_error})
+    if fixture_paths or fixture_errors:
+        gimmick_packages = (fixture_gimmick_result or {}).get("packages", [])
+        unresolved_controllers = [
+            {"package": package["name"], "source": controller.get("source"),
+             "status": controller.get("status"),
+             "motionMapping": (controller.get("motionMapping") or {}).get("status")}
+            for package in gimmick_packages
+            for controller in package.get("controllers", [])
+            if controller.get("status") != "decoded"
+            or (controller.get("motionMapping") or {}).get("status") != "resolved"]
+        gimmick_error = fixture_gimmick_error or (
+            "; ".join(f"{name}: {error}" for name, error in sorted(fixture_errors.items()))
+            if fixture_errors else
+            "controller pass returned no catalog" if fixture_gimmick_result is None else "")
+        report["derived"].append({
+            "artifact": "fixture-gimmick/gimmicks.json",
+            "domain": "fixture-interface",
+            "status": "failed" if gimmick_error else "succeeded",
+            "counts": {
+                "requestedPackages": len(fixture_paths) + len(fixture_errors),
+                "packages": len(gimmick_packages),
+                "controllers": sum(p["coverage"]["controllerCount"] for p in gimmick_packages),
+                "clips": sum(p["coverage"]["clipCount"] for p in gimmick_packages),
+                "events": sum(p["coverage"]["eventCount"] for p in gimmick_packages),
+                "decodedCurveSlots": sum(p["coverage"]["decodedCurveSlots"] for p in gimmick_packages),
+                "unresolvedCurveSlots": sum(p["coverage"]["unresolvedCurveSlots"] for p in gimmick_packages),
+                "unresolvedControllers": len(unresolved_controllers)},
+            "packageCoverage": {p["name"]: p["coverage"] for p in gimmick_packages},
+            "unresolvedControllers": unresolved_controllers,
+            "missingDependencies": sorted(fixture_errors),
+            "error": gimmick_error})
     if fixture_talks_asked:
         report["derived"].append({
             "artifact": "fixture-talks/talks.json",

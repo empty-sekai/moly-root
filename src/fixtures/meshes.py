@@ -63,6 +63,8 @@ from core.mesh import (FLOAT, UNSIGNED_INT, ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER,
                        TRIANGLES, NOT_TRIANGLES, INDEX_RANGE, compose_mesh,
                        skin_accessors)
 from fixtures.animations import embed
+from sites.geometry import Graph
+from sites.source_nodes import identity as source_identity
 
 configure_fallback_unity_version()
 
@@ -538,6 +540,10 @@ def _walk(glb, record, store, tpid, parent, ctx, prefix="", fence_scope=False):
     node = {"name": name, "translation": translation,
             "rotation": rotation, "scale": scale,
             "extras": {"sourcePathId": tpid, "gameObjectId": goid}}
+    # Reuse the scene importer's exact object/component identity contract.
+    # Legacy numeric extras remain for existing consumers; runtime animation
+    # binding uses the lossless serialized-file + signed string identities.
+    node["extras"].update(source_identity(record, ctx["source_graph"], tpid))
     if goid in ctx["roadCells"]:
         node["extras"]["roadCellType"] = ctx["roadCells"][goid]
     fence_scope = fence_scope or goid in ctx["fenceRoots"]
@@ -869,6 +875,7 @@ def _export_package(store, name, out_dir):
         if not record.kinds:
             continue
         transforms, gameobjects, roots = _graph(record)
+        ctx["source_graph"] = Graph(record)
         ctx["transforms"] = transforms
         ctx["gameobjects"] = gameobjects
         ctx["fenceRoots"], ctx["fenceParts"] = _fence_views(record)
@@ -914,6 +921,25 @@ def _export_package(store, name, out_dir):
         glb.g["scenes"] = [{"nodes": []}]
         default = 0
     glb.g["scene"] = default
+    from .house_views import read as read_house_views
+    house_views = read_house_views(store, package)
+    if house_views["views"]:
+        glb.g.setdefault("extras", {})["houseViews"] = house_views
+        owners = {(view["gameObject"]["file"], view["gameObject"]["pathId"])
+                  for view in house_views["views"]}
+        house_scenes = []
+        for scene_index, variant in enumerate(variants):
+            pending = [variant["rootNode"]]
+            while pending:
+                node = glb.g["nodes"][pending.pop()]
+                source = node.get("extras", {}).get("sourceObject", {})
+                if (source.get("file"), source.get("gameObjectId")) in owners:
+                    house_scenes.append(scene_index)
+                    break
+                pending.extend(node.get("children", []))
+        if len(house_scenes) != 1:
+            raise ValueError("HouseView must resolve to one exported prefab scene")
+        glb.g["scene"] = house_scenes[0]
     path = out_dir / f"{name}.glb"
     try:
         glb.save(path)
@@ -944,6 +970,7 @@ def _export_package(store, name, out_dir):
         "jointCount": report["jointCount"],
         "animations": dict(animations, clips=report["animations"]),
         "hasFixtureView": bool(ctx["fixtureView"]),
+        "houseViews": house_views,
         "nodeNames": sorted(report["nodeNames"]),
         "anomalies": report["anomalies"],
     }

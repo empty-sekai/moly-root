@@ -44,6 +44,7 @@ import UnityPy
 from core.unity import configure_fallback_unity_version
 
 from core.assets.packages import PackageStore
+from core.assets.identity import json_pointers, reference
 from core.jsonio import write_json
 
 configure_fallback_unity_version()
@@ -214,6 +215,9 @@ class _Walker:
         ref, name = self._asset_ref(record, clip.get("m_Asset"))
         exported["assetRef"] = ref
         exported["assetName"] = name
+        # Equal payloads may be different Unity objects (notably Control clips).
+        # The occurrence retains its own identity while assets[] stays shared.
+        exported["playableAsset"] = reference(self.store, record, clip.get("m_Asset"))
 
         self.double_checked += 1
         for field in DOUBLE_CHECK_FIELDS:
@@ -238,6 +242,7 @@ class _Walker:
                  for clip in tree.get("m_Clips") or []]
         track = {
             "class": record.script_of(path_id),
+            "asset": {"file": record.archive, "pathId": str(path_id)},
             "name": tree.get("m_Name", ""),
             "pathId": str(path_id),
             LEGACY_ANIMCLIP: tree.get(LEGACY_ANIMCLIP),
@@ -286,7 +291,9 @@ def _walk_package(store, name, out):
     anim = [t for t in tracks if t["class"] == ANIMATION_TRACK_CLASS]
     counts = _counts(tracks, anim, walker, marker_classes)
     if document["tracks"] or document["unread"] or document["assets"]:
-        write_json(out / f"{name}.json", document)
+        # Counts and PackageStore still read source integer pointers. Only the
+        # detached serialization copy changes PPtr IDs for JSON/JS consumers.
+        write_json(out / f"{name}.json", json_pointers(document))
     return counts
 
 

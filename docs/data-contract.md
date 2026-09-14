@@ -701,6 +701,26 @@ glb 里的 glTF 材质是**预览近似**，不是翻译，每个取值都来自
 
 贴图数组（`Texture2DArray`）逐层导出，单列在材质的 `textureArrays` 里而不混进 `textures`：它要用层坐标采样，混在一起消费方会把两者搞错。
 
+### 房屋门的显式引用
+
+`fixture-gimmick/gimmicks.json` 的每个包新增 `houseViews`，内含 `views` 与
+`transforms`。这是 HouseView 的序列化引用，不是普通 FixtureView 的 attach slot。
+每个 view 保留 `asset`、`gameObject`、`animator`、`insideDoorActionPoint` 与
+`outsideDoorActionPoint` 的完整身份（`file` + 十进制字符串 `pathId`）；源 null
+与非空 unresolved 引用分开保存。
+
+`transforms` 保留两个动作点及其祖先的父引用、原局部位置/旋转/缩放。消费时连接
+当前房屋实例，不把局部坐标当共用世界坐标。`animator` 身份连接同包现有
+`animators` 表，继续使用既有 controller clipTable、曲线和完整动画事件，
+不增加第二个控制器解析器，不按名字猜 clip。运行时 AttachComponents、
+Trigger/Play、声音资格与门生命周期仍由消费者实现，不由此序列化视图模拟。
+
+房屋 GLB 另带 `extras.houseViews`，默认 scene 选择确切包含 HouseView 的 prefab，
+不选无关 FBX 根。动画 extras 保留 `sourceClip`、`sourceEvents`。房间包 root 的
+`animators` 保留原 controller slot → 动画索引及 scene/node 作用域；动画 extras
+同时记录源 Animator 与 scene。空 idle 保留时长，`animation: null`。前墙的
+`roomDoorAnchors` 按原遍历顺序列出挂点身份；实际墙实例选择与显隐仍由消费者负责。
+
 ### Timeline 是空插槽，不是「不支持」
 
 站点外壳（`site/root` 与 `site/environment/common`）各带一个 `PlayableDirector`，**`m_PlayableAsset` 为空**。产物把它记成 `timelineSockets` 里的一条空插槽，并写出**谁来填**：运行时按现象从 `EnvironmentLoadData.PlayableAsset` 经 `SiteEnvironmentViewController._playableDirector` 赋值。写「不支持的时间轴」是错的记法——会让消费方去找一个本来就不存在的资产。另外八个 director **是绑好的**（`festivalgarden` 五个、三个物件包各一个），`bound: true` 并给出资产名。
