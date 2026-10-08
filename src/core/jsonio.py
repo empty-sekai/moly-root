@@ -53,7 +53,7 @@ def normalize(document):
 def dumps(document, indent=1):
     """*document* as JSON text, non-finite numbers spelled out."""
     return json.dumps(normalize(document), ensure_ascii=False, indent=indent,
-                      allow_nan=False)
+                      sort_keys=True, allow_nan=False)
 
 
 def write_json(path, document, indent=1):

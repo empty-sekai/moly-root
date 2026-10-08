@@ -13,12 +13,20 @@ action button, and no other source carries them:
 - ``gridSize`` -- the footprint, which sets the half extents of the fixture
   collision box the proximity test runs against.
 
+``mysekaiFixturePutSoundId`` names the row of ``mysekaiFixturePutSounds`` whose
+``assetbundleName`` is the cue a decided placement of this fixture plays, next
+to the placement effect; it is kept as the integer id and the small table is
+exported on its own (``mysekai-fixture-put-sounds.json``), so this slice holds no
+cue names of its own.
+
 ``assetbundleName`` is kept as the join key: the runtime addresses fixture
 models by package name, which is this value behind a fixed prefix.
 
 The whole table is 952 rows and most columns are inventory presentation, so
-this writes the slice rather than a copy.  Adding a column here is cheaper
-than teaching the runtime to read a table it does not need.
+this writes the slice rather than a copy. Display names and descriptions are
+preserved for the content library: they come from master, never from guessing
+asset-name tokens. Missing optional display fields remain null. Adding a
+column here is cheaper than teaching the runtime to read an unrelated table.
 """
 from __future__ import annotations
 
@@ -40,6 +48,7 @@ _COLUMNS = (
     "mysekaiFixturePutType",
     "mysekaiFixtureHandleType",
     "gridSize",
+    "mysekaiFixturePutSoundId",
 )
 
 # Values as they are spelled in the table, with the integers the client
@@ -76,12 +85,18 @@ def export_fixture_master_slice(
         missing = [column for column in _COLUMNS if column not in row]
         if missing:
             raise ValueError(f"row id={row.get('id')!r} lacks {missing}")
+        for field in ("name", "flavorText"):
+            if row.get(field) is not None and not isinstance(row[field], str):
+                raise ValueError(f"row id={row['id']!r}: {field} must be text or null")
         action = row["mysekaiFixturePlayerActionType"]
         if action not in _ACTION_TYPES:
             raise ValueError(f"row id={row['id']!r}: unknown player action type {action!r}")
         kind = row["mysekaiFixtureType"]
         if kind not in _FIXTURE_TYPES:
             raise ValueError(f"row id={row['id']!r}: unknown fixture type {kind!r}")
+        put_sound = row["mysekaiFixturePutSoundId"]
+        if type(put_sound) is not int:
+            raise ValueError(f"row id={row['id']!r}: put sound id must be an integer")
         grid = row["gridSize"]
         for axis in ("width", "depth", "height"):
             if axis not in grid:
@@ -90,6 +105,8 @@ def export_fixture_master_slice(
             {
                 "id": int(row["id"]),
                 "assetbundleName": str(row["assetbundleName"]),
+                "name": row.get("name"),
+                "description": row.get("flavorText"),
                 "fixtureType": kind,
                 "fixtureTypeValue": _FIXTURE_TYPES[kind],
                 "playerActionType": action,
@@ -99,6 +116,7 @@ def export_fixture_master_slice(
                 "gridWidth": int(grid["width"]),
                 "gridDepth": int(grid["depth"]),
                 "gridHeight": int(grid["height"]),
+                "putSoundId": put_sound,
             }
         )
     out.sort(key=lambda record: record["id"])

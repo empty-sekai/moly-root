@@ -5,8 +5,7 @@ sit on, stand at or interact with carries a ``FixtureView`` behaviour whose
 ``_attachPoints`` array names the pairs: a start position, an end position, and for
 each of them a game object named ``loc_startNNN`` / ``loc_endNNN`` (a zero-padded
 three-digit code, with an optional ``_NN`` suffix).  This module extracts those
-pairs — the code, and the local transform of each of the two objects — and nothing
-else about the package.
+pairs, the view's placement identity and its exact collision reference.
 
 The extractor reads only what the pairs say.  When a pair does not behave like the
 pattern — a code mismatch, a suffix mismatch, a start pointing at an object named
@@ -20,6 +19,7 @@ from pathlib import Path
 
 import UnityPy
 from core.unity import configure_fallback_unity_version
+from core.gltf import COORDINATE_SPACE, reflect_position, reflect_quaternion
 
 from core.assets.packages import PackageStore
 from core.jsonio import write_json
@@ -47,13 +47,16 @@ SEMANTICS = {
     "views": ("every actual FixtureView component and its owning GameObject/Transform "
               "source identities, including views whose attach array is empty; "
               "a prefab variant containing a view is not necessarily that view's node"),
+    "collider": ("the FixtureView's serialized MeshCollider reference, including an explicit "
+                 "null; other colliders in the prefab do not replace that reference"),
     "pairs": ("every `_attachPoints` entry of every `FixtureView` behaviour is one pair. "
               "A pair whose objects do not match the `loc_start`/`loc_end` pattern is "
               "still a pair; it is additionally listed in `anomalies`"),
     "ids": ("the three-digit code of a pair, as authored (`id`) and as an integer "
             "without the zero padding (`idValue`)"),
-    "transforms": ("each side's local position, rotation (quaternion) and scale as "
-                   "authored on its transform, rounded to six decimals"),
+    "transforms": ("each side's local position and quaternion in "
+                   "moly-rh-y-up-reflect-x-v1, without rounding; scale unchanged; "
+                   "sourceTransform preserves tagged authored Unity values"),
     "anomalies": ("authored facts that do not fit the pattern: a self-reference (both "
                   "ends name the same object), a start whose object is named "
                   "`loc_end…`, a code or suffix mismatch, an unresolved pointer, and "
@@ -68,7 +71,7 @@ SEMANTICS = {
 
 
 def _vector(tree, keys, channels):
-    """One rounded vector, with negative-zero written as zero."""
+    """One source vector without rounding, with negative-zero written as zero."""
     source = next((tree.get(key) for key in keys if tree.get(key)), {}) or {}
     out = [float(source.get(channel, 0.0) or 0.0) for channel in channels]
     return [value if value else 0.0 for value in out]
@@ -95,11 +98,21 @@ def _side(record, path_id):
         side["transform"] = None
         side["reason"] = NO_TRANSFORM
         return side
+    source_position = _vector(transform, START_KEYS, "xyz")
+    source_rotation = _vector(transform, ROTATION_KEYS, "xyzw")
+    source_scale = _vector(transform, SCALE_KEYS, "xyz")
+    side["sourceTransform"] = {
+        "coordinateSpace": "unity-lh-y-up-authored",
+        "position": source_position,
+        "rotation": source_rotation,
+        "scale": source_scale,
+    }
     side["transform"] = {
-        "position": _vector(transform, START_KEYS, "xyz"),
-        "rotation": _vector(transform, ROTATION_KEYS, "xyzw"),
-        "scale": _vector(transform, SCALE_KEYS, "xyz"),
+        "position": reflect_position(source_position),
+        "rotation": reflect_quaternion(source_rotation),
+        "scale": source_scale,
         "kind": _kind,
+        "coordinateSpace": COORDINATE_SPACE,
     }
     return side
 
@@ -166,6 +179,26 @@ def _pair(store, record, entry):
     return pair, (start, end)
 
 
+def _view_collider(store, record, tree):
+    pointer = tree.get("_collider")
+    if not isinstance(pointer, dict) or "m_PathID" not in pointer or "m_FileID" not in pointer:
+        raise ValueError("FixtureView lacks its serialized collider reference")
+    path_id = int(pointer["m_PathID"])
+    result = {"pointer": {"fileId": int(pointer["m_FileID"]), "pathId": str(path_id)},
+              "source": None, "status": "null"}
+    if path_id == 0:
+        return result
+    target = store.follow(record, pointer)
+    if target is None:
+        raise ValueError("FixtureView collider reference is non-null but unresolved")
+    owner, object_id = target
+    if owner.kinds.get(object_id) != "MeshCollider":
+        raise ValueError("FixtureView collider reference does not name a MeshCollider")
+    result.update({"status": "resolved",
+                   "source": {"file": owner.archive, "pathId": str(object_id), "kind": "MeshCollider"}})
+    return result
+
+
 def _view_identity(store, record, path_id, tree):
     def identity(target):
         if target is None:
@@ -184,8 +217,20 @@ def _view_identity(store, record, path_id, tree):
                 if transform is not None:
                     raise ValueError("FixtureView GameObject has multiple transforms")
                 transform = target
-    return {"component": identity((record, path_id)),
-            "gameObject": identity(game_object), "transform": identity(transform)}
+    result = {"component": identity((record, path_id)),
+              "gameObject": identity(game_object), "transform": identity(transform),
+              "collider": _view_collider(store, record, tree)}
+    if transform is not None:
+        owner, object_id = transform
+        transform_tree = owner.tree(object_id)
+        result.update({
+            "coordinateContract": COORDINATE_SPACE,
+            "localScale": _vector(transform_tree, SCALE_KEYS, "xyz"),
+            "sourceLocalScale": {"coordinateSpace": "unity-lh-y-up-authored",
+                                 "value": _vector(transform_tree, SCALE_KEYS, "xyz")},
+            "placementRoot": not bool((transform_tree.get("m_Father") or {}).get("m_PathID", 0)),
+        })
+    return result
 
 
 def _unreferenced(records, referenced):
@@ -257,6 +302,7 @@ def extract_from_store(store, out_dir, master=None):
                               "anomalies": [{"type": "bundle-not-found",
                                              "detail": MISSING_BUNDLE}]}
             continue
+        store.load_dependencies([name])
         package = store.package(name)
         if package is None:
             packages[name] = {"hasFixtureView": False, "entries": [],
@@ -344,7 +390,10 @@ def extract_from_store(store, out_dir, master=None):
             "anomalies": len(package["anomalies"]),
         }
     document = {
-        "version": 1,
+        "version": 2,
+        "coordinateContract": COORDINATE_SPACE,
+        "coordinateUnits": "source-unity-unit",
+        "uvConvention": "unity-bottom-left",
         "semantics": SEMANTICS,
         "summary": summary,
         "packages": packages,

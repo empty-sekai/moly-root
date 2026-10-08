@@ -82,3 +82,79 @@ def export_fixture_thumbnails(bundle, master_json, out_dir, *, fixture_ids):
               "fixtures": fixtures}
     write_json(out / "fixture-thumbnails.json", result)
     return result
+
+
+def export_fixture_thumbnail_packages(bundles, masters, out_dir):
+    """Export exact per-texture JP fixture packages without guessing absent routes."""
+    paths = [Path(value) for value in bundles]
+    require_paths(paths)
+    rows = masters.get("fixtures", masters) if isinstance(masters, dict) else masters
+    if not isinstance(rows, list):
+        raise ValueError("fixture thumbnail master input must be a row list")
+    UnityPy.config.FALLBACK_UNITY_VERSION = DEFAULT_UNITY_VERSION
+    store = PackageStore(paths)
+    texture_objects = {}
+    sources = []
+    for path in paths:
+        package = store.package(path.name)
+        if package is None:
+            raise ValueError(f"fixture thumbnail package could not be loaded: {path}")
+        sources.append({"bundle": path.name.replace("__", "/"),
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        for file in package.files:
+            for path_id, kind in file.kinds.items():
+                if kind != "Texture2D":
+                    continue
+                obj = file.objects[path_id]
+                name = str(file.tree(path_id)["m_Name"])
+                if name in texture_objects:
+                    raise ValueError(f"duplicate Texture2D name in fixture thumbnails: {name}")
+                texture_objects[name] = (file, obj)
+
+    out = Path(out_dir)
+    (out / "textures").mkdir(parents=True, exist_ok=True)
+    fixtures = []
+    matched_names = set()
+    for row in sorted(rows, key=lambda value: int(value["id"])):
+        fixture_id, asset = int(row["id"]), row["assetbundleName"]
+        normal = re.compile(re.escape(asset) + r"_(\d+)$")
+        specific = re.compile(re.escape(asset) + rf"_{fixture_id}_(\d+)$")
+        candidates = []
+        for name, pair in texture_objects.items():
+            match = specific.fullmatch(name)
+            if match is None and row.get("fixtureType") not in ("plant", "house_plant"):
+                match = normal.fullmatch(name)
+            if match is not None:
+                candidates.append((int(match[1]), name, pair))
+        variants = []
+        for texture_id, name, (file, obj) in sorted(candidates):
+            texture = obj.read(); image = texture.image
+            relative = f"textures/{name}.png"; target = out / relative
+            image.save(target, format="PNG"); matched_names.add(name)
+            variants.append({"textureId": texture_id, "name": name, "image": relative,
+                             "width": texture.m_Width, "height": texture.m_Height,
+                             "decodedSize": [image.width, image.height],
+                             "serializedFile": file.archive, "pathId": obj.path_id,
+                             "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
+        if variants:
+            fixtures.append({"fixtureId": fixture_id, "assetbundleName": asset,
+                             "fixtureType": row.get("fixtureType"), "variants": variants})
+    unused = sorted(set(texture_objects) - matched_names)
+    result = {
+        "version": 2,
+        "region": masters.get("region") if isinstance(masters, dict) else "jp",
+        "gameVersion": masters.get("gameVersion") if isinstance(masters, dict) else None,
+        "unityVersion": DEFAULT_UNITY_VERSION,
+        "source": {"bundles": sources,
+                   "nameFormats": ["{assetbundleName}_{textureId}",
+                                   "{assetbundleName}_{fixtureId}_{textureId}"],
+                   "route": "exact per-texture fixture thumbnail packages"},
+        "fixtures": fixtures,
+        "coverage": {"masterDefinitions": len(rows), "exportedFixtures": len(fixtures),
+                     "exportedVariants": sum(len(row["variants"]) for row in fixtures),
+                     "unusedSourceTextures": unused,
+                     "missingFixtureIds": sorted(set(int(row["id"]) for row in rows)
+                                                 - set(row["fixtureId"] for row in fixtures))},
+    }
+    write_json(out / "fixture-thumbnails.json", result)
+    return result

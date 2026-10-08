@@ -44,7 +44,10 @@ def write_bytes(path, data, *, mode=None):
 
 
 def json_bytes(document):
-    return (json.dumps(document, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    # JSON object insertion order is not a source fact. Preserve array order,
+    # but make artifacts independent of dictionary assembly/traversal order.
+    return (json.dumps(document, ensure_ascii=False, sort_keys=True,
+                       indent=2, allow_nan=False) + "\n").encode("utf-8")
 
 
 def write_json(path, document, *, mode=None):

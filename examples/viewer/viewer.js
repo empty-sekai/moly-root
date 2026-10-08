@@ -1,3 +1,4 @@
+import { frameHeadPortrait, PORTRAIT_LIGHT } from './portrait.js';
 // viewer.js — character viewer orchestration
 // Public inputs: manifest.json, sd_<unit>.glb, sd_<unit>.rig.json, and facial-tables.json.
 // Optional sidecars are reported and the viewer uses documented local fallbacks where possible.
@@ -28,6 +29,7 @@ const shaderErrors = [];
 
 const params = new URLSearchParams(location.search);
 const BASE = params.get('base') || '.';
+const PORTRAIT = params.get('portrait') === '1';
 // ---- 音频(现象层)----
 // 独立控制器:数据目录 + 播放(循环区间按产物秒值)。「播什么」全部按 index 的
 // bgms / siteSounds / siteBgms / siteSoundFallbacks 行路由,不从这里猜映射。
@@ -45,7 +47,7 @@ const $ = (id) => document.getElementById(id);
 const view = $('view'), hud = $('hud'), checkEl = $('selfcheck');
 
 // ---- renderer / scene ----
-const renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true, alpha: PORTRAIT });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.LinearSRGBColorSpace; // gamma 直通
 renderer.toneMapping = THREE.NoToneMapping;
@@ -60,7 +62,7 @@ let lastFrameInfo = { calls: 0, triangles: 0 };
 view.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x141312);   // 与 ui.css 的 --bg-stage 同值
+scene.background = PORTRAIT ? null : new THREE.Color(0x141312);   // 与 ui.css 的 --bg-stage 同值
 // 远平面要装得下天空网格:它是产物里那一个,离自己的原点最远约 660,而它每帧钉在相机脚下。
 const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 1000);
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -101,6 +103,12 @@ const _freeRight = new THREE.Vector3();
 const _freeMove = new THREE.Vector3();
 const grid = new THREE.GridHelper(4, 16, 0x2e2a23, 0x211f1a);
 scene.add(grid);
+if (PORTRAIT) {
+  grid.visible = false;
+  renderer.setClearColor(0x000000, 0);
+  renderer.setPixelRatio(2);
+  view.style.cssText = "position:fixed!important;left:0!important;top:0!important;width:512px!important;height:512px!important;z-index:9999";
+}
 scene.add(camera);   // 相机族环境粒子挂在相机下,相机必须在场景图里
 
 const loader = new GLTFLoader();
@@ -129,13 +137,15 @@ let tables = null;
 let manifest = null;
 let unitList = [];
 let current = null;            // { root, mats, overlay, mixer, cloth, facial, segctl, families, headAnchor, headOffset }
-let clothOn = true, playing = true, night = false, wire = false;
+// Freeze before any asynchronous sidecar load can yield to a render frame.
+// Otherwise cloth/blink state at capture time depends on disk and GPU timing.
+let clothOn = !PORTRAIT, playing = !PORTRAIT, night = false, wire = false;
 let perfDoc = null;                       // alone-actions.json(表演编排)
 let perfMode = 'faithful';                // faithful=按编排的时间门+概率;cycle=依次轮播(检查用)
 // 表演场景是主入口:点一个场景=完整播放一遍(动作×表情×气泡全配对),播完即停。
 // 「自动演出」(默认开)只管空闲时段:idle 时编排按策略自动选取下一个场景;
 // 手动点播的场景播放期间它不插手,播完后照常接续。
-let perfAuto = true;
+let perfAuto = !PORTRAIT;
 
 // ---- 角色名(可选数据:characters.json 的 name 字段) ----
 // 名字由提取器从主表写进 characters.json;这份文件缺行/缺字段/整份缺失时,
@@ -343,7 +353,7 @@ function applyFacialSelection() {
 // Contract semantics: showSeconds starts automatic hiding; hide plays end, then waits disposeDelaySeconds before disposal.
 let emoticons = null;                     // 注册表(缺 emoticons.json 时为 null,功能整块降级)
 let emoticonItems = [];                   // [{ name, viewKind }](UI 下拉与 probe 用)
-let emoticonAuto = true;                  // 编排里的 emoticon/hideEmoticon 步是否驱动气泡
+let emoticonAuto = !PORTRAIT;             // 编排里的 emoticon/hideEmoticon 步是否驱动气泡
 let selectedEmoticon = '';
 let emoticonErr = null;                   // 上次查表/构建失败原因(HUD 如实显示,不静默吞掉)
 let emoticonDelay = 1;                    // disposeDelaySeconds(json semantics,缺省 1s)
@@ -370,7 +380,7 @@ const emoticonReady = loadEmoticons(`${BASE}/emoticons/emoticons.json`).then((re
 let environment = null;
 let envOn = false;
 let envErr = null;
-let envWant = params.get('env');            // ?env=<NNN_name> 直达;?env=0 关环境层
+let envWant = PORTRAIT ? '0' : params.get('env');            // ?env=<NNN_name> 直达;?env=0 关环境层
 const envReady = (async () => {
   const env = new Environment({ scene, camera, renderer, base: BASE });
   const ok = await env.load();
@@ -994,7 +1004,7 @@ async function loadUnit(unit) {
     },
   });
   facial.setPatterns(eyeRow, lipRow);
-  facial.setBlinkEnabled($('bBlink').classList.contains('on'));
+  facial.setBlinkEnabled(!PORTRAIT && $('bBlink').classList.contains('on'));
 
   current = { unit, unitId, root, mats, overlay, mixer, cloth, facial, segctl, families, headAnchor, headOffset, clipByName, emoAnchor, emoAnchors, emoticon: null, emote: null, started: false };
   fillFacialSelects(unitId);      // 专属行只发当前角色;换角色时重排(加载完成前只发基础行)
@@ -1023,14 +1033,14 @@ async function loadUnit(unit) {
   app.dataInfo.rig = !!rig; app.dataInfo.rigChains = rig ? rig.chains.length : 0;
   app.dataInfo.extrasFound = [...extrasFound].slice(0, 8);
 
-  fitCamera(root);
+  if (!PORTRAIT) fitCamera(root);
   buildFamilyList(families);
 
   // 不自动播放:载入完停在绑定姿态,等用户点动作族(点行=整族 S→L,点小方块=单段)。
   // 这里只把「带 S+L 的探针族」记下来交给自检 —— 记下来 ≠ 播起来:currentFamily 保持 null,
   // 它的语义是「此刻有哪个族在跑」,静止时就该是空的。
   app.selfcheckFamily = families.find((f) => f.segs.S && f.segs.L) || null;
-  if (AUTO_PLAY && segctl) {
+  if (!PORTRAIT && AUTO_PLAY && segctl) {
     const pick = (PLAY_WANT && PLAY_WANT !== '1' && families.find((f) => f.base.includes(PLAY_WANT)))
       || app.selfcheckFamily || families.find((f) => f.segs.L) || families[0];
     if (pick) { perfAuto = false; startFamily(pick); }   // ?play= 播裸动作:自动演出不接管
@@ -1058,13 +1068,30 @@ async function loadUnit(unit) {
   }
   if (!(perfDoc && facial && segctl)) { buildScenarioList(null); syncPerfUI(); }
 
-  if (!checksRan) {
+  if (PORTRAIT) {
+    playing = false;
+    clothOn = false;
+    perfAuto = false;
+    emoticonAuto = false;
+    current.perf?.stopToIdle();
+    current.facial.setBlinkEnabled(false);
+    current.facial.update();
+    // The photograph is lit from the camera, not from a stage position: an
+    // off-axis key light darkens one side of every face, which reads as a
+    // lighting error the moment the heads are compared side by side.
+    $('rLightXZ').value = String(PORTRAIT_LIGHT.azimuthDegrees);
+    $('rLightY').value = String(PORTRAIT_LIGHT.elevationDegrees);
+    applyLight();
+    app.portrait = { unit: unitId, ...frameHeadPortrait({ root, camera, controls }) };
+  }
+
+  if (!checksRan && !PORTRAIT) {
     checksRan = true;
     applySabotage(app, SABOTAGE);
     runChecks(app, panel);
   }
   const emoWant = params.get('emoteitem');   // 直达单条气泡:检查或截图不用等编排掷到它
-  if (emoWant) playEmoticon(emoWant);
+  if (!PORTRAIT && emoWant) playEmoticon(emoWant);
   refreshHud(0);
   window.dispatchEvent(new CustomEvent('viewer:unit',
     { detail: { unit, name: label.code ? null : label.name, full: label.full } }));
@@ -1763,7 +1790,7 @@ let dbgFrame = 0;
 renderer.setAnimationLoop(() => {
   const dt = clock.getDelta();
   renderer.info.reset();   // 整帧统计:autoReset 关着,这里清一次(见 renderer 初始化处)
-  if (FREEZE !== null && current && current.mixer && !current._froze) {
+  if (!PORTRAIT && FREEZE !== null && current && current.mixer && !current._froze) {
     current.mixer.update(FREEZE);   // 推进到固定时刻
     playing = false;                // 之后冻结
     current._froze = true;

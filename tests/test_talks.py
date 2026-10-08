@@ -119,10 +119,32 @@ def test_parse_script_resolves_constants_and_zero_speed():
     assert steps[3]["pattern"] == "eye-normal"
     assert steps[4]["pattern"] == "mouth-smile"
     assert steps[5]["motion"] == "mov_calm"
-    assert steps[5]["speed"] == 0
-    assert steps[5]["playbackSpeed"] == 1.0
+    assert steps[5]["delay"] == 0
+    assert steps[5]["animationSpeed"] is None
+    assert "speed" not in steps[5] and "playbackSpeed" not in steps[5]
     assert steps[6]["text"] == "first line\nsecond line"
     assert parsed["voices"] == ["cue.alpha"]
+
+
+def test_animation_arguments_follow_the_library_signatures():
+    # change_animation(label, anim, delay, animation_speed, play_end_motion,
+    # blend, motionType); play_animation(label, anim, delay, animation_speed,
+    # blend).  Omitted and nil arguments stay null; Lua truth decides the flag.
+    tables = talks.parse_constant_tables(DEFINES)
+    script = """
+change_animation(Characters.Alpha, Motions.calm, 3.5)
+change_animation(Characters.Alpha, Motions.calm, 0, 0.8)
+change_animation(Characters.Alpha, Motions.calm, 0, nil, 0.8, 0.25)
+change_animation(Characters.Alpha, Motions.calm, 1, 1.3, false)
+play_animation(Characters.Alpha, Motions.calm, 2, 0.5, 0.1)
+"""
+    steps = talks.parse_script(script, tables, script_name="args.lua")["steps"]
+    assert [s["delay"] for s in steps] == [3.5, 0, 0, 1, 2]
+    assert [s["animationSpeed"] for s in steps] == [None, 0.8, None, 1.3, 0.5]
+    assert "playEndMotion" not in steps[0] and "playEndMotion" not in steps[1]
+    assert steps[2]["playEndMotion"] is True and steps[2]["blend"] == 0.25
+    assert steps[3]["playEndMotion"] is False and "blend" not in steps[3]
+    assert steps[4]["blend"] == 0.1 and "playEndMotion" not in steps[4]
 
 
 def test_parse_script_keeps_constants_when_defines_are_absent():

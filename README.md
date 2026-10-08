@@ -18,12 +18,14 @@ python -m fixtures.player_data --master <master-directory> --bundles <decrypted-
 已提取目录可无损打包为角色、家具、场地、天气及公共依赖：
 
 ```sh
-python -m pack.groups --src <extracted-directory> --out <package-directory> --version <version>
+python -m pack.groups --src <extracted-directory> --out <package-directory> --region cn --version <version>
 ```
 
 输出包含 `asset-packs.json`、各包清单及共享内容寻址文件。重建会核验并修复损坏 blob，全部包校验通过后原子切换 catalog；历史包清单与 catalog 保留。源目录、输出目录和 overlay 与输出不得重叠。打包产物仍属于游戏数据，不随工具代码分发。
 
 使用 `python -m pack.verify --out <package-directory>` 检查完整发布，`python -m pack.gc --out <package-directory> --json` 列出所有保留代都不再引用的 blob。详见[下载、缓存与分包的完整性](docs/reliability.md)。
+
+跨区服共享 CAS、v2 发布与固定版本选择、离线迁移和 GC 操作见 [Asset Architecture v2](docs/asset-architecture-v2.md)。区服与版本选择内容，`moly://` 逻辑资产路径保持不变。
 
 [English](README.en.md)
 
@@ -99,6 +101,8 @@ moly --unity-version 2022.3.62f3 extract --bundles path/to/decrypted
 ```
 
 省略 `--out` 时产物写入 `local-data/`（默认输出目录，已被 `.gitignore` 忽略）。提供 `--manifest` 可限定子集：每行一个逻辑 bundle 名称，斜杠名称和规范的双下划线名称等价，也接受 JSON 数组以及 `{ "bundles": [...] }` 文档。缺失 bundle 会使命令以非零状态退出；未注册提取器的域会保留为 `unsupported`。
+
+家具粒子（包括 Billboard 与 Mesh）要生成可供运行时播放的源程序，需同时提供 `--fixture-particles --shader-compiler path/to/moly-shader-bridge`。不传编译器时仍可归档源材质、纹理、几何和 shader，但产物是 **source-only，不是可播放资产**，不会回退到近似的旧 shader。`fixture-particles/index.json` 与提取摘要中的 `sourcePrograms` 会列出编译器是否提供、GLES3 变体转换/缺口计数及源错误；`unsupported=0` 仅是组件提取普查，不能代表 shader 已可播放。即使程序已离线转换，运行时仍须验证所选变体、资源依赖是否齐全和实际播放。
 
 提取单个角色、共享动作库或表情表：
 

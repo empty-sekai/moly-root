@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 
 import UnityPy
+from UnityPy.environment import simplify_name
 
 # Serialized files the *engine* owns rather than any asset package.  A pointer
 # into one of these carries an archive name exactly the way a pointer into a
@@ -88,6 +89,10 @@ class PackageFile:
         self.trees = _Trees(self)
         self._trees = {}
         self._scripts = None
+        # The store this file was loaded by, so a script pointer into another
+        # serialized file can be followed.  Bundles keep their MonoScripts in
+        # the same file; player data keeps them in a shared one.
+        self.store = None
 
     def tree(self, path_id):
         if path_id not in self._trees:
@@ -101,6 +106,12 @@ class PackageFile:
                              for candidate, kind in self.kinds.items()
                              if kind == "MonoScript"}
         pointer = self.tree(path_id).get("m_Script") or {}
+        if pointer.get("m_FileID", 0) and self.store is not None:
+            target = self.store.follow(self, pointer)
+            if target is None:
+                return ""
+            owner, script = target
+            return str(owner.tree(script).get("m_ClassName", ""))
         return self._scripts.get(pointer.get("m_PathID", 0), "")
 
 
@@ -117,6 +128,63 @@ class _Trees:
         if path_id not in self._record.kinds:
             return default
         return self._record.tree(path_id)
+
+
+class MemberEnvironment(UnityPy.Environment):
+    """One UnityPy environment over the serialized files of a member source.
+
+    Every member file the store loads goes into this one environment, as a
+    container build's files share one: UnityPy dereferences a MonoBehaviour's
+    script pointer itself when it generates the behaviour's typetree, and it
+    looks the target file up in the reading file's environment.  A file no
+    pointer has reached yet is loaded from the member source when UnityPy asks
+    for it (:meth:`find_file`), under the spelling the loaded files' externals
+    give it, so nothing is read from the disk behind the caller's back and a
+    file the source does not hold fails loudly.
+    """
+
+    def __init__(self, members):
+        super().__init__(path="")
+        self.members = members
+
+    def load_member(self, name, member):
+        """The serialized file *member* holds, loaded under *name* once.
+
+        The stream-data files the engine keeps next to a serialized file
+        (``<file>.resS``, ``<file>.resource``) are registered with it when the
+        source holds them, so data that lives there reads from the same source.
+        """
+        loaded = self.files.get(name)
+        if loaded is not None:
+            return loaded
+        loaded = self.load_file(self.members.read(member), name=name)
+        if loaded is None or not hasattr(loaded, "objects"):
+            raise ValueError(f"not a serialized file: {member}")
+        stem = member[:-len(".assets")] if member.endswith(".assets") else member
+        for companion in dict.fromkeys((member + ".resS", member + ".resource",
+                                        stem + ".resource")):
+            resolved = self.members.resolve_name(companion)
+            if resolved is not None and resolved.rsplit("/", 1)[-1] not in self.files:
+                self.load_file(self.members.read(resolved),
+                               name=resolved.rsplit("/", 1)[-1])
+        return loaded
+
+    def find_file(self, name, is_dependency=True):
+        cab = self.get_cab(name)
+        if cab is not None:
+            return cab
+        # UnityPy asks by the lower-cased last segment; the source is asked by
+        # the full spelling a loaded file's externals table gives that name.
+        wanted = simplify_name(name)
+        spellings = sorted({external.path for loaded in list(self.files.values())
+                            for external in getattr(loaded, "externals", None) or []
+                            if simplify_name(external.path) == wanted})
+        members = sorted({member for member in map(self.members.resolve_name, spellings)
+                          if member is not None})
+        if len(members) != 1:
+            raise FileNotFoundError(f"serialized file {name!r}: {len(members)} members "
+                                    f"of the source answer the spellings {spellings}")
+        return self.load_member(members[0].rsplit("/", 1)[-1], members[0])
 
 
 class Package:
@@ -144,7 +212,21 @@ class PackageStore:
     explain pays once.
     """
 
-    def __init__(self, paths, root=None, manifest=None, index=None):
+    def __init__(self, paths, root=None, manifest=None, index=None,
+                 environment_hook=None, members=None):
+        # *environment_hook* is called with each freshly loaded UnityPy
+        # environment before any object is read.  Player data needs it: its
+        # MonoBehaviours carry no typetree, so a caller attaches a typetree
+        # generator for the exact player build there.  Bundles never need it.
+        self.environment_hook = environment_hook
+        # *members* serves serialized files that are not files on disk: a
+        # player build whose data ships as loose files inside its APKs.  It
+        # answers ``resolve_name(external spelling)`` with the member it holds
+        # under that spelling (or None) and ``read(member)`` with its bytes.
+        # Such a file is a package of its own, named by the last segment of
+        # the spelling, exactly as a pointer into it names its archive.
+        self.members = members
+        self._members_environment = None
         self.paths = {os.path.basename(str(path)): str(path) for path in paths}
         self.root = str(root) if root else None
         self.manifest = manifest
@@ -165,24 +247,62 @@ class PackageStore:
                 return str(candidate)
         return None
 
-    def package(self, name, record_missing=True):
+    def _member_of(self, name, spelling=None):
+        """The member *members* holds for a package name, or ``None``."""
+        if self.members is None:
+            return None
+        for candidate in dict.fromkeys(item for item in (spelling, name) if item):
+            member = self.members.resolve_name(str(candidate))
+            if member is not None:
+                return member
+        return None
+
+    def source_receipt(self, name):
+        """Hash the actual input without publishing an installation-specific path."""
+        from hashlib import file_digest, sha256
+        path = self._path_of(name)
+        member = self._member_of(name) if path is None else None
+        if member is not None:
+            data = self.members.read(member)
+            return {"bundle": str(name), "bytes": len(data),
+                    "sha256": sha256(data).hexdigest()}
+        if path is None or not Path(path).is_file():
+            raise FileNotFoundError(f"source package bytes unavailable: {name}")
+        with open(path, "rb") as handle:
+            digest = file_digest(handle, "sha256").hexdigest()
+        return {"bundle": str(name), "bytes": Path(path).stat().st_size, "sha256": digest}
+
+    def package(self, name, record_missing=True, spelling=None):
         """Load one package, or return ``None`` when it is not in the store.
 
         *record_missing* is false for a package that no bundle declared as a
         dependency — a sound package named by a master row, say — so that the
         dependency report keeps meaning "declared but not supplied".
+        *spelling* is the full externals entry a pointer named the package by
+        (``Resources/unity_builtin_extra``, say); a member source resolves
+        that spelling, and the package keeps the name its last segment gives.
         """
         if name in self._packages:
             return self._packages[name]
         path = self._path_of(name)
-        if path is None:
+        member = self._member_of(name, spelling) if path is None else None
+        if path is None and member is None:
             self._packages[name] = None
             if record_missing and name not in self.missing:
                 self.missing.append(name)
             return None
-        environment = UnityPy.load(path)
+        if member is None:
+            environment = UnityPy.load(path)
+            objects = environment.objects
+        else:
+            if self._members_environment is None:
+                self._members_environment = MemberEnvironment(self.members)
+            environment = self._members_environment
+            objects = list(environment.load_member(name, member).objects.values())
+        if self.environment_hook is not None:
+            self.environment_hook(environment)
         files, contents, dependencies = {}, [], []
-        for obj in environment.objects:
+        for obj in objects:
             source = getattr(obj, "assets_file", None)
             key = id(source)
             if key not in files:
@@ -191,6 +311,7 @@ class PackageStore:
                     [str(getattr(external, "name", ""))
                      for external in getattr(source, "externals", [])])
             record = files[key]
+            record.store = self
             record.kinds[obj.path_id] = obj.type.name
             record.objects[obj.path_id] = obj
         for record in files.values():
@@ -210,6 +331,17 @@ class PackageStore:
         self._packages[name] = package
         return package
 
+    def adopt(self, package):
+        """Register a package built by the caller (a view over loaded files).
+
+        The files it holds must belong to packages this store loaded, so their
+        pointers resolve through the same archive map.
+        """
+        if package.name in self._packages:
+            raise ValueError(f"package already loaded: {package.name}")
+        self._packages[package.name] = package
+        return package
+
     def forget(self, name):
         """Drop a loaded package from the cache.
 
@@ -219,7 +351,14 @@ class PackageStore:
         packages already loaded are affected, so this never undoes a lookup
         that has not happened.
         """
-        self._packages.pop(str(name), None)
+        package = self._packages.pop(str(name), None)
+        if package is not None:
+            # The archive map also owns the PackageFile, and through its
+            # objects every Unity reader/buffer. Leaving it behind retains the
+            # whole corpus despite removing the package cache entry.
+            for record in package.files:
+                if self._archives.get(record.archive) is record:
+                    self._archives.pop(record.archive)
 
     def follow(self, record, pointer):
         """Resolve a pointer to ``(file, path id)``, or ``None`` when it is not here."""
@@ -233,16 +372,18 @@ class PackageStore:
         index = file_id - 1
         if not 0 <= index < len(record.externals):
             return None
-        archive = str(record.externals[index]).rsplit("/", 1)[-1]
+        spelling = str(record.externals[index])
+        archive = spelling.rsplit("/", 1)[-1]
         target = self._archives.get(archive)
         if target is None:
             # The pointer names an archive the store was not given up front.  A
             # caller may supply it as another input path (for example a built-in
-            # container the engine ships next to the packages), so try to load
-            # it once by name before reporting the pointer unresolved; a load
-            # that fails for any reason still leaves the pointer unresolved.
+            # container the engine ships next to the packages), or a member
+            # source may hold it under the pointer's own spelling, so try to
+            # load it once by name before reporting the pointer unresolved; a
+            # load that fails for any reason still leaves the pointer unresolved.
             try:
-                self.package(archive, record_missing=False)
+                self.package(archive, record_missing=False, spelling=spelling)
             except Exception:
                 target = None
             else:

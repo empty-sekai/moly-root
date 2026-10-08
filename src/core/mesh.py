@@ -8,6 +8,13 @@ so the accessors are written once and referenced.
 
 Coordinate handedness and winding are handled by :mod:`core.gltf`.
 
+Texture coordinates come in two ways.  The default writes the first two sets as
+the mesh helper hands them back; :data:`AUTHORED_UV_SETS` writes *every* set the
+mesh's vertex stream carries, decoded here from the mesh's own channel table and
+stream layout (:func:`authored_uv_sets`).  The second is what a consumer porting a
+source shader needs: the room wall meshes carry four sets and the wall shader reads
+the fourth, so a writer that stops at two drops data the source draws with.
+
 A skinned mesh also carries per-vertex joint influences and a bind pose.  Those
 are written here too, next to the geometry they belong to, because every domain
 that reads Unity meshes meets the same bytes: the *skeleton* differs between a
@@ -17,6 +24,7 @@ matrices are a property of the mesh asset and are decoded identically.
 import struct
 
 from UnityPy.helpers.MeshHelper import MeshHandler
+from UnityPy.helpers.ResourceReader import get_resource_data
 
 from .gltf import flip_winding, unity_to_gltf_pos
 
@@ -28,6 +36,50 @@ TRIANGLES = 0
 
 NOT_TRIANGLES = "mesh submesh is not a triangle list"
 INDEX_RANGE = "mesh submesh index out of range"
+
+# Which texture coordinate sets :func:`mesh_accessors` writes: ``None`` is the first
+# two, through the mesh helper; this value is every set the vertex stream carries.
+AUTHORED_UV_SETS = "authored"
+
+# The engine's vertex attribute order from Unity 2018 on (``VertexAttribute`` in its
+# graphics enums, "keep in sync with ShaderChannel"): position, normal, tangent,
+# colour, the eight texture coordinate sets, blend weight, blend indices.  A
+# channel's index in ``m_VertexData.m_Channels`` is that value.
+TEXCOORD_CHANNEL_0 = 4
+TEXCOORD_SETS = 8
+
+# The engine's ``VertexAttributeFormat`` from Unity 2019 on ("match VertexFormat on
+# C++ side"): the value stored in a channel's ``format`` byte, as the struct code of
+# one component, its size, and how the component becomes the value a shader reads.
+# Normalised formats read as unsigned c / (2^n - 1) and signed max(c / (2^(n-1) - 1),
+# -1); integer formats have no float reading a texture coordinate accessor can carry.
+_FLOAT, _UNORM, _SNORM, _INTEGER = "float", "unorm", "snorm", "integer"
+VERTEX_ATTRIBUTE_FORMATS = {
+    0: ("f", 4, _FLOAT),      # Float32
+    1: ("e", 2, _FLOAT),      # Float16
+    2: ("B", 1, _UNORM),      # UNorm8
+    3: ("b", 1, _SNORM),      # SNorm8
+    4: ("H", 2, _UNORM),      # UNorm16
+    5: ("h", 2, _SNORM),      # SNorm16
+    6: ("B", 1, _INTEGER),    # UInt8
+    7: ("b", 1, _INTEGER),    # SInt8
+    8: ("H", 2, _INTEGER),    # UInt16
+    9: ("h", 2, _INTEGER),    # SInt16
+    10: ("I", 4, _INTEGER),   # UInt32
+    11: ("i", 4, _INTEGER),   # SInt32
+}
+FIRST_ATTRIBUTE_FORMAT_VERSION = 2019
+
+# Each vertex stream starts on a 16-byte boundary after the one before it.
+VERTEX_STREAM_ALIGNMENT = 16
+
+UV_VERSION = "raw uv decode reads the 2019+ vertex attribute format table"
+UV_COMPRESSED = "raw uv decode does not read a compressed mesh"
+UV_LAYOUT = "vertex channel table and vertex bytes disagree"
+UV_FORMAT = "texture coordinate channel format has no float reading"
+UV_DIMENSION = "texture coordinate channel is not two-component"
+UV_SETS_NOT_CONSECUTIVE = ("texture coordinate sets are not consecutive from 0, "
+                           "so TEXCOORD_n cannot keep the authored set index")
 
 # glTF fixes four joint influences per vertex; Unity may store fewer (a rigidly
 # bound mesh stores one) or more (dropped, matching Unity's own import limit).
@@ -81,6 +133,85 @@ def _normalized_colors(handler):
             f"unhandled vertex color channel format {channel_format!r}; only "
             "float and byte-packed (UNorm8/Color) formats are implemented")
     return [tuple(v / 255.0 for v in c) for c in colors]
+
+
+def vertex_bytes(mesh):
+    """The mesh's vertex buffer as stored: in the object, or in the resource file
+    the object points at (``m_StreamData``)."""
+    stream = getattr(mesh, "m_StreamData", None)
+    if stream is not None and stream.path and stream.size:
+        return bytes(get_resource_data(stream.path, mesh.object_reader.assets_file,
+                                       stream.offset, stream.size))
+    return bytes(mesh.m_VertexData.m_DataSize or b"")
+
+
+def _align(value):
+    return (value + VERTEX_STREAM_ALIGNMENT - 1) & ~(VERTEX_STREAM_ALIGNMENT - 1)
+
+
+def authored_uv_sets(mesh, version):
+    """Every texture coordinate set of one mesh, ``{set index: [(u, v), ...]}``.
+
+    Decoded from the vertex bytes with the mesh's own channel table: each channel
+    names its stream, its byte offset in that stream's vertex, its format and its
+    component count.  A stream's stride is the sum of its channels' sizes and must
+    equal the end of its last channel (the channels are packed); streams follow each
+    other on 16-byte boundaries; the bytes must end where the last stream ends, up
+    to that boundary.  Anything this cannot account for is refused by name rather
+    than read at a guessed offset.  Values are the authored ones (Unity's
+    bottom-left origin); the V flip belongs to the caller.
+    """
+    if version[0] < FIRST_ATTRIBUTE_FORMAT_VERSION:
+        raise ValueError(f"{UV_VERSION} (mesh version {version[0]})")
+    if getattr(mesh, "m_MeshCompression", 0):
+        raise ValueError(UV_COMPRESSED)
+    vertex_data = mesh.m_VertexData
+    channels = list(vertex_data.m_Channels or [])
+    count = int(vertex_data.m_VertexCount)
+    data = vertex_bytes(mesh)
+
+    sizes, ends = {}, {}
+    for index, channel in enumerate(channels):
+        if not channel.dimension:
+            continue
+        if channel.dimension & ~0xF or channel.format not in VERTEX_ATTRIBUTE_FORMATS:
+            raise ValueError(f"{UV_LAYOUT}: channel {index} dimension "
+                             f"{channel.dimension} format {channel.format}")
+        size = VERTEX_ATTRIBUTE_FORMATS[channel.format][1] * channel.dimension
+        sizes[channel.stream] = sizes.get(channel.stream, 0) + size
+        ends[channel.stream] = max(ends.get(channel.stream, 0), channel.offset + size)
+    if sizes != ends:
+        raise ValueError(f"{UV_LAYOUT}: channel sizes {sizes} against channel ends {ends}")
+    starts, end = {}, 0
+    for stream in range(max(sizes, default=-1) + 1):
+        starts[stream] = _align(end)
+        end = starts[stream] + count * sizes.get(stream, 0)
+    if not end <= len(data) <= _align(end):
+        raise ValueError(f"{UV_LAYOUT}: streams end at {end}, bytes are {len(data)}")
+
+    sets = {}
+    for uv_set in range(TEXCOORD_SETS):
+        index = TEXCOORD_CHANNEL_0 + uv_set
+        if index >= len(channels) or not channels[index].dimension:
+            continue
+        channel = channels[index]
+        code, size, reading = VERTEX_ATTRIBUTE_FORMATS[channel.format]
+        if reading == _INTEGER:
+            raise ValueError(f"{UV_FORMAT}: uv{uv_set} format {channel.format}")
+        if channel.dimension != 2:
+            raise ValueError(f"{UV_DIMENSION}: uv{uv_set} dimension {channel.dimension}")
+        base, stride = starts[channel.stream] + channel.offset, sizes[channel.stream]
+        layout = struct.Struct("<2" + code)
+        values = [layout.unpack_from(data, base + vertex * stride)
+                  for vertex in range(count)]
+        if reading == _UNORM:
+            scale = float((1 << (8 * size)) - 1)
+            values = [(u / scale, v / scale) for u, v in values]
+        elif reading == _SNORM:
+            scale = float((1 << (8 * size - 1)) - 1)
+            values = [(max(u / scale, -1.0), max(v / scale, -1.0)) for u, v in values]
+        sets[uv_set] = [(float(u), float(v)) for u, v in values]
+    return sets
 
 
 def skin_accessors(glb, handler, tree, reflect=True):
@@ -157,7 +288,7 @@ def skin_accessors(glb, handler, tree, reflect=True):
             "influences": max((len(t) for t in indices), default=0)}
 
 
-def mesh_accessors(glb, mesh_object, tree, skin=True):
+def mesh_accessors(glb, mesh_object, tree, skin=True, uv_sets=None):
     """Write one Unity mesh's buffers into *glb* and return how to reference them.
 
     Vertex attributes are one stream in Unity and are shared by every submesh, so
@@ -174,8 +305,21 @@ def mesh_accessors(glb, mesh_object, tree, skin=True):
     blob, a phenomenon's geometry).  The influences would be written into the
     binary and then referenced by nothing — a mesh with a bind pose costs ~24
     bytes a vertex, so the flag is what keeps those files the size they were.
+
+    *uv_sets* ``None`` writes ``TEXCOORD_0``/``TEXCOORD_1`` from the mesh helper;
+    :data:`AUTHORED_UV_SETS` writes ``TEXCOORD_n`` for every set ``n`` the vertex
+    stream carries, from :func:`authored_uv_sets`.  Either way V is flipped
+    (``1 - v``), one convention for every set of the document.  glTF requires the
+    set indices to run from 0 without a gap; a mesh whose authored sets do not is
+    refused, because renumbering would hand a shader that reads set 3 some other
+    set.
     """
-    handler = MeshHandler(mesh_object.read())
+    mesh = mesh_object.read()
+    authored = (authored_uv_sets(mesh, mesh.object_reader.version)
+                if uv_sets == AUTHORED_UV_SETS else None)
+    if authored is not None and sorted(authored) != list(range(len(authored))):
+        raise ValueError(f"{UV_SETS_NOT_CONSECUTIVE}: {sorted(authored)}")
+    handler = MeshHandler(mesh)
     handler.process()
     count = handler.m_VertexCount
     positions = [unity_to_gltf_pos(v) for v in handler.m_Vertices]
@@ -189,8 +333,12 @@ def mesh_accessors(glb, mesh_object, tree, skin=True):
             b"".join(struct.pack("<3f", *unity_to_gltf_pos(v))
                      for v in handler.m_Normals),
             FLOAT, "VEC3", count, ARRAY_BUFFER)
-    for slot, values in (("TEXCOORD_0", handler.m_UV0),
-                         ("TEXCOORD_1", getattr(handler, "m_UV1", None))):
+    texcoords = ((("TEXCOORD_0", handler.m_UV0),
+                  ("TEXCOORD_1", getattr(handler, "m_UV1", None)))
+                 if authored is None else
+                 tuple((f"TEXCOORD_{index}", authored[index])
+                       for index in sorted(authored)))
+    for slot, values in texcoords:
         if values:
             attributes[slot] = glb.acc(
                 b"".join(struct.pack("<2f", v[0], 1.0 - v[1]) for v in values),

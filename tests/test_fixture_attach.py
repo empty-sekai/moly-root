@@ -19,13 +19,48 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from core.assets import packages as packages_module
 from core.assets.packages import PackageStore
-from fixtures.attach import MISSING_BUNDLE, UNRESOLVED_POINTER
+from fixtures.attach import MISSING_BUNDLE, UNRESOLVED_POINTER, _view_collider
 from fixtures.interface import extract
 
 SCRIPT_ID = 9001
 
 MASTER_TABLE = "mysekaiCharacterTalkActionPoints"
 MASTER_SLOT = "gameCharacterUnitId1ActionPoint"
+
+
+def test_view_collider_preserves_exact_external_reference():
+    object_id = 9007199254740993
+    record = SimpleNamespace(archive="synthetic-view")
+    target = SimpleNamespace(archive="synthetic-collider", kinds={object_id: "MeshCollider"})
+    pointer = {"m_FileID": 2, "m_PathID": object_id}
+    store = SimpleNamespace(follow=lambda owner, value: (target, value["m_PathID"]))
+    result = _view_collider(store, record, {"_collider": pointer})
+    assert result["pointer"] == {"fileId": pointer["m_FileID"], "pathId": str(pointer["m_PathID"])}
+    assert result["status"] == "resolved"
+    assert result["source"] == {"file": target.archive, "pathId": str(object_id), "kind": "MeshCollider"}
+
+
+def test_view_collider_null_does_not_search_for_another_collider():
+    def unexpected(*args):
+        raise AssertionError("a null view reference must not be substituted")
+    result = _view_collider(SimpleNamespace(follow=unexpected), None,
+                            {"_collider": {"m_FileID": 0, "m_PathID": 0}})
+    assert result == {"pointer": {"fileId": 0, "pathId": "0"}, "source": None, "status": "null"}
+
+
+@pytest.mark.parametrize("target,reason", [
+    (None, "unresolved"),
+    ((SimpleNamespace(archive="synthetic", kinds={3: "BoxCollider"}), 3), "MeshCollider"),
+])
+def test_non_null_view_reference_must_resolve_to_its_declared_type(target, reason):
+    store = SimpleNamespace(follow=lambda owner, pointer: target)
+    with pytest.raises(ValueError, match=reason):
+        _view_collider(store, None, {"_collider": {"m_FileID": 0, "m_PathID": 3}})
+
+
+def test_view_collider_missing_field_is_not_an_authored_null():
+    with pytest.raises(ValueError, match="serialized collider reference"):
+        _view_collider(None, None, {})
 
 
 class _AssetFile:
@@ -101,6 +136,7 @@ class _Package:
                   "m_Enabled": 1,
                   "m_Script": {"m_FileID": 0, "m_PathID": SCRIPT_ID},
                   "m_Name": "", "_isTree": True,
+                  "_collider": {"m_FileID": 0, "m_PathID": 0},
                   "_attachPoints": attach_points})
 
     def finish(self):
@@ -256,10 +292,14 @@ def test_transforms_keep_the_float_the_engine_reads(tmp_path, monkeypatch):
     _result, document = _run(tmp_path, monkeypatch, {pkg.name: pkg.finish()})
     entry = document["packages"]["mysekai__fixture__mdl_rounding"]["entries"][0]
     assert entry["start"]["transform"]["position"] == [
-        -0.3499999940395355, 0.0, -0.47]
+        0.3499999940395355, 0.0, -0.47]
     assert entry["end"]["transform"]["rotation"] == [
-        6.123234262925839e-17, 1.0, -6.123234262925839e-17,
+        6.123234262925839e-17, -1.0, 6.123234262925839e-17,
         -6.123234262925839e-17]
+    assert entry["start"]["sourceTransform"]["position"][0] == -0.3499999940395355
+    assert entry["start"]["sourceTransform"]["coordinateSpace"] == "unity-lh-y-up-authored"
+    assert document["coordinateContract"] == "moly-rh-y-up-reflect-x-v1"
+    assert document["coordinateUnits"] == "source-unity-unit"
 
 
 def test_a_dangling_pointer_is_reported(tmp_path, monkeypatch):
@@ -274,7 +314,7 @@ def test_a_dangling_pointer_is_reported(tmp_path, monkeypatch):
     pkg.add("MonoBehaviour",
             {"m_GameObject": {"m_FileID": 0, "m_PathID": 0},
              "m_Enabled": 1, "m_Script": {"m_FileID": 0, "m_PathID": SCRIPT_ID},
-             "m_Name": "", "_attachPoints": [
+             "m_Name": "", "_collider": {"m_FileID": 0, "m_PathID": 0}, "_attachPoints": [
                  {"StartLoc": {"m_FileID": 0, "m_PathID": 424242},
                   "EndLoc": {"m_FileID": 0, "m_PathID": 0},
                   "IsUsing": 0, "CharacterId": 0}]})

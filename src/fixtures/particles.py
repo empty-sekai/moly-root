@@ -139,8 +139,9 @@ def _node_resolver(record, path_of):
     Sub-emitters and collision planes point at other objects of the same
     package.  A raw path id means nothing to a consumer, and the node path is
     what the rest of the document is keyed by.  A pointer into another package
-    cannot be followed from here and resolves to nothing, which the decoder
-    reports as a gap.
+    resolves to nothing here; a collision plane's is then tried as a
+    Transform of that package (``_asset_transform_resolver``), and whatever
+    neither resolves the decoder reports as a gap.
     """
     def resolve(pointer):
         pointer = pointer or {}
@@ -153,6 +154,94 @@ def _node_resolver(record, path_of):
         go = (tree.get("m_GameObject") or {}).get("m_PathID", 0)
         return path_of.get(go) or path_of.get(pid)
     return resolve
+
+
+def _asset_transform_resolver(store, record):
+    """Resolve a pointer into another package to the Transform it names.
+
+    A collision plane slot may name a model asset's own node in a package the
+    prefab depends on.  The engine reads that Transform as it is: it is never
+    placed in a scene, so its pose is its local transform chain in its own
+    file.  Returns the Transform's package, archive, node path in that file
+    and the chain root first (each link's local position, rotation x, y, z,
+    w and scale, as serialized), or ``None`` when the pointer stays in this
+    file or does not name a Transform (or its game object) the store holds.
+    """
+    def vector(value, keys):
+        value = value or {}
+        if not all(key in value for key in keys):
+            return None
+        return [float(value[key]) for key in keys]
+
+    def resolve(pointer):
+        pointer = pointer or {}
+        if not pointer.get("m_FileID", 0):
+            return None
+        target = store.follow(record, pointer)
+        if target is None:
+            return None
+        file, path_id = target
+        kind = file.kinds.get(path_id)
+        if kind == "GameObject":
+            components = file.tree(path_id).get("m_Component") or []
+            path_id = next((entry["component"]["m_PathID"] for entry in components
+                            if file.kinds.get(((entry or {}).get("component") or {}).get("m_PathID"))
+                            in TRANSFORMS), None)
+            kind = file.kinds.get(path_id)
+        if kind not in TRANSFORMS:
+            return None
+        chain, names, seen = [], [], set()
+        current = path_id
+        while current and current in file.kinds and current not in seen:
+            seen.add(current)
+            tree = file.tree(current)
+            go = (tree.get("m_GameObject") or {}).get("m_PathID", 0)
+            name = str(file.tree(go).get("m_Name", "")) if go in file.kinds else str(current)
+            link = {"position": vector(tree.get("m_LocalPosition"), "xyz"),
+                    "rotation": vector(tree.get("m_LocalRotation"), "xyzw"),
+                    "scale": vector(tree.get("m_LocalScale"), "xyz")}
+            if None in link.values():
+                return None
+            chain.append(link)
+            names.append(name)
+            current = (tree.get("m_Father") or {}).get("m_PathID", 0)
+        if current:
+            # The father chain leaves the file or loops: not a pose this
+            # record can state.
+            return None
+        chain.reverse()
+        names.reverse()
+        return {"package": file.bundle, "archive": file.archive, "node": "/".join(names),
+                "chain": chain}
+    return resolve
+
+
+def _component_classes(store, record, game_object):
+    """Declared component inventory, not an inferred absence of scripts.
+
+    ControlPlayable's optional Director/ITimeControl searches need proof that
+    a controlled subtree has no such component. Missing/unresolved inventory
+    stays unknown (None), never an empty list that would authorize a no-op.
+    MonoBehaviour remains explicit even when its script class is not decoded.
+    """
+    components = record.tree(game_object).get("m_Component")
+    if not isinstance(components, list):
+        return None
+    result = []
+    for entry in components:
+        pointer = entry.get("component") if isinstance(entry, dict) else None
+        if not isinstance(pointer, dict) or not pointer.get("m_PathID"):
+            return None
+        target = store.follow(record, pointer)
+        if target is None:
+            return None
+        owner, path_id = target
+        kind = owner.kinds.get(path_id)
+        if not isinstance(kind, str) or not kind:
+            return None
+        if kind not in TRANSFORMS:
+            result.append(kind)
+    return result
 
 
 class _Images:
@@ -237,9 +326,10 @@ class _Materials:
     particle slot and trail slot -- is decoded once and counted once.
     """
 
-    def __init__(self, store, images):
+    def __init__(self, store, images, source_materials=None):
         self.store = store
         self.images = images
+        self.source_materials = source_materials
         self.cache = {}
 
     def _decode(self, record, path_id):
@@ -288,7 +378,7 @@ class _Materials:
                           if parsed.get("m_Name")
                           else str(shader_record.tree(shader_id).get("m_Name", "")))
                 shader = str(shader) or None
-        return {
+        result = {
             "name": tree.get("m_Name"),
             "shader": shader,
             "keywords": keywords,
@@ -302,6 +392,12 @@ class _Materials:
                        for name, value in _pairs(properties.get("m_Colors"))
                        if isinstance(value, dict)},
         }
+        if self.source_materials is not None:
+            if shader_target is None:
+                result["sourceError"] = "source shader pointer is unresolved"
+            else:
+                result.update(self.source_materials.describe(record, path_id, shader_target))
+        return result
 
     def resolve(self, record, renderer_tree, slot=0):
         """One material slot of one renderer, keeping unresolved states visible."""
@@ -360,7 +456,7 @@ def _pointer(store, record, pointer):
             "kind": target_record.kinds.get(path_id)}
 
 
-def _mesh_points(store, record, renderer_tree):
+def _mesh_points(store, record, renderer_tree, geometry=None):
     """The mesh slots of one renderer, as resolved-or-explicit references.
 
     The four slots are sampled in the renderer's own distribution order; slot 0
@@ -374,11 +470,20 @@ def _mesh_points(store, record, renderer_tree):
             continue
         if not pointer["resolved"]:
             unresolved += 1
-        slots.append({"slot": slot, **pointer})
+        reference = {"slot": slot, **pointer}
+        if geometry is not None and pointer["resolved"]:
+            target = store.follow(record, renderer_tree.get(key) or {})
+            try:
+                references = geometry.references(*target, slot=slot)
+                slots.extend(dict(reference, **item) for item in references)
+                continue
+            except (ValueError, TypeError, AttributeError, KeyError, NotImplementedError) as exc:
+                reference["geometryError"] = f"{type(exc).__name__}: {exc}"
+        slots.append(reference)
     return slots, unresolved
 
 
-def _shape_mesh(store, record, tree, system, path, unsupported):
+def _shape_mesh(store, record, tree, system, path, unsupported, geometry=None):
     """The birth-position mesh of a mesh-shaped emitter.
 
     :func:`core.particles.decode_system` normalises the shape parameters but
@@ -400,9 +505,16 @@ def _shape_mesh(store, record, tree, system, path, unsupported):
                             "mesh": {"fileId": pointer["fileId"],
                                      "pathId": pointer["pathId"],
                                      "archive": pointer["archive"]}})
+    elif geometry is not None:
+        target = store.follow(record, (tree.get("ShapeModule") or {}).get("m_Mesh") or {})
+        try:
+            shape["meshes"] = [dict(pointer, **item) for item in geometry.references(*target)]
+        except (ValueError, TypeError, AttributeError, KeyError, NotImplementedError) as exc:
+            unsupported.append({"node": path, "module": "ShapeModule",
+                                "reason": f"source mesh geometry unavailable: {type(exc).__name__}: {exc}"})
 
 
-def _emitters(store, record, materials):
+def _emitters(store, record, materials, geometry=None):
     """All emitters of one serialized file, plus the file's gaps.
 
     Returns ``(emitters, unsupported, counts)``: ``emitters`` holds exactly one
@@ -416,6 +528,7 @@ def _emitters(store, record, materials):
     """
     path_of = _paths(record)
     resolve_node = _node_resolver(record, path_of)
+    resolve_asset = _asset_transform_resolver(store, record)
     systems = []
     renderer_of = {}
     renderer_failed = set()
@@ -448,7 +561,7 @@ def _emitters(store, record, materials):
                 counts["systemReadFailures"] += 1
                 gap_kind = SYSTEM_UNREADABLE
                 systems.append({"node": node, "gameObjectId": go,
-                                "systemPathId": path_id, "system": None,
+                                "systemPathId": str(path_id), "system": None,
                                 "systemError": f"{type(exc).__name__}: {exc}"})
             else:
                 counts["renderers"] += 1
@@ -465,10 +578,10 @@ def _emitters(store, record, materials):
         if kind == "ParticleSystem":
             counts["systems"] += 1
             try:
-                decoded, gaps = decode_system(tree, resolve_node)
+                decoded, gaps = decode_system(tree, resolve_node, resolve_asset)
             except Exception as exc:
                 systems.append({"node": node, "gameObjectId": go,
-                                "systemPathId": path_id,
+                                "systemPathId": str(path_id),
                                 "system": None,
                                 "systemError": f"{type(exc).__name__}: {exc}"})
                 counts["systemReadFailures"] += 1
@@ -477,11 +590,15 @@ def _emitters(store, record, materials):
                                     "pathId": path_id})
                 continue
             system = decoded
-            _shape_mesh(store, record, tree, system, node, unsupported)
+            _shape_mesh(store, record, tree, system, node, unsupported, geometry)
             for gap in gaps:
                 unsupported.append(dict(gap, node=node))
+            # The system and renderer object ids are written as decimal strings,
+            # the one form the weather export and every sub-emitter pointer
+            # (``sourcePointer.pathId``) carry, so a pointer compares equal to
+            # the record it names; the order below stays numeric.
             systems.append({"node": node, "gameObjectId": go,
-                            "systemPathId": path_id, "system": system,
+                            "systemPathId": str(path_id), "system": system,
                             "systemError": None})
         else:
             counts["renderers"] += 1
@@ -507,9 +624,25 @@ def _emitters(store, record, materials):
                                     "pathId": path_id})
                 continue
             renderer = decoded
-            mesh_slots, mesh_unresolved = _mesh_points(store, record, tree)
+            mesh_slots, mesh_unresolved = _mesh_points(store, record, tree, geometry)
             renderer["meshes"] = mesh_slots
             renderer["meshDistribution"] = tree.get("m_MeshDistribution")
+            if geometry is not None and renderer["renderMode"] == "Mesh":
+                renderer["meshSlots"] = []
+                for slot, key in enumerate(("m_Mesh", "m_Mesh1", "m_Mesh2", "m_Mesh3")):
+                    pointer = tree.get(key) or {}
+                    renderer["meshSlots"].append({
+                        "slot": slot,
+                        "reference": {"fileId": int(pointer.get("m_FileID", 0)),
+                                      "pathId": str(pointer.get("m_PathID", 0))},
+                        "weight": tree.get("m_MeshWeighting" + (str(slot) if slot else "")),
+                        "meshes": [item for item in mesh_slots if item["slot"] == slot
+                                   and item.get("geometrySchemaVersion") == 1],
+                    })
+                for item in mesh_slots:
+                    if item.get("geometryError"):
+                        unsupported.append({"node": node, "module": "ParticleSystemRenderer",
+                                            "meshSlot": item["slot"], "reason": item["geometryError"]})
             counts["meshPointersUnresolved"] += mesh_unresolved
             renderer_of[go] = {"renderer": renderer, "pathId": path_id,
                                "node": node}
@@ -517,10 +650,10 @@ def _emitters(store, record, materials):
     emitters = []
     for entry in sorted(systems,
                         key=lambda e: (e["node"] is None, e["node"] or "",
-                                       e["gameObjectId"], e["systemPathId"])):
+                                       e["gameObjectId"], int(e["systemPathId"]))):
         entry["renderer"] = renderer_of[entry["gameObjectId"]]["renderer"] \
             if entry["gameObjectId"] in renderer_of else None
-        entry["rendererPathId"] = renderer_of[entry["gameObjectId"]]["pathId"] \
+        entry["rendererPathId"] = str(renderer_of[entry["gameObjectId"]]["pathId"]) \
             if entry["gameObjectId"] in renderer_of else None
         if entry["renderer"] is None and entry["system"] is not None \
                 and entry["gameObjectId"] not in renderer_failed:
@@ -537,21 +670,24 @@ def _emitters(store, record, materials):
     return emitters, unsupported, counts
 
 
-def _export_package(store, name, out, domain, images_factory):
+def _export_package(store, name, out, domain, images_factory, source_materials=None, geometry=None):
     """One package to ``<out>/<name>.json``, or a missing record with no file."""
     package = store.package(name)
-    document = {"version": 2, "name": name, "domain": domain, "missing": False}
+    document = {"version": 2, "name": name, "domain": domain, "missing": False,
+                "nodeCoordinates": "unity-lh-y-up-authored"}
+    if source_materials is not None:
+        document["particleSourceSchemaVersion"] = 1
     if package is None:
         document.update(emitters=[], unsupported=[], missing=True,
                         reason=MISSING_BUNDLE, file=None,
                         summary=dict(EMPTY_SUMMARY))
         return document, None
     images = images_factory(out / "textures")
-    materials = _Materials(store, images)
+    materials = _Materials(store, images, source_materials)
     emitters, unsupported, counts, nodes = [], [], {}, []
     for record in package.files:
         file_emitters, file_unsupported, file_counts = _emitters(
-            store, record, materials)
+            store, record, materials, geometry)
         path_of = _paths(record)
         transforms = {pid: record.tree(pid) for pid, kind in record.kinds.items()
                       if kind in TRANSFORMS}
@@ -578,6 +714,7 @@ def _export_package(store, name, out, domain, images_factory):
         for go, tree in by_go.items():
             parent = transforms.get((tree.get("m_Father") or {}).get("m_PathID", 0))
             nodes.append({"gameObjectId": go, "node": path_of.get(go),
+                          "componentClasses": _component_classes(store, record, go),
                           "parentGameObjectId": (parent.get("m_GameObject") or {}).get("m_PathID", 0) if parent else 0,
                           "active": bool(record.tree(go).get("m_IsActive", True)),
                           "activeInHierarchy": active(go),
@@ -608,7 +745,8 @@ def _export_package(store, name, out, domain, images_factory):
     return document, document["file"]
 
 
-def extract_from_store(store, out_dir):
+def extract_from_store(store, out_dir, *, shader_compiler=None, domains=DOMAINS,
+                       packages=()):
     """Extract every particle-emitting package of the three domains.
 
     *store* is a ``PackageStore`` of the bundle files to read.  Packages the
@@ -618,9 +756,28 @@ def extract_from_store(store, out_dir):
     lookup source rather than extracted.  The index covers every domain package,
     with a zero count and no document for one that holds none.  Returns a
     summary dict.
+
+    *domains* widens or narrows which routed domains are extracted.  The
+    furniture pipeline uses the default; a caller that needs the same source
+    schema for another family of emitting prefabs (the travel cannon and the
+    site-move effects, whose runtime reader is this schema's) names those
+    domains instead, and the documents are the same shape.
+
+    *packages* names further packages, by bundle, that are extracted whatever
+    domain the router gives them -- one package of a domain whose other
+    packages are not read this way (the travel cannon of the site domain).  A
+    named package the store does not hold is not extracted; its document's
+    ``domain`` is still the one the router reports.
     """
+    domains = tuple(domains)
+    packages = tuple(sorted(set(packages)))
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    # Match the weather source contract. PNG previews and pointer-only meshes
+    # cannot render mesh particles; keep exact source programs, mip payloads,
+    # and mesh provenance under this extraction root instead.
+    from .particle_source import SourceAssets
+    source = SourceAssets(store, out, shader_compiler=shader_compiler)
     # Load everything up front: pointers between packages resolve against the
     # archives of *every* loaded package, so an extractor that reads a package
     # before its supplier has been opened would report resolvable pointers as
@@ -629,15 +786,18 @@ def extract_from_store(store, out_dir):
     target_names, lookup_names = [], []
     for name in sorted(names):
         target = route(name)
-        if target is not None and target.domain in DOMAINS:
+        if target is not None and (target.domain in domains or name in packages):
             target_names.append(name)
         else:
             lookup_names.append(name)
-    for name in target_names + lookup_names:
-        store.package(name)
+    # Materials and source textures commonly live in common effect packages.
+    # Loading the selected input alone does not follow its AssetBundle manifest;
+    # unresolved CAB pointers must not become missing/default shader textures.
+    store.load_dependencies(target_names + lookup_names)
     documents = {}
-    per_domain = {"fixture-interface": 0, "cutscene-timeline": 0,
-                  "fixture-timeline": 0}
+    per_domain = {domain: 0 for domain in domains}
+    for name in target_names:
+        per_domain.setdefault(route(name).domain, 0)
     totals = {"packages": len(target_names), "lookupPackages": len(lookup_names),
               "emitters": 0, "materials": 0, "textures": 0,
               "unsupported": 0, "missing": 0,
@@ -646,7 +806,13 @@ def extract_from_store(store, out_dir):
     for name in target_names:
         routed = route(name)
         document, file_name = _export_package(store, name, out, routed.domain,
-                                              lambda directory: _Images(directory))
+                                              lambda directory: _Images(directory),
+                                              source.materials, source.geometry)
+        for emitter in document["emitters"]:
+            renderer = emitter.get("renderer") or {}
+            for key in ("material", "trailMaterial"):
+                if isinstance(renderer.get(key), dict):
+                    source.note_material(renderer[key])
         if file_name is not None:
             write_json(out / file_name, document)
         summary = document["summary"]
@@ -677,8 +843,13 @@ def extract_from_store(store, out_dir):
     index = {
         "version": 1,
         "semantics": {
-            "domains": ("the three domains whose packages this index covers, as "
-                        "the router reports them"),
+            "domains": (("the three domains whose packages this index covers, as "
+                         "the router reports them")
+                        if domains == DOMAINS and not packages else
+                        ("the domains whose packages this index covers, as the "
+                         "router reports them: " + ", ".join(domains)
+                         + ("; and these packages of other domains, named by "
+                            "bundle: " + ", ".join(packages) if packages else ""))),
             "packages": ("a package named by the bundle its document came from; "
                          "``file`` is ``None`` when the package holds no particle "
                          "system (its count is zero, not unread), and ``missing`` "
@@ -729,12 +900,17 @@ def extract_from_store(store, out_dir):
                         "distinct images those materials reference"),
         },
         "packages": documents,
+        "particleSourceSchemaVersion": 1,
+        "sourcePrograms": source.program_summary(),
+        "models": source.geometry.entries,
         "summary": dict(totals, perDomain=per_domain),
     }
     path = write_json(out / "index.json", index)
-    return dict(totals, path=str(path))
+    return dict(totals, sourcePrograms=index["sourcePrograms"], path=str(path))
 
 
-def extract_particles(store, out_dir):
+def extract_particles(store, out_dir, *, shader_compiler=None, domains=DOMAINS,
+                      packages=()):
     """Alias kept for the fixture interface's naming pattern."""
-    return extract_from_store(store, out_dir)
+    return extract_from_store(store, out_dir, shader_compiler=shader_compiler,
+                              domains=domains, packages=packages)

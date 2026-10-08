@@ -1,0 +1,24 @@
+[package]
+name = "moly-pack-probe"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bevy = { version = "0.18.1", default-features = false, features = ["std", "async_executor", "bevy_asset", "bevy_log", "multi_threaded"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+async-lock = "3"
+flate2 = "1"
+futures-lite = "2"
+sha2 = "0.10"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Request", "RequestInit", "RequestMode", "RequestRedirect", "Response", "Headers"] }

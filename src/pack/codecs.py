@@ -18,6 +18,9 @@ whichever backend is available with no consistency question to settle.
 from __future__ import annotations
 
 import gzip as _pygzip
+from functools import lru_cache
+import struct
+import zlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -97,7 +100,12 @@ def gzip_compress(data: bytes) -> bytes:
     # content addressing (a rebuild with no source change would look like
     # every gzip'd file changed). mtime=0 makes the output a pure function of
     # the content.
-    return _pygzip.compress(data, compresslevel=GZIP_LEVEL, mtime=0)
+    # Avoid gzip.compress's platform/Python-version-specific OS byte. The
+    # explicit zlib profile is also the recipe used by warm/fresh v2 builds.
+    encoder = zlib.compressobj(GZIP_LEVEL, zlib.DEFLATED, -15, 8, zlib.Z_DEFAULT_STRATEGY)
+    body = encoder.compress(data) + encoder.flush()
+    return (b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff" + body
+            + struct.pack("<II", zlib.crc32(data), len(data) & 0xffffffff))
 
 
 def gzip_decompress(data: bytes) -> bytes:
@@ -153,3 +161,23 @@ def decode_blob(blob_bytes: bytes, codec: str, http_encoding: str) -> bytes:
     elif codec == "gzip":
         content = gzip_decompress(content)
     return content
+
+
+@lru_cache(maxsize=1)
+def _node_brotli_version():
+    return subprocess.check_output(["node", "-p", "process.versions.brotli"], text=True).strip()
+
+
+def encoding_profiles(rules):
+    """Only encoders actually used by this package; no machine paths or clocks."""
+    used = {"brotli" if rule.http_encoding == "br" else rule.codec for rule in rules}
+    profiles = {}
+    if "gzip" in used:
+        profiles["gzip"] = {"implementation": "zlib-deflate/gzip-v1", "version": zlib.ZLIB_RUNTIME_VERSION,
+                            "level": GZIP_LEVEL, "window_bits": 15, "memory_level": 8,
+                            "strategy": 0, "mtime": 0, "os": 255}
+    if "brotli" in used:
+        profiles["brotli"] = {"implementation": "python-brotli" if _pybrotli is not None else "node-brotli",
+                              "version": _pybrotli.__version__ if _pybrotli is not None else _node_brotli_version(),
+                              "quality": BROTLI_QUALITY, "lgwin": BROTLI_LGWIN, "mode": 0}
+    return profiles

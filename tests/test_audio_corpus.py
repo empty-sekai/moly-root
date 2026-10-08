@@ -12,6 +12,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from phenomena import audio_corpus
 
 
+def test_authored_script_identity_preserves_extended_voice_variant_suffixes():
+    document = {"talks": [{"lua": "mysekai_talk_birthday_033_004", "voices": [
+        "voice_mysekai_talk_birthday_033_004_01_022_idol",
+        "voice_mysekai_talk_birthday_033_004_02_022_idol"]}]}
+    requests, cues = audio_corpus.voice_requests(document)
+    assert list(requests) == ["mysekai/talk/voice/mysekai_talk_birthday_033_004"]
+    assert requests[next(iter(requests))] == cues
+
+
 TALKS = {
     "units": {
         "21": {"talks": [
@@ -189,6 +198,66 @@ class _FakeStore:
         })()
 
 
+def test_all_acbs_are_extracted_once_and_cross_package_names_are_isolated(tmp_path):
+    from phenomena.audio import Library
+    tea = _Record({"m_Name": "tea_set.acb", "m_Script": b"embedded tea"})
+    toaster = _Record({"m_Name": "toaster.acb", "m_Script": b"toaster sound"})
+
+    class Store:
+        forgotten = []
+        def package(self, name, record_missing=True):
+            return type("Package", (), {"contents": [
+                ("tea_set.acb", tea, 7), ("toaster.acb", toaster, 7), ("alias.acb", tea, 7)]})()
+        def forget(self, name):
+            self.forgotten.append(name)
+
+    store = Store()
+    library = Library(tmp_path / "audio", "audio", decoder=tmp_path / "absent-decoder")
+    package = "mysekai__sound__se__fixture__toaster"
+    assert audio_corpus._extract_one(store, library, package, None, [])
+    assert store.forgotten == [package]
+    assert len(library.packages) == 2
+    assert {entry["archiveSetIndex"] for entry in library.packages} == {0, 1}
+    assert all(entry["archiveSetCount"] == 2 and entry["archiveSetRevision"] == 2
+               for entry in library.packages)
+    other = library.add("other-package", "tea_set", b"different source", namespace="other-package")
+    assert other["archive"] != library.packages[0]["archive"]
+    assert (tmp_path / library.packages[0]["archive"]).read_bytes() == b"embedded tea"
+    assert (tmp_path / other["archive"]).read_bytes() == b"different source"
+
+
+def test_legacy_first_archive_fixture_cache_is_repaired(tmp_path, monkeypatch, decoder, corpus_inputs):
+    talks, manifest, out = corpus_inputs
+    audio = out / "audio"
+    old = json.loads((audio / "loop.json").read_text(encoding="utf-8"))
+    old["packages"].append({"package": "mysekai__sound__se__fixture__basketball",
+                            "status": "succeeded", "streams": [{"cue": "wrong old first ACB"}]})
+    (audio / "loop.json").write_text(json.dumps(old), encoding="utf-8")
+    monkeypatch.setattr("core.assets.packages.PackageStore", _FakeStore)
+    report = audio_corpus.extract_audio_corpus(talks, manifest, "bundles", out, decoder=decoder)
+    assert report["families"]["se"]["requested"] == 1
+    current = json.loads((audio / "loop.json").read_text(encoding="utf-8"))
+    row = next(row for row in current["packages"] if row["package"].endswith("fixture__basketball"))
+    assert row["archiveSetRevision"] == 2
+    assert row["streams"][0]["cue"] == "se_bounce"
+
+
+def test_requested_cue_in_a_sibling_archive_is_not_reported_missing(tmp_path, decoder):
+    from phenomena.audio import Library
+    names = ["mysekai__talk__voice__mysekai_talk_alpha_001", "mysekai__talk__voice__mysekai_talk_beta_001"]
+    contents = [(name, _Record({"m_Name": name + ".acb", "m_Script": b"FAKE"}), 7) for name in names]
+    class Store:
+        def package(self, *args, **kwargs):
+            return type("Package", (), {"contents": contents})()
+        def forget(self, name):
+            pass
+    wanted = ["voice_mysekai_talk_alpha_001_01_001", "voice_mysekai_talk_beta_001_01_001"]
+    library = Library(tmp_path / "audio", "audio", decoder=decoder)
+    assert audio_corpus._extract_one(Store(), library, "two-acb-package", wanted, [])
+    assert not library.unsupported
+    assert {s["cue"] for row in library.packages for s in row["streams"]} == set(wanted)
+
+
 @pytest.fixture
 def decoder(tmp_path):
     """A stand-in vgmstream-cli: stream names from STREAM_NAMES, a tiny wav."""
@@ -241,11 +310,13 @@ def corpus_inputs(tmp_path):
     out = tmp_path / "phenomena"
     audio = out / "audio"
     audio.mkdir(parents=True)
-    # One package already in the library — the shared ambience package, as the
-    # real phenomena job leaves it.
+    # One package already in the library — the shared ambience package, as
+    # this job leaves it whole (archive set revision stamped); the phenomena
+    # job's cue subset carries no revision and is asked for again.
     (audio / "loop.json").write_text(json.dumps({
         "status": "succeeded", "packages": [
-            {"package": "mysekai__sound__se__se_mysekai", "streams": []}],
+            {"package": "mysekai__sound__se__se_mysekai", "archiveSetRevision": 2,
+             "streams": []}],
     }), encoding="utf-8", newline="\n")
     return talks, manifest, out
 
@@ -287,6 +358,7 @@ def test_corpus_extraction_end_to_end(tmp_path, monkeypatch, decoder,
     assert "mysekai__talk__voice__mysekai_talk_alpha_001" in names
     # a decoded waveform exists under the cue's own name
     assert (audio / "mysekai__talk__voice__mysekai_talk_alpha_001" /
+            "mysekai__talk__voice__mysekai_talk_alpha_001" /
             "voice_mysekai_talk_alpha_001_01_001.wav").exists()
     # the shipped document does not carry this machine's directory layout
     assert "path" not in corpus

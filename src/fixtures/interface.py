@@ -28,7 +28,8 @@ def extract_geometry(store, out_dir):
     return extract_meshes(store, out_dir)
 
 
-def extract_particles(store, out_dir):
+def extract_particles(store, out_dir, *, shader_compiler=None, domains=None,
+                      packages=()):
     """Extract the particle emitters of the same packages into ``out_dir``.
 
     A separate entry point rather than part of :func:`extract` for the same
@@ -43,6 +44,12 @@ def extract_particles(store, out_dir):
     and because the pass additionally pulls in the shared emitter decoder and
     takes a while to run; a caller that only wants the attach points should not
     import it by loading :func:`extract`.
+
+    *domains* and *packages* are passed through to
+    :func:`fixtures.particles.extract_from_store`; ``None`` keeps its default
+    furniture domains.
     """
-    from .particles import extract_from_store
-    return extract_from_store(store, out_dir)
+    from .particles import DOMAINS, extract_from_store
+    return extract_from_store(store, out_dir, shader_compiler=shader_compiler,
+                              domains=DOMAINS if domains is None else domains,
+                              packages=packages)

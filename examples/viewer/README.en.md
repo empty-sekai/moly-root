@@ -61,6 +61,7 @@ The **motion library** is a secondary inspection tool (collapsed in the right pa
 | Parameter | Effect |
 | --- | --- |
 | `base=<url>` | Sets the data root, allowing extracted outputs to live outside the example directory. |
+| `portrait=1` | Head-only transparent export: filters triangles by Head skin weights, freezes pose/cloth/blink and derives the camera from geometry. See batch export below. |
 | `play=1` | Automatically plays the first available motion family in preview mode after loading (performance suspended). |
 | `play=<text>` | Automatically plays a matching motion family in preview mode. |
 | `freeze=<seconds>` | Advances the animation to the given time and pauses it for a repeatable view. |
@@ -85,6 +86,7 @@ http://localhost:8000/examples/viewer/index.html?base=../../local-data&play=1&fr
 | Module | Responsibility |
 | --- | --- |
 | `viewer.js` | Page entry point and orchestration layer. Creates the scene, loads JSON and glTF, assembles materials and controllers, connects the UI, handles query parameters, updates cloth and overhead items, and runs self-checks. |
+| `portrait.js` | Head-only geometry selection and crown-to-chin camera framing, retaining the real toon/facial/stencil materials. |
 | `shading.js` | Character toon `ShaderMaterial`, body masks, facial branches, light parameters, eyebrow stencil overlay, and render-state updates. Textures are sampled linearly and the renderer performs no tone mapping. |
 | `facial.js` | Facial atlas indexing, UV offsets, default facial state, blink state machine, and speaking-mouth state machine. Indices use one-based, four-column, lower-bound-one behavior. |
 | `cloth.js` | 90 Hz Verlet cloth simulation, distance and root-distance constraints, angular limits, sphere/capsule/plane collisions, finite-value guards, teleport resets, and glTF node-index binding. |
@@ -96,6 +98,17 @@ http://localhost:8000/examples/viewer/index.html?base=../../local-data&play=1&fr
 | `OrbitControls.js` | Three.js orbit camera controller for drag rotation, zoom, and damping. |
 | `BufferGeometryUtils.js` | Three.js geometry utility module used by the glTF loader. |
 | `three.module.min.js` | Minified Three.js r160 ES module runtime. Its license is recorded in `THIRD_PARTY_NOTICES.md` at the repository root. |
+
+## Head-only batch export
+
+[`tools/head-portraits`](../../tools/head-portraits/README.md) provides the reproducible batch exporter. It starts its own local server, renders the source manifest's complete roster through this viewer, and produces 512 × 512 RGBA with generator `moly-root-chara-head-v1`. Source region/version, model/rig, renderer and image SHA-256 are recorded and validated. Crown and side clipping fails validation; long hair may leave the lower edge. The camera is automatic and contains no character-specific overrides.
+
+```sh
+node tools/head-portraits/export.mjs --source local-data --out ../portraits-cn --region cn --version 6.0.0
+python tools/head-portraits/finalize.py --source local-data --out ../portraits-cn --verify
+```
+
+Install Playwright and Pillow as documented by the tool before first use. The output directory must be empty. Review both `qa-light.png` and `qa-dark.png`; generated game images remain outside this repository.
 
 ## Contract references
 

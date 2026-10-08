@@ -13,6 +13,16 @@ dependencies = [
     "UnityPy>=1.20",
 ]
 
+[project.optional-dependencies]
+deployment = [
+    "brotli>=1.2,<2",
+    "oss2>=2.19,<3",
+]
+jp = [
+    "msgpack>=1.0",
+    "pycryptodome>=3.20",
+]
+
 [project.scripts]
 moly = "core.cli:main"
 
@@ -21,3 +31,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 pack = ["*.toml", "*.mjs", "*.schema.json"]
+
+[tool.pytest.ini_options]
+# Generated resource trees contain hundreds of thousands of non-test files.
+# Only the shipped test suite participates in discovery.
+testpaths = ["tests"]

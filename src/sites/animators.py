@@ -36,17 +36,25 @@ class _Scope:
         self.foreign_hits = {}
         self.paths = {}
         self.nodes = {}
+        self.ambiguous = set()
         for owner, path in graph.node_paths(root).items():
             digest = zlib.crc32(path.encode("utf-8")) & 0xffffffff
             node = indices[graph.transform_of[owner]]
             if digest in self.nodes and self.nodes[digest] != node:
-                raise ValueError("ambiguous source path hash in Animator scope")
+                # Duplicate decoration names are legal when no clip binds
+                # them. Keep the ambiguity and reject an actual lookup, not
+                # the unrelated geometry of the whole prefab.
+                self.ambiguous.add(digest)
             self.paths[digest], self.nodes[digest] = path, node
 
     def resolve(self, digest):
+        if digest in self.ambiguous:
+            raise ValueError("ambiguous source path hash referenced by Animator clip")
         return self.paths.get(digest)
 
     def node_for_hash(self, digest):
+        if digest in self.ambiguous:
+            raise ValueError("ambiguous source path hash referenced by Animator clip")
         return self.nodes.get(digest)
 
 

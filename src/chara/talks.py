@@ -465,24 +465,38 @@ def _step(op, args, tables, scalars):
             values[2][0] if len(values) > 2 and args[2].strip() != "nil" else None
         )
     elif op in ("change_animation", "play_animation"):
+        # The scenario library's signatures, argument by argument:
+        #   change_animation(label, anim_name, delay, animation_speed,
+        #                    play_end_motion, animationBlendTime, motionType)
+        #   play_animation(label, animationName, delay, animation_speed,
+        #                  animationBlendTime)
+        # The third argument is a delay in seconds (the engine queues the
+        # animation at elapsed + delay), not a speed; the fourth is the speed.
+        # An omitted or nil argument exports as None: the library fills the
+        # speed (1) and blend time (0.5) itself, the engine reads a nil delay
+        # as 0 and a zero speed as 1.  Those defaults belong to the consumer.
+        def arg(index):
+            if len(values) <= index or args[index].strip() == "nil":
+                return None
+            return values[index][0]
+
         if values:
             step["who"] = values[0][0]
         if len(values) > 1:
             step["motion"] = values[1][0]
             step["alias"] = args[1].strip()
-        speed = values[2][0] if len(values) > 2 else None
-        step["speed"] = speed
-        step["playbackSpeed"] = (
-            SPEED_ZERO_MEANS
-            if not isinstance(speed, (int, float)) or speed == 0
-            else float(speed)
-        )
-        if len(values) > 4:
-            step["playEndMotion"] = bool(values[4][0])
-        if len(values) > 5:
-            step["blend"] = values[5][0]
-        if len(values) > 6:
-            step["phase"] = values[6][0]
+        step["delay"] = arg(2)
+        step["animationSpeed"] = arg(3)
+        if op == "change_animation":
+            if len(values) > 4 and args[4].strip() != "nil":
+                # Lua truth: every value except nil and false is true.
+                step["playEndMotion"] = values[4][0] is not False
+            if arg(5) is not None:
+                step["blend"] = arg(5)
+            if arg(6) is not None:
+                step["phase"] = arg(6)
+        elif arg(4) is not None:
+            step["blend"] = arg(4)
     elif op == "voice":
         if values:
             step["channel"] = values[0][0]
@@ -644,9 +658,12 @@ def _semantics(source):
             ),
             "unresolvedTokensPreserved": True,
         },
-        "playbackSpeed": (
-            "speed is the scripted value; playbackSpeed uses "
-            f"{SPEED_ZERO_MEANS} when speed is zero"
+        "animation": (
+            "change_animation and play_animation carry delay (the third "
+            "argument, seconds after the call) and animationSpeed (the fourth); "
+            "each is null when the script omits it or passes nil. The scenario "
+            "library then passes speed 1 and blend 0.5, and the engine reads a "
+            f"nil delay as 0 and a zero speed as {SPEED_ZERO_MEANS}"
         ),
     }
 

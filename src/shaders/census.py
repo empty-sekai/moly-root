@@ -91,11 +91,13 @@ def shader_entry(tree, keep_code=False):
                    for s, p, mode, pass_name in objects.passes(tree)],
         "platforms": [],
     }
-    for platform, raw, segments in objects.platform_blobs(tree):
-        record = {"platform": platform, "segments": segments,
+    for platform, segments in objects.platform_segments(tree):
+        raw = b"".join(segments)
+        record = {"platform": platform, "segments": len(segments),
+                  "segmentSizes": [len(part) for part in segments],
                   "decompressedBytes": len(raw), "rawSha256": _sha256(raw)}
         try:
-            parsed = blobs.parse_blob(raw, platform)
+            parsed = blobs.parse_segments(segments, platform)
         except Exception as exc:                                    # noqa: BLE001
             record["error"] = f"{type(exc).__name__}: {exc}"
             record["programs"] = []

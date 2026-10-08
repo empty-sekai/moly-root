@@ -144,7 +144,7 @@ def test_clip_embeds_into_the_same_glb_on_the_right_node(tmp_path, monkeypatch):
 
 def test_dense_and_constant_curves_map_to_linear_and_step(tmp_path, monkeypatch):
     """Red when interpolation is invented instead of mapped: evenly sampled
-    dense frames are LINEAR, never-changing constants are STEP with one key."""
+    dense frames are LINEAR, constants stay STEP over their source duration."""
     pkg = _animated_package()
     # Dense: three curves = translation components 0..2 of "arm", 3 frames.
     # Constant: three values = scale components 0..2 (the next binding's
@@ -162,8 +162,24 @@ def test_dense_and_constant_curves_map_to_linear_and_step(tmp_path, monkeypatch)
     scale = anim["samplers"][by_path["scale"]["sampler"]]
     assert translation["interpolation"] == "LINEAR"
     assert scale["interpolation"] == "STEP"
-    assert gltf["accessors"][scale["input"]]["count"] == 1
+    assert gltf["accessors"][scale["input"]]["count"] == 2
     assert gltf["accessors"][translation["input"]]["count"] == 3
+
+
+def test_constant_pose_preserves_authored_nonzero_duration(tmp_path, monkeypatch):
+    pkg = _animated_package()
+    clip = _clip_tree("hold", [_binding("arm", 3)], constant=[2.0, 2.0, 2.0])
+    clip["m_MuscleClip"]["m_StartTime"] = 0.0
+    clip["m_MuscleClip"]["m_StopTime"] = 2.0
+    pkg.add("AnimationClip", clip)
+    _run(tmp_path, monkeypatch, {pkg.name: pkg.finish()})
+    gltf = _glb(tmp_path / "out" / f"{pkg.name}.glb")
+    animation = gltf["animations"][0]
+    sampler = animation["samplers"][0]
+    assert sampler["interpolation"] == "STEP"
+    assert gltf["accessors"][sampler["input"]]["count"] == 2
+    assert gltf["accessors"][sampler["output"]]["count"] == 2
+    assert animation["extras"]["sourceDuration"] == 2.0
 
 
 def test_animator_and_float_slots_are_counted_not_exported(tmp_path, monkeypatch):

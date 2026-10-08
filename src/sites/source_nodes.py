@@ -5,6 +5,7 @@ This module supplies their lossless node-local representation: no name-based
 binding, world-space radius estimate, or navigation behaviour is inferred here.
 """
 from .harvest import CONTRACT_FIELD
+from core.gltf import COORDINATE_SPACE, SOURCE_SPACE, reflect_position
 
 
 def pointer_fields(value):
@@ -37,9 +38,10 @@ def identity(record, graph, transform):
 def attach_component(extras, component_id, kind, class_name, tree):
     """Attach runtime inputs while the existing generic component is read.
 
-    Obstacle extents/center stay in source local coordinates. Enabled, shape and
-    carving values retain their serialized types and values. Harvest view fields
-    retain the entire typetree, with only PPtr spelling changed for exact IDs.
+    Obstacle centers share the canonical node-local basis; extents are lengths
+    and do not change sign. Original center/extents remain source-tagged evidence.
+    Harvest view fields retain the entire tagged typetree, with only PPtr spelling
+    changed for exact IDs.
     """
     if kind == "NavMeshObstacle":
         fields = {
@@ -52,9 +54,18 @@ def attach_component(extras, component_id, kind, class_name, tree):
             "moveThreshold": "m_MoveThreshold",
             "stationaryTime": "m_TimeToStationary",
         }
+        center = tree["m_Center"]
+        canonical_center = dict(zip("xyz", reflect_position([center[axis] for axis in "xyz"])))
         extras.setdefault("navMeshObstacles", []).append({
             "componentId": str(component_id),
             **{key: tree[source] for key, source in fields.items()},
+            "schemaVersion": 2,
+            "coordinateContract": COORDINATE_SPACE,
+            "coordinateUnits": "source-unity-unit",
+            "center": canonical_center,
+            "sourceGeometry": {"coordinateSpace": SOURCE_SPACE,
+                               "center": dict(tree["m_Center"]),
+                               "extents": dict(tree["m_Extents"])},
         })
     elif kind == "MonoBehaviour" and CONTRACT_FIELD in tree:
         if "harvestView" in extras:
@@ -62,5 +73,6 @@ def attach_component(extras, component_id, kind, class_name, tree):
         extras["harvestView"] = {
             "class": class_name,
             "componentId": str(component_id),
+            "fieldCoordinateSpace": SOURCE_SPACE,
             "fields": pointer_fields(tree),
         }

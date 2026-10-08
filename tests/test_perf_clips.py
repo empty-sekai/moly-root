@@ -249,3 +249,91 @@ def test_no_clip_key_is_silently_dropped(tmp_path, monkeypatch):
     exported = document["tracks"][0]["clips"][0]
     assert exported["m_FutureField"] == 7
     assert "m_FutureField" in report["clipFieldSyncDiff"]["inTypetreeOnly"]
+
+
+# -- the track's own settings and its recorded infinite clip ------------------
+
+
+def _streamed(frames):
+    """A StreamedClip payload: big-endian frames of (time, count, keys)."""
+    import struct
+    payload = b""
+    for time, keys in frames:
+        payload += struct.pack(">fi", time, len(keys))
+        for index, coefficients in keys:
+            payload += struct.pack(">i4f", index, *coefficients)
+    words = [int.from_bytes(payload[i:i + 4], "big") for i in range(0, len(payload), 4)]
+    return {"data": words, "curveCount": 6}
+
+
+def _recorded_clip():
+    """A generic clip on the Animator's own object: position and euler."""
+    sentinel = -3.4028234663852886e+38
+    frames = [
+        (sentinel, [(0, (0.0, 0.0, 0.0, 3.9))]),
+        (0.0, [(0, (0.0, 0.0, 0.0, 3.9)), (1, (0.0, 0.0, 0.0, 0.0)),
+               (2, (0.0, 0.0, 0.25, -3.0)), (3, (0.0, 0.0, 0.0, 0.0)),
+               (4, (0.0, 0.0, 0.0, 180.0)), (5, (0.0, 0.0, 0.0, 0.0))]),
+        (2.0, [(0, (0.0, 0.0, 0.0, 3.9)), (1, (0.0, 0.0, 0.0, 0.0)),
+               (2, (0.0, 0.0, 0.0, -2.5)), (3, (0.0, 0.0, 0.0, 0.0)),
+               (4, (0.0, 0.0, 0.0, 0.0)), (5, (0.0, 0.0, 0.0, 0.0))]),
+    ]
+    return {
+        "m_Name": "Recorded", "m_Legacy": False, "m_SampleRate": 60.0,
+        "m_MuscleClip": {
+            "m_StartTime": 0.0, "m_StopTime": 2.0, "m_LoopTime": 0,
+            "m_Clip": {"data": {
+                "m_StreamedClip": _streamed(frames),
+                "m_DenseClip": {"m_CurveCount": 0, "m_FrameCount": 0,
+                                "m_SampleRate": 60.0, "m_BeginTime": 0.0,
+                                "m_SampleArray": []},
+                "m_ConstantClip": {"data": []}}}},
+        "m_ClipBindingConstant": {"genericBindings": [
+            {"path": 0, "attribute": 1, "typeID": 4, "customType": 0, "isPPtrCurve": 0},
+            {"path": 0, "attribute": 4, "typeID": 4, "customType": 4, "isPPtrCurve": 0},
+        ]},
+    }
+
+
+def test_an_infinite_clip_is_exported_with_its_decoded_curves(tmp_path, monkeypatch):
+    """"The recorded clip a track plays is exported slot by slot with each
+    key's segment coefficients and its binding.  Red when the reader keeps
+    only the pointer, resamples, or drops the binding columns."""
+    bundle = _Bundle()
+    clip_id = bundle.add("AnimationClip", _recorded_clip(), 777)
+    track = _track(bundle, "AnimationTrack", "1", infinite=clip_id)
+    bundle.get(track)._tree["m_InfiniteClipOffsetPosition"] = {"x": -1.25, "y": 0.0, "z": 0.5}
+    bundle.get(track)._tree["m_InfiniteClipPostExtrapolation"] = 1
+    report, agg, out = _read(tmp_path, monkeypatch, bundle)
+    assert agg["infiniteClipsDecoded"] == 1
+    assert agg["infiniteClipsUnresolved"] == 0
+    row = json.loads((out / "mysekai__cut_scene__synth.json")
+                     .read_text(encoding="utf-8"))["tracks"][0]
+    assert row["fields"]["m_InfiniteClipOffsetPosition"] == {"x": -1.25, "y": 0.0, "z": 0.5}
+    assert row["fields"]["m_InfiniteClipPostExtrapolation"] == 1
+    assert "m_Clips" not in row["fields"] and "m_Name" not in row["fields"]
+    clip = row["infiniteClip"]
+    assert clip["asset"] == {"file": "CAB-synth", "pathId": "777"}
+    assert clip["name"] == "Recorded"
+    assert clip["sourceStopTime"] == 2.0 and clip["sourceLoopTime"] is False
+    assert [c["slot"] for c in clip["curves"]] == [0, 1, 2, 3, 4, 5]
+    z = clip["curves"][2]
+    assert (z["typeID"], z["attribute"], z["path"], z["component"]) == (4, 1, 0, 2)
+    assert z["kind"] == "cubic"
+    assert z["keys"] == [[0.0, 0.0, 0.0, 0.25, -3.0], [2.0, 0.0, 0.0, 0.0, -2.5]]
+    yaw = clip["curves"][4]
+    assert (yaw["attribute"], yaw["component"]) == (4, 1)
+    assert yaw["keys"][0][4] == 180.0 and yaw["keys"][1][4] == 0.0
+
+
+def test_an_unresolved_infinite_clip_is_reported_not_dropped(tmp_path, monkeypatch):
+    """"A pointer that names no object gives ``None`` and an unread entry.
+    Red when the reader raises, or writes an empty curve table as if read."""
+    report, agg, out = _read(tmp_path, monkeypatch, _clip_track_bundle())
+    assert agg["infiniteClipsUnresolved"] == 1
+    assert agg["infiniteClipsDecoded"] == 0
+    document = json.loads((out / "mysekai__cut_scene__synth.json")
+                          .read_text(encoding="utf-8"))
+    rows = [t for t in document["tracks"] if t["name"] == "inf"]
+    assert rows[0]["infiniteClip"] is None
+    assert {"kind": "infiniteClip", "pointer": {"m_FileID": 0, "m_PathID": "12345"}} in document["unread"]

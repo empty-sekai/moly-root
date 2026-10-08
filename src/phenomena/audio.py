@@ -18,13 +18,28 @@ samples, so they are read from the decoder's report and written next to the audi
 seconds — which is the form a web audio consumer wants, since it loops on a time
 range rather than a sample range.  Waveforms are written with the loop *not* unrolled,
 so a consumer loops them itself over exactly that range.
+
+Which waveform a cue plays, when, and whether it ever stops is not in the decoder's
+report either: it is the cue's sequence structure, read from the archive's own
+tables (see :mod:`phenomena.acb`).  Every package entry of a cue sheet carries it
+for the cues the entry lists — ``sequences`` holds a block for every cue that is
+not *plain*, and ``sequenceExport`` counts both kinds, so a cue the entry lists
+with no block was read and found plain (one waveform, once, from the cue's start),
+while an entry without ``sequenceExport`` was never read at all.  From version 2
+``cueCommands`` carries, for every listed cue that references a sequence (plain
+ones too), the command lists the player reads for its volume -- categories and
+volume commands at the sequence, track and synth level -- and ``sequenceExport``
+names the cue sheet's format number (``acbVersion``), which decides a branch of
+the random-without-repeat type.
 """
 import re
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 
 from core.jsonio import dumps
+from . import acb
 
 DECODER = "vgmstream-cli"
 TRANSCODER = "ffmpeg"
@@ -107,6 +122,44 @@ def archive_bytes(value):
     return bytes(value or b"")
 
 
+SEQUENCE_EXPORT_VERSION = 2
+
+
+def attach_sequences(entry, data):
+    """Put the sequence structure of the cues *entry* lists onto *entry*.
+
+    Cues are the ones the entry's streams name (decoded or not).  An archive
+    that is not a cue sheet at all (a bare waveform container, say) has no
+    sequence structure by construction: the entry says so under
+    ``sequenceError`` and ``None`` is returned.  A cue sheet whose tables cannot
+    be read returns the error text for the caller to report, and its entry
+    says so the same way.  Either way the entry carries no ``sequenceExport``,
+    which a consumer reads as "never read".
+    """
+    for key in ("sequences", "sequenceExport", "sequenceError", "cueCommands"):
+        entry.pop(key, None)
+    if not acb.is_table(data):
+        entry["sequenceError"] = acb.NOT_A_CUE_SHEET
+        return None
+    cues = {stream.get("cue") for stream in entry["streams"] if stream.get("cue")}
+    try:
+        found, direct = acb.sequences(data, cues)
+        acb_version = acb.header_version(data)
+    except (acb.TableError, IndexError, KeyError, struct.error, UnicodeDecodeError) as err:
+        entry["sequenceError"] = f"the cue sheet's tables could not be read: {err}"
+        return entry["sequenceError"]
+    structured = {cue: block for cue, block in found.items() if not acb.is_plain(block)}
+    entry["sequences"] = structured
+    entry["cueCommands"] = {cue: acb.cue_commands(block) for cue, block in found.items()}
+    entry["sequenceExport"] = {
+        "version": SEQUENCE_EXPORT_VERSION, "listed": len(cues),
+        "sequences": len(found), "plain": len(found) - len(structured),
+        "structured": len(structured), "notInArchive": len(cues) - len(found) - len(direct),
+        # Cues that reference a waveform or a synth directly, not a sequence.
+        "direct": direct, "acbVersion": acb_version}
+    return None
+
+
 class Library:
     """Audio of one run: archives always, waveforms when the decoder is present."""
 
@@ -134,20 +187,28 @@ class Library:
         files = {"wav": f"{prefix}/{wav.name}"}
         if self.transcoder:
             ogg = directory / f"{stem}.ogg"
+            # Ogg normally chooses a random stream serial. Pin muxer/codec
+            # behavior and omit inherited tags so the same waveform and encoder
+            # build produce the same bytes, independently of output location.
+            # Keep the existing Vorbis quality; loop points live in loop.json.
             done = _run([self.transcoder, "-y", "-loglevel", "error", "-i", str(wav),
-                         "-c:a", "libvorbis", "-q:a", "4", str(ogg)])
+                         "-c:a", "libvorbis", "-q:a", "4", "-fflags", "+bitexact",
+                         "-flags:a", "+bitexact", "-map_metadata", "-1", str(ogg)])
             if done.returncode == 0 and ogg.exists():
                 files["ogg"] = f"{prefix}/{ogg.name}"
         return files, None
 
-    def add(self, package, name, data, cues=None):
+    def add(self, package, name, data, cues=None, *, namespace=None, report_missing=True):
         """Extract one archive and decode the streams that are asked for.
 
         *cues* names the cue set to decode; ``None`` means the archive holds one
         sound and the whole of it is wanted.  Returns the package entry.
         """
-        directory = self.root / name
-        prefix = f"{self.prefix}/{name}"
+        relative = Path(namespace) / name if namespace is not None else Path(name)
+        if relative.is_absolute() or any(part in ("", ".", "..") for part in relative.parts):
+            raise ValueError("audio storage must remain within its output directory")
+        directory = self.root / relative
+        prefix = f"{self.prefix}/{relative.as_posix()}"
         directory.mkdir(parents=True, exist_ok=True)
         archive = directory / f"{name}.acb"
         archive.write_bytes(data)
@@ -181,10 +242,14 @@ class Library:
                                              "reason": stream["error"]})
                 stream.update(files or {})
                 entry["streams"].append(stream)
-        for cue in sorted((wanted or set()) - set(found)):
+        for cue in sorted((wanted or set()) - set(found)) if report_missing else ():
             self.unsupported.append({"package": package, "cue": cue,
                                      "reason": NO_CUE})
             entry["streams"].append({"cue": cue, "error": NO_CUE})
+        error = attach_sequences(entry, data)
+        if error is not None:
+            self.unsupported.append({"package": package, "archive": entry["archive"],
+                                     "reason": error})
         self.packages.append(entry)
         return entry
 

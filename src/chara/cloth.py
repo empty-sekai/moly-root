@@ -34,7 +34,7 @@ convention; their entry counts are kept in ``constraintCounts``.
 import math
 from collections import Counter
 
-from core.gltf import unity_to_gltf_pos, unity_to_gltf_quat
+from core.gltf import COORDINATE_SPACE, SOURCE_SPACE, unity_to_gltf_pos, unity_to_gltf_quat
 
 SELECTION_NAMES = {0: "invalid", 1: "move", 2: "fixed", 3: "extend"}
 EXPECTED_VERSIONS = {"MagicaBoneCloth": 7, "ClothData": 5, "MeshData": 2, "SelectionData": 2}
@@ -502,8 +502,17 @@ def extract_bone_cloth(objects, to_gltf=True, mutate=None):
         "byClass": dict(Counter(c["class"] for c in components)),
     }
     return {
-        "coordinateSystem": ("gltf-right-handed-y-up-meters (x reflected from unity)"
-                             if to_gltf else "unity-left-handed-y-up-meters"),
+        "schemaVersion": 2,
+        "coordinateSystem": COORDINATE_SPACE if to_gltf else SOURCE_SPACE,
+        "coordinateUnits": "source-unity-unit",
+        # clothParams is transported verbatim, including any vector parameters;
+        # never let the converted bind-pose imply those fields were converted.
+        "fieldCoordinateSpace": {
+            "components[].vertices": COORDINATE_SPACE if to_gltf else SOURCE_SPACE,
+            "colliders": COORDINATE_SPACE if to_gltf else SOURCE_SPACE,
+            "components[].clothParams": SOURCE_SPACE,
+            "checks": SOURCE_SPACE,
+        },
         "expectedVersions": EXPECTED_VERSIONS,
         "selectionEnum": {"invalid": 0, "move": 1, "fixed": 2, "extend": 3},
         "capsuleSemantics": {

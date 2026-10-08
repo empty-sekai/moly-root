@@ -214,7 +214,7 @@ The current `unsupported` breakdown is: 63 non-Transform bindings, 18 `CanvasRen
 
 One entry per emitting node, `{node, system, renderer}`. `node` is that node's `path`.
 
-`system` holds the emitter parameters: `duration`, `looping`, `prewarm`, `playOnAwake`, `simulationSpeed`, `simulationSpace`, `randomSeed`, `maxParticles`, `start`, plus `emission`, `shape`, `sizeOverLifetime`, `colorOverLifetime`, `rotationOverLifetime`, `velocityOverLifetime`, `limitVelocity`, `textureSheet`, `customData`, `subEmitters`, `noise`, `forceOverLifetime`, `collision`, and `trails` when the corresponding module is enabled. A module that is enabled but not modelled here is listed under `unsupported` with reason `particle module not modelled`.
+`system` holds the emitter parameters: `duration`, `looping`, `prewarm`, `playOnAwake`, `simulationSpeed`, `simulationSpace`, `randomSeed`, `autoRandomSeed`, `useUnscaledTime`, `cullingMode`, `stopAction`, `maxParticles`, `start`, plus `emission`, `shape`, `sizeOverLifetime`, `colorOverLifetime`, `rotationOverLifetime`, `velocityOverLifetime`, `limitVelocity`, `textureSheet`, `customData`, `subEmitters`, `noise`, `forceOverLifetime`, `collision`, and `trails` when the corresponding module is enabled. Missing or explicit `null` seed-owner fields remain `null`; they are never rewritten to an automatic seed. A module that is enabled but not modelled here is listed under `unsupported` with reason `particle module not modelled`.
 
 The last six are described, together with **the four things a consumer has to get right**, under [modules beyond over-lifetime](#modules) below.
 
@@ -251,7 +251,7 @@ Besides size, colour, rotation and velocity over lifetime, an emitter may carry 
 | key | present when | content |
 |---|---|---|
 | `customData` | the custom-data module is enabled | `{custom1, custom2}`, each `{mode, componentCount, components[4], color}`. `mode` is `disabled` / `vector` / `color`. |
-| `subEmitters` | the sub-emitter module is enabled | an array of `{emitter, type, properties, inherit, emitProbability}`. |
+| `subEmitters` | the sub-emitter module is enabled | an array of `{emitter, sourcePointer, type, properties, inherit, emitProbability}`. |
 | `noise` | the noise module is enabled | `{separateAxes, strength/strengthY/strengthZ, frequency, damping, octaves, octaveMultiplier, octaveScale, quality, dimensions, scrollSpeed, remapEnabled, remap/remapY/remapZ, positionAmount/rotationAmount/sizeAmount}`. |
 | `forceOverLifetime` | the force module is enabled | `{x, y, z, inWorldSpace, randomizePerFrame}`. The three axes are an **acceleration**: multiply by the time step and add to velocity — not a displacement and not an impulse. |
 | `collision` | the collision module is enabled | `{type, mode, dampen, bounce, lifetimeLoss, minKillSpeed, maxKillSpeed, radiusScale, quality, voxelSize, collidesWith, collidesWithDynamic, interiorCollisions, maxCollisionShapes, collisionMessages, colliderForce, multiplyColliderForceBy*, planeSlots, planes}`. `type` is `planes` / `world`; `mode` is `3d` / `2d`; `collidesWith` is a layer-mask bit field; `lifetimeLoss` is the **fraction of total lifetime** removed per collision (`1.0` = dies on contact), not a number of seconds. |
@@ -259,7 +259,7 @@ Besides size, colour, rotation and velocity over lifetime, an emitter may carry 
 
 `noise.quality` is a **dimension count**, not a quality level: the accompanying `dimensions` spells it out — `3` samples a 3D field, `1` and `2` sample a 2D one. `damping` true means strength is scaled by frequency (divided by `frequency`), keeping visual amplitude constant as frequency rises. Noise acts on **velocity**, the same channel force uses.
 
-`subEmitters[].emitter` is the **node path** the child emitter sits on. `null` means the entry names no emitter and therefore emits nothing — it does not mean "emit self". `inherit` is five booleans `{color, size, rotation, lifetime, duration}` taken bit by bit from `properties`; `properties` is also preserved verbatim, because the content contains "inherit everything" written as all bits set rather than the enumeration's 31, and both spellings test the same bitwise. A pointer outside this package leaves `emitter` as `null` and is listed under `unsupported` with reason `sub-emitter is not in this package` — **a null pointer and an unresolvable one are different things**, and the former is not a gap.
+`subEmitters[].emitter` is the **node path** the child emitter sits on. `sourcePointer` preserves the original `{fileId,pathId}` PPtr, including large or negative `pathId` values. `null` means the entry names no emitter and therefore emits nothing — it does not mean "emit self". `inherit` is five booleans `{color, size, rotation, lifetime, duration}` taken bit by bit from `properties`; `properties` is also preserved verbatim, because the content contains "inherit everything" written as all bits set rather than the enumeration's 31, and both spellings test the same bitwise. A pointer outside this package leaves `emitter` as `null` and is listed under `unsupported` with reason `sub-emitter is not in this package` — **a null pointer and an unresolvable one are different things**, and the former is not a gap.
 
 #### The four things to get right
 
@@ -281,6 +281,7 @@ phenomena/
   index.json                                  phenomenon list
   icons/<icon name>.png                       every phenomenon icon (one shared thumbnail package)
   models/<asset name>-<digest>.glb            model-asset and mesh-emitter geometry, shared (see below)
+  collision.json                              every effect collider, with its authored mesh, for the particle collision query
   audio/loop.json                             audio status and every loop range
   audio/<archive>/<archive>.acb               the audio archive as shipped
   audio/<archive>/<cue>.wav|.ogg              decoded waveforms (needs the external decoder)
@@ -298,7 +299,7 @@ phenomena/
 
 Every file path in `index.json` is **relative to that file itself**. Image filenames carry a package prefix because image names repeat across phenomena; read files through the `file` field rather than constructing names yourself.
 
-The current content holds 15 phenomena, 29 configurations (15 global plus 14 overriding), 29 profiles, 15 gradients, 14 site overrides, 107 particle effects (560 emitters), 283 images, 29 texture-array bindings (124 layer PNGs in all), 10 model assets (20 glTF geometry files after deduplication, about 182 KB in all), one timeline, 31 audio streams across 13 sound packages when the external decoder is present (the sound packages are named by master rows, so that count does not depend on how many phenomena were extracted), 15 icons, 192 `omitted` entries, and 9 `unsupported` entries. All phenomena environment packages together are about 9.9 MB — **phenomena assets are light**, so there is no need to batch or cache them the way a bulky asset domain requires. Of the 15 phenomena, 13 have all six sites, one has only two, and the delivery-site one has no site package at all.
+The current content holds 15 phenomena, 29 configurations (15 global plus 14 overriding), 29 profiles, 15 gradients, 14 site overrides, 107 particle effects (560 emitters), 283 images, 29 texture-array bindings (124 layer PNGs in all), 10 model assets (20 glTF geometry files after deduplication, about 182 KB in all), one timeline, 31 audio streams across 13 sound packages when the external decoder is present (the sound packages are named by master rows, so that count does not depend on how many phenomena were extracted), 15 icons, 157 `omitted` entries, and 9 `unsupported` entries. All phenomena environment packages together are about 9.9 MB — **phenomena assets are light**, so there is no need to batch or cache them the way a bulky asset domain requires. Of the 15 phenomena, 13 have all six sites, one has only two, and the delivery-site one has no site package at all.
 
 ### Two-level lookup and overrides
 
@@ -353,7 +354,7 @@ Every profile in the current content has five components: `MysekaiFogVolume` (9 
 
 Particle effects. The top level is `version` (currently 1), `phenomenon`, `effects`, and `summary`.
 
-Each `effects[<prefab name>]` is `{kind, site, variant, nodes, particles, effectors, effectiveRotation}`:
+Each `effects[<prefab name>]` is `{kind, site, variant, nodes, particles, colliders, effectors, effectiveRotation}`:
 
 | Field | Meaning |
 |---|---|
@@ -362,6 +363,7 @@ Each `effects[<prefab name>]` is `{kind, site, variant, nodes, particles, effect
 | `variant` | Which package variant the prefab came from (`global` / `common` / `unique__<site>`). |
 | `nodes` | Node tree, parents first. Each entry has `name`, `path`, `parent`, `active`, `position`, `rotation`, and `scale`. |
 | `particles` | Emitter array, see below. |
+| `colliders` | Collider components on the prefab's nodes, with their serialized controls; a `MeshCollider` record also names its authored mesh in `collision.json` through `collisionGeometry` (see that section). |
 | `effectors` | Lifecycle components, see below; `[]` when the prefab carries none. |
 | `effectiveRotation` | The per-frame rotation rule, given only for effects whose `kind` is `camera`; `null` otherwise. |
 
@@ -545,15 +547,31 @@ Only cues that a master row names are decoded: music from the phenomenon's music
 
 The current 9 `unsupported` entries break down as: mesh emitters pointing at the engine's built-in geometry 8; and one animation clip inside a model asset. **Unmodeled content is always listed entry by entry, never dropped silently.**
 
+### `collision.json`: what weather particles collide with
+
+Weather particle systems carry a particle collision module in world mode, and its layer mask decides what they can hit. There are two groups. The rain drops of `006_rain`, `007_rainnight` and `008_thunder`, the meteors of `009_meteorshower` and the snow of `011_snownight` use mask 8, the ground layer (layer 3) alone; the daytime snow of `010_snow` has no collision module. What they hit is a `MeshCollider` that the **site effect prefab** carries on that layer. No other environment package and no site package has a collider on layer 3, so for these mask-8 systems `collision.json` is the whole candidate set. The collider's mesh lives in a shared effect-model package (in the JP set one underwater site variant carries its own copy). The soap bubbles of `012_soapbubble` (the `bubble` and `bubble_edge` systems) are the other group: their mask is every layer (4294967295), and no soap-bubble package carries a collider, so `collision.json` has no row for them and does not hold what they hit: the colliders in the site packages, on layers 0, 4 and 9, and the fixtures placed at run time, which the client moves to layer 9 when it attaches their colliders.
+
+`collision.json` is one document per run, `{schemaVersion, frame, units, semantics, summary, geometry, colliders}`:
+
+- `geometry[<id>]` is one authored mesh per source object: `positions` and `triangles` **in the authored left-handed frame** (`unity-lh-y-up-authored`, `source-unity-unit`), triangle corners in index-buffer order with the authored winding, `vertexCount`, `triangleCount`, `subMeshes`, `authoredBounds` (the bounds the mesh itself stores), `vertexBounds`, `cleaningFacts`, `bakedPhysicsBytes`, `geometrySha256` (over the packed arrays; the layout is in `semantics`) and `source` `{bundle, archive, pathId, bundleSha256}`.
+- `colliders[]` has one row per collider component: `{phenomenon, effect, kind, site, variant, node, component, queryShape, layer, enabled, isTrigger, convex, cooking, includeLayers, excludeLayers, activeInHierarchy, chain, geometry, source}`. `chain` is the local transform of every node from the prefab root down to the collider, parents first, each with its `active` flag; `cooking` is the serialized option value with its flag names.
+
+**This is not the render copy.** The collider record in `fx/effects.json` also names the mesh's render GLB (`meshes`), which is reflected into the viewer's frame with its winding reversed. The particle query does not ask for hits on both sides of the mesh, so winding decides which faces a sweep can hit, and it keeps the nearest hit, so the triangle set must be the authored one: build the query from `collision.json`, not from the GLB. Positions and chain values are the stored floats; nothing is reflected.
+
+**Cooking is not applied.** The engine cooks the mesh before querying it, and cooking options that include mesh cleaning remove degenerate and duplicate triangles and weld coincident vertices. The exported triangles are the cooking *input*; `cleaningFacts` counts what cleaning could touch (exact duplicate positions, triangles repeating an index, zero-area triangles, triangles that welding would make coincident) without applying it. A mesh can also store a copy cooked when the game was built; `bakedPhysicsBytes` gives its byte lengths (`triangleMesh`, `convexMesh`). Every collider mesh in the current content stores none (0 and 0), so the engine cooks each one itself when the collider is created, from the arrays exported here, and the packages hold no cooked result to compare against. A convex collider (queried against a hull the engine builds), a mesh with more than one submesh (the concatenation order is not established), a compressed or streamed mesh, or an unresolved pointer is reported with a `reason` and never approximated; none occurs in the current content.
+
+**Not in the packages**: where the prefab root is placed (that is decided where the effect is installed), and the collider and body ids a query reports (runtime object ids). No environment prefab carries a rigidbody.
+
+Current content: the JP 6.8.1 set has 45 colliders, all `MeshCollider` on layer 3, enabled, not triggers, not convex, active, over 6 meshes. **44 of them are live**, in site-unique prefabs (`variant` `unique__<site>`). The 45th is in the rainbow's common ground template `fx_env_site_017_common_ground_01` (`variant` `common`, `site` `null`, the beach mesh), which the client never instantiates: the site environment loader asks only the phenomenon's global package and the current site's unique package for its sky, camera and `fx_env_site_<phenomenon>_<site>` prefabs, and each `017_rainbow` unique prefab carries its own copy of the template's ground node and collider. No field of the row says it is not live, so a consumer building the collision scene leaves out the rows whose `variant` is `common`. Cooking value 30 (`CookForFasterSimulation`, `EnableMeshCleaning`, `WeldColocatedVertices`, `UseFastMidphase`) is on 10 live colliders (the home variants and one flower-garden variant); the other 34 live colliders and the template have 0. Every chain is identity except the meteor shower's home collider, raised by 0.05. The CN 6.0.0 set has 35 colliders over 5 meshes: 34 live (cooking 30 on 8, 0 on 26) plus the same rainbow template; it has no universe, underwater or soap-bubble packages.
+
 ### `omitted`: read and deliberately not exported
 
-`unsupported` and `omitted` are **two different things**: the first is "should be here and is not", the second is "read, judged, and left out on purpose". Mixing them buries the real gaps — all 192 current `omitted` entries come from effect-prefab nodes and break down as `CanvasRenderer` 122, `MeshFilter` 35, `MeshCollider` 35.
+`unsupported` and `omitted` are **two different things**: the first is "should be here and is not", the second is "read, judged, and left out on purpose". Mixing them buries the real gaps — every current `omitted` entry comes from an effect-prefab node: 157 in the CN 6.0.0 content (`CanvasRenderer` 122, `MeshFilter` 35) and 176 in the JP 6.8.1 content (`CanvasRenderer` 131, `MeshFilter` 45). A `MeshCollider` is **not** omitted: it has its own record (see `collision.json`).
 
 | Component | Why it is not exported |
 |---|---|
 | `CanvasRenderer` | It draws only what a **graphic** component submits to it, and these prefabs carry **no graphic component at all** (those nodes hold a particle system, or one non-graphic script), so it contributes nothing to draw. |
-| `MeshFilter` | The 35 nodes it sits on have **no mesh renderer**, so they are invisible; its only role here is to name the mesh of the collider on the same node. |
-| `MeshCollider` | Collision surface, not geometry: invisible for the same reason, and the mesh it names is a **site's navigation surface** living in another package (`mesh.fileId` is non-zero). What interacts with it is a particle collision module. |
+| `MeshFilter` | The nodes it sits on have **no mesh renderer**, so they are invisible; its only role here is to name the mesh of the collider on the same node, and that mesh is carried by the collider record. |
 
 Each `omitted` entry carries `{phenomenon, effect, node, component, reason}`, plus `mesh: {fileId, pathId}` when it names a mesh. **The judgement is narrow**: put a mesh renderer on the same node and `MeshFilter` stops being `omitted` and becomes an `unsupported` "prefab component not modelled" — visible geometry is not allowed to fall through this rule.
 
@@ -583,9 +601,9 @@ Points that matter:
 
 ## Furniture geometry and embedded animations (`fixture-models/`)
 
-The manifest's whole `mysekai/fixture/` family — **999 packages**, one `.glb` each (`index.json` version 2). The scenes array holds one scene per prefab variant; node TRS and vertex data are written **verbatim in the authored (Unity left-handed) space, with no reflection** — the *opposite* of the character `.glb` convention, and the two families must not share one coordinate-handling code path.
+The manifest's whole `mysekai/fixture/` family — **999 packages**, one `.glb` each (`index.json` version 3). Furniture, sites and characters share `moly-rh-y-up-reflect-x-v1`: Unity left-handed Y-up X reflection is applied exactly once at export, covering node translation/rotation, vertex normals/tangents, triangle winding, inverse bind matrices and animation TRS. Units are explicitly `source-unity-unit`; no physical metre claim is made. UVs are independent and tagged `unity-bottom-left` (no implicit V flip); authored Unity TRS remains as `sourceTransform` evidence and must not be applied again.
 
-**`animations[]` are embedded** (since 2026-09-08): every AnimationClip a package ships becomes one glTF animation inside the same `.glb`, no sidecar. A binding path is a crc32 hash, resolved **anchored** to the variant carrying the Animator (animator-anchor-relative paths first, hierarchy-root-relative next, whole full-node paths last; first registration wins — when several size variants share relative paths the owner is fixed, never walk order). Channels are Transform TRS only (`translation` / `rotation` / `scale`), targeting nodes that already exist on this glb's node trees, with values in the same verbatim authored space. Interpolation maps from the source curve storage form: StreamedClip cubic polynomials → `CUBICSPLINE` (tangents recovered from the (a,b,c,d) coefficients), DenseClip → `LINEAR`, ConstantClip → `STEP`.
+**`animations[]` are embedded** (since 2026-09-08): every AnimationClip a package ships becomes one glTF animation inside the same `.glb`, no sidecar. A binding path is a crc32 hash, resolved **anchored** to the variant carrying the Animator (animator-anchor-relative paths first, hierarchy-root-relative next, whole full-node paths last; first registration wins — when several size variants share relative paths the owner is fixed, never walk order). Channels are Transform TRS only (`translation` / `rotation` / `scale`), targeting nodes that already exist on this glb's node trees, with values in the canonical space; CUBICSPLINE tangents receive the same linear reflection map. Interpolation maps from the source curve storage form: StreamedClip cubic polynomials → `CUBICSPLINE`, DenseClip → `LINEAR`, ConstantClip → `STEP`.
 
 **Accounting** (per curve slot; the classes always sum to the decoded slot count): the `index.json` summary gains `animatedPackages` / `animationClips` / `animationChannels` / `animationFloatSlots` / `animationUnresolvedSlots`; each package's `animations` entry carries `clipCount` / `gltfChannels` / `channeledSlots` / `floatSlots` / `unresolvedSlots` plus a `clips[]` breakdown. Non-Transform bindings (the `m_Float` family: physics, material, blendshape, muscle slots) and unresolved hashes are **counted, not exported** — retargeting is out of scope for this product. Current-content numbers: 137 animated packages, 1727 embedded clips, 11751 channels; 109661 float slots and 18602 unresolved slots counted only (the unresolved mass is `act_*` character-action clips binding character-rig bones, which do not live in a furniture package — a different consumer). The egg family (fixtures 837–840, the `change_fixture_timeline` gate) has been accepted against the decrypted source clip by clip: egg1's 51 clips match on all 2508/2508 channel sample counts.
 
@@ -597,6 +615,12 @@ The site asset pack. The nine sites share **one** Unity world coordinate system,
 offset each; beside the eight scene packages, the same path also ships the indoor
 kit, the room skins, the field objects, the travel cannon and the world map — **109**
 packages in all, and not one of them is left outside this contract.
+
+Node `extras.navMeshObstacles[]` rows declare `schemaVersion=2` and
+`coordinateContract`; their centers are already in canonical node-local space.
+Extents are lengths and remain unchanged. `sourceGeometry` is tagged source
+evidence, never another runtime center to reflect. `harvestView.fields` remains
+an authored typetree and declares its separate `fieldCoordinateSpace`.
 
 **What a consumer must know first, because it decides whether the pack is usable at
 all**: **every glb keeps its own package's origin. A site's world offset is in the
@@ -1021,8 +1045,10 @@ FixtureView attach slots. A view keeps its exact `asset`, `gameObject`, `animato
 `insideDoorActionPoint` and `outsideDoorActionPoint` identities (`file`, decimal
 string `pathId`). Authored nulls and unresolved references remain distinct.
 
+`houseViews.schemaVersion=2` declares `coordinateContract=moly-rh-y-up-reflect-x-v1`.
 `transforms` contains the action points and their ancestors, with exact parent
-references and authored local position, rotation and scale. Resolve these against
+references, canonical local position/rotation and unchanged scale. Original Unity
+TRS is only retained in source-tagged `sourceTransform` evidence. Resolve these against
 the current instance; do not treat local coordinates as shared world positions.
 The animator identity joins the package's existing `animators` table, which leads
 to the existing controller clip table, curves and full animation event payloads.

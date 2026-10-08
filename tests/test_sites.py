@@ -53,7 +53,27 @@ class _Object:
         return self._tree
 
     def read(self):
+        if self.type.name == "Mesh":
+            return _stub_mesh(self._tree.get("m_Name"))
         return SimpleNamespace(image=self._image, name=self._tree.get("m_Name"))
+
+
+def _stub_mesh(name):
+    """A fixture mesh as the reader returns it: one vertex stream holding the
+    positions and one texture coordinate set of zeros, laid out the way the
+    channel table says.  The site writer decodes texture coordinates from that
+    stream itself, so the stream has to be there and agree with the table."""
+    vertices = _StubMeshHandler.ARRAYS[name]["vertices"]
+    channels = [SimpleNamespace(stream=0, offset=0, format=0, dimension=0)
+                for _ in range(14)]
+    channels[0] = SimpleNamespace(stream=0, offset=0, format=0, dimension=3)
+    channels[4] = SimpleNamespace(stream=0, offset=12, format=0, dimension=2)
+    data = b"".join(struct.pack("<5f", *vertex, 0.0, 0.0) for vertex in vertices)
+    return SimpleNamespace(
+        image=None, name=name, m_MeshCompression=0, m_StreamData=None,
+        m_VertexData=SimpleNamespace(m_Channels=channels,
+                                     m_VertexCount=len(vertices), m_DataSize=data),
+        object_reader=SimpleNamespace(version=(2022, 3, 62, 3)))
 
 
 class _StubMeshHandler:

@@ -18,11 +18,22 @@ from fixtures.house_views import read as read_house_views
 
 
 def extract_package(store, name):
-    """Extract only the explicitly selected package; never infer game state."""
+    """Extract only the explicitly selected package; never infer game state.
+
+    The game opens a bundle's declared dependencies before it uses the bundle's
+    objects, so a pointer into a dependency resolves: a furniture Animator's
+    controller can live in the furniture's timeline bundle, with the clips it
+    plays.  The declared dependencies are therefore loaded first, and a
+    controller found in another file brings the clips it names along, because
+    the package's clips are where a reader looks a controller's motions up.
+    """
+    store.load_dependencies([name])
     package = store.package(name)
     if package is None:
         raise FileNotFoundError(f"selected furniture package is missing: {name}")
+    own = {record.archive for record in package.files}
     animators, fixture_views, controllers, clips, materials = [], [], {}, [], []
+    foreign_clips = {}
     for record in package.files:
         for path_id, kind in record.kinds.items():
             if kind == "MonoBehaviour" and record.script_of(path_id) == "FixtureView":
@@ -46,6 +57,12 @@ def extract_package(store, name):
             if controller is not None:
                 key = (controller[0].archive, controller[1])
                 controllers[key] = _controller(store, *controller)
+                if controller[0].archive not in own:
+                    controller_tree = controller[0].tree(controller[1])
+                    for pointer in controller_tree.get("m_AnimationClips") or []:
+                        target = store.follow(controller[0], pointer)
+                        if target is not None and target[0].archive not in own:
+                            foreign_clips[(target[0].archive, target[1])] = target
     for record in package.files:
         for path_id, kind in record.kinds.items():
             if kind == "AnimationClip":
@@ -57,6 +74,8 @@ def extract_package(store, name):
                                   "savedProperties": _json_identity(tree.get("m_SavedProperties")),
                                   "keywords": tree.get("m_ShaderKeywords"),
                                   "validKeywords": tree.get("m_ValidKeywords")})
+    for record, path_id in foreign_clips.values():
+        clips.append(_clip(record, path_id, animators))
     return {"name": name, "fixtureViews": fixture_views,
             "houseViews": read_house_views(store, package), "animators": animators,
             "controllers": list(controllers.values()), "clips": clips, "materials": materials,

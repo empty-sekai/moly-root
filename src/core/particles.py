@@ -82,25 +82,47 @@ MODELLED_MODULES = {
     "InitialModule", "EmissionModule", "ShapeModule", "SizeModule", "ColorModule",
     "RotationModule", "VelocityModule", "ClampVelocityModule", "UVModule",
     "CustomDataModule", "SubModule", "NoiseModule", "ForceModule",
-    "CollisionModule", "TrailModule",
+    "CollisionModule", "TrailModule", "InheritVelocityModule",
+    "RotationBySpeedModule",
 }
 
 
 def _keys(curve):
     return [{"time": k["time"], "value": k["value"],
-             "inSlope": None if k["inSlope"] in (float("inf"), float("-inf")) else k["inSlope"],
-             "outSlope": None if k["outSlope"] in (float("inf"), float("-inf")) else k["outSlope"],
+             # jsonio preserves signed infinity as a numeric string. Collapsing
+             # both signs to null loses which endpoint a stepped segment uses.
+             "inSlope": k["inSlope"],
+             "outSlope": k["outSlope"],
              "weightedMode": k.get("weightedMode"),
              "inWeight": float(k.get("inWeight", 0.0)),
              "outWeight": float(k.get("outWeight", 0.0))}
             for k in curve.get("m_Curve", [])]
 
 
+def _wrap(curve):
+    """An animation curve's serialized ``(m_PreInfinity, m_PostInfinity)``.
+
+    The integers are kept verbatim: the engine's polynomial-curve test compares
+    these serialized values themselves when a curve does not span the whole
+    0..1 lifetime, so a translated enum name would be a second encoding with
+    nothing to check it against.  A missing field stays ``None`` (unknown), not
+    a default wrap mode.
+    """
+    out = []
+    for name in ("m_PreInfinity", "m_PostInfinity"):
+        value = curve.get(name)
+        if value is not None and type(value) is not int:
+            raise ValueError(f"AnimationCurve.{name}: serialized integer expected")
+        out.append(value)
+    return tuple(out)
+
+
 def min_max_curve(node):
     """Normalise one min-max curve.
 
     ``scalar`` holds the authored constant (and the curve multiplier);
-    ``minScalar`` is only live in the two-constants state.
+    ``minScalar`` is only live in the two-constants state.  Each curve lane
+    carries its serialized wrap modes next to its keys.
     """
     state = node.get("minMaxState", 0)
     mode = CURVE_MODES.get(state, f"state{state}")
@@ -113,10 +135,14 @@ def min_max_curve(node):
     elif mode == "curve":
         out["multiplier"] = float(node.get("scalar", 1.0))
         out["keys"] = _keys(node.get("maxCurve", {}))
+        out["preInfinity"], out["postInfinity"] = _wrap(node.get("maxCurve", {}))
     else:
         out["multiplier"] = float(node.get("scalar", 1.0))
         out["minKeys"] = _keys(node.get("minCurve", {}))
         out["maxKeys"] = _keys(node.get("maxCurve", {}))
+        if mode == "twoCurves":
+            out["minPreInfinity"], out["minPostInfinity"] = _wrap(node.get("minCurve", {}))
+            out["maxPreInfinity"], out["maxPostInfinity"] = _wrap(node.get("maxCurve", {}))
     return out
 
 
@@ -135,7 +161,10 @@ def _gradient(node):
         key = node.get(f"key{i}", {})
         alphas.append({"time": node.get(f"atime{i}", 0) / GRADIENT_TIME_SCALE,
                        "alpha": key.get("a", 0.0)})
-    return {"colorKeys": colors, "alphaKeys": alphas}
+    return {"colorKeys": colors, "alphaKeys": alphas,
+            "interpolation": {0: "blend", 1: "fixed", 2: "perceptualBlend"}.get(
+                node.get("m_Mode"), node.get("m_Mode")),
+            "colorSpace": node.get("m_ColorSpace")}
 
 
 def _color(node):
@@ -147,12 +176,12 @@ def min_max_gradient(node):
     state = node.get("minMaxState", 0)
     mode = GRADIENT_MODES.get(state, f"state{state}")
     out = {"mode": mode}
-    if mode in ("color", "randomColor"):
+    if mode == "color":
         out["color"] = _color(node.get("maxColor", {}))
     elif mode == "twoColors":
         out["min"] = _color(node.get("minColor", {}))
         out["max"] = _color(node.get("maxColor", {}))
-    elif mode == "gradient":
+    elif mode in ("gradient", "randomColor"):
         out["gradient"] = _gradient(node.get("maxGradient", {}))
     else:
         out["minGradient"] = _gradient(node.get("minGradient", {}))
@@ -168,8 +197,86 @@ def _number(node, key, default=0.0):
     return float(node.get(key, default))
 
 
+def _seed_bits(value):
+    """Unity serializes an int32; native seed arithmetic consumes its uint32 bits."""
+    if value is None:
+        return None
+    if type(value) is not int or not -(1 << 31) <= value <= (1 << 32) - 1:
+        raise ValueError("ParticleSystem.randomSeed: int32 or uint32 seed expected")
+    return value if value >= 0 else value + (1 << 32)
+
+
+def _optional_seed_auto(value):
+    if value is None or type(value) is bool:
+        return value
+    raise ValueError("ParticleSystem.autoRandomSeed: bool or null expected")
+
+
 def _enum(table, value):
     return table.get(value, value)
+
+
+# The shape's texture controls, serialized beside its texture reference:
+# (serialized name, readable name, value type).  Integers stay raw codes.
+SHAPE_TEXTURE_CONTROLS = (
+    ("m_TextureClipChannel", "textureClipChannel", int),
+    ("m_TextureClipThreshold", "textureClipThreshold", float),
+    ("m_TextureUVChannel", "textureUVChannel", int),
+    ("m_TextureColorAffectsParticles", "textureColorAffectsParticles", bool),
+    ("m_TextureAlphaAffectsParticles", "textureAlphaAffectsParticles", bool),
+    ("m_TextureBilinearFiltering", "textureBilinearFiltering", bool),
+)
+
+
+def _shape_texture(shape):
+    """The shape's texture reference and controls, for every shape type.
+
+    The engine's per-shape start routines -- circle and edge, cone volume,
+    donut and hemisphere among them, not only the mesh one -- test whether the
+    shape holds a texture while starting new particles, and take a texture
+    step only when it does.  A consumer can refuse that step only if the
+    reference is there for every type, so it is reported beside the other
+    shape fields and not only inside the mesh-spawn record (which keeps its
+    own copy, in the form its consumer already reads).
+
+    ``texture`` is ``None`` for the null reference (file and path id both
+    zero) and ``{fileId, pathId}`` for anything else, so any non-null pair is
+    kept and can be refused.  When the serialized field is missing the key is
+    left out: unknown is not the same as no texture.  The controls are
+    reported verbatim under their scripting names, ``None`` when missing.
+    """
+    out = {}
+    if "m_Texture" in shape:
+        pointer = shape["m_Texture"]
+        if (not isinstance(pointer, dict) or type(pointer.get("m_FileID")) is not int
+                or type(pointer.get("m_PathID")) is not int):
+            raise ValueError("ShapeModule.m_Texture: serialized object reference expected")
+        out["texture"] = (None if pointer["m_FileID"] == 0 and pointer["m_PathID"] == 0
+                          else {"fileId": pointer["m_FileID"], "pathId": str(pointer["m_PathID"])})
+    for name, readable, kind in SHAPE_TEXTURE_CONTROLS:
+        value = shape.get(name)
+        if value is not None:
+            if kind is float and type(value) in (int, float):
+                value = float(value)
+            elif type(value) is not kind:
+                raise ValueError(f"ShapeModule.{name}: serialized {kind.__name__} expected")
+        out[readable] = value
+    return out
+
+
+def _shape_controls(shape):
+    # Keep missing old metadata distinct from a current authored zero/mode.
+    radius = shape.get("radius") if isinstance(shape.get("radius"), dict) else {}
+    arc = shape.get("arc") if isinstance(shape.get("arc"), dict) else {}
+    return {
+        "sourceVersion": 1,
+        "arcSpread": arc.get("spread"),
+        "arcSpeed": min_max_curve(arc["speed"]) if "speed" in arc else None,
+        "radiusMode": _enum(ARC_MODES, radius.get("mode")),
+        "radiusSpread": radius.get("spread"),
+        "radiusSpeed": min_max_curve(radius["speed"]) if "speed" in radius else None,
+        "randomPositionAmount": shape.get("randomPositionAmount"),
+    }
 
 
 def _node_path(pointer, resolve_node, gaps, module, reason):
@@ -208,9 +315,14 @@ def _custom_data_stream(module, stream):
 def _sub_emitter(entry, resolve_node, gaps):
     """One sub-emitter: which system, on what trigger, inheriting what."""
     properties = entry.get("properties", 0)
+    pointer = entry.get("emitter")
     return {
-        "emitter": _node_path(entry.get("emitter"), resolve_node, gaps,
+        "emitter": _node_path(pointer, resolve_node, gaps,
                               "SubModule", UNRESOLVED_SUB_EMITTER),
+        "sourcePointer": ({"fileId": pointer.get("m_FileID"),
+                           "pathId": (str(pointer["m_PathID"])
+                                      if "m_PathID" in pointer else None)}
+                          if isinstance(pointer, dict) else None),
         "type": _enum(SUB_EMITTER_TYPES, entry.get("type")),
         "properties": properties,
         "inherit": {name: bool(properties & bit) for name, bit in SUB_EMITTER_INHERIT},
@@ -245,12 +357,44 @@ def _noise(module):
     return out
 
 
-def _collision(module, resolve_node, gaps):
+def _plane_sources(slots, resolve_node, resolve_asset, gaps):
+    """What each plane slot holds, in slot order.
+
+    An empty slot is ``None``.  A slot naming a node of this prefab is
+    ``{"node": path}``.  A slot naming a Transform of another package -- a
+    model asset's own node, which the prefab points at without instantiating
+    it -- is ``{"asset": ...}`` with that Transform's package, archive, node
+    path in its own file and its local transform chain, root first (the node
+    is never placed in a scene, so its chain is all the pose it has).  A slot
+    that names something neither resolves is reported as a gap and recorded
+    as ``{"unresolved": true}``.
+    """
+    sources = []
+    for pointer in slots:
+        if not (pointer or {}).get("m_PathID", 0):
+            sources.append(None)
+            continue
+        path = None if resolve_node is None else resolve_node(pointer)
+        if path is not None:
+            sources.append({"node": path})
+            continue
+        asset = None if resolve_asset is None else resolve_asset(pointer)
+        if asset is not None:
+            sources.append({"asset": asset})
+            continue
+        gaps.append({"module": "CollisionModule", "reason": UNRESOLVED_PLANE})
+        sources.append({"unresolved": True})
+    return sources
+
+
+def _collision(module, resolve_node, gaps, resolve_asset=None):
     """Collision parameters, with the plane slots counted separately from the
-    planes that are actually in them."""
+    planes that are actually in them.  ``planes`` lists the slots that name a
+    node of this prefab; ``planeSources`` records every slot in order,
+    including a Transform of another package (see ``_plane_sources``)."""
     slots = module.get("m_Planes") or []
-    planes = [_node_path(pointer, resolve_node, gaps, "CollisionModule",
-                         UNRESOLVED_PLANE) for pointer in slots]
+    sources = _plane_sources(slots, resolve_node, resolve_asset, gaps)
+    planes = [source["node"] for source in sources if source and "node" in source]
     return {
         "type": _enum(COLLISION_TYPES, module.get("type")),
         "mode": _enum(COLLISION_MODES, module.get("collisionMode")),
@@ -275,7 +419,8 @@ def _collision(module, resolve_node, gaps):
         "multiplyColliderForceByCollisionAngle":
             bool(module.get("multiplyColliderForceByCollisionAngle")),
         "planeSlots": len(slots),
-        "planes": [path for path in planes if path is not None],
+        "planes": planes,
+        "planeSources": sources,
     }
 
 
@@ -304,12 +449,14 @@ def _trails(module):
     }
 
 
-def decode_system(tree, resolve_node=None):
+def decode_system(tree, resolve_node=None, resolve_asset=None):
     """Emitter parameters of one particle system, plus its unmodelled modules.
 
     *resolve_node* maps a pointer to the prefab node path it names; sub-emitters
     and collision planes point at other objects of the same prefab and are
-    useless to a consumer as raw ids.  Returns ``(system, unsupported)``, where
+    useless to a consumer as raw ids.  *resolve_asset* maps a collision plane
+    pointer into another package to the Transform record it names (see
+    ``_plane_sources``), or ``None``.  Returns ``(system, unsupported)``, where
     each unsupported entry is ``{module, reason}``.
     """
     gaps = []
@@ -320,12 +467,17 @@ def decode_system(tree, resolve_node=None):
         "prewarm": bool(tree.get("prewarm")),
         "playOnAwake": bool(tree.get("playOnAwake")),
         "simulationSpeed": float(tree.get("simulationSpeed", 1.0)),
+        # These govern when simulation advances and who owns its shutdown.
+        # Missing metadata stays unknown; it is not an authored default.
+        "useUnscaledTime": tree.get("useUnscaledTime"),
+        "cullingMode": tree.get("cullingMode"),
+        "stopAction": tree.get("stopAction"),
         "simulationSpace": SIMULATION_SPACES.get(tree.get("moveWithTransform"),
                                                  tree.get("moveWithTransform")),
-        "randomSeed": tree.get("randomSeed"),
+        "randomSeed": _seed_bits(tree.get("randomSeed")),
         # A fixed seed is authored: the system replays the same random stream
         # every time rather than drawing a fresh one at play.
-        "autoRandomSeed": bool(tree.get("autoRandomSeed", True)),
+        "autoRandomSeed": _optional_seed_auto(tree.get("autoRandomSeed")),
         # Delay before the system starts emitting, on its own clock.
         "startDelay": min_max_curve(tree.get("startDelay") or {}),
         # Ring-buffer mode changes the lifecycle rather than the look: a system
@@ -346,6 +498,10 @@ def decode_system(tree, resolve_node=None):
             "rotation": min_max_curve(initial.get("startRotation", {})),
             "color": min_max_gradient(initial.get("startColor", {})),
             "gravityModifier": min_max_curve(initial.get("gravityModifier", {})),
+            "randomizeRotationDirection": initial.get("randomizeRotationDirection"),
+            "gravitySource": initial.get("gravitySource"),
+            "customEmitterVelocity": (_vec(initial["customEmitterVelocity"])
+                                      if "customEmitterVelocity" in initial else None),
             "size3D": bool(initial.get("size3D")),
             "rotation3D": bool(initial.get("rotation3D")),
         },
@@ -366,6 +522,14 @@ def decode_system(tree, resolve_node=None):
         out["start"]["rotationY"] = min_max_curve(initial.get("startRotationY", {}))
 
     emission = tree.get("EmissionModule", {})
+    # The native route decision reads the distance rate's scalar whether or not
+    # emission is switched on, so it is reported for every system.  The
+    # ``emission`` block below still appears only for an enabled module, and its
+    # presence remains the switch.  A missing field stays ``None`` (unknown)
+    # rather than becoming an authored zero.
+    rate_over_distance = emission.get("rateOverDistance")
+    out["emissionRateOverDistance"] = (min_max_curve(rate_over_distance)
+                                       if isinstance(rate_over_distance, dict) else None)
     if emission.get("enabled"):
         out["emission"] = {
             "rateOverTime": min_max_curve(emission.get("rateOverTime", {})),
@@ -379,6 +543,9 @@ def decode_system(tree, resolve_node=None):
         }
 
     shape = tree.get("ShapeModule", {})
+    # Absence is unknown; an explicitly disabled module still emits from the
+    # emitter origin, along its local +Z axis. Keep that distinction losslessly.
+    out["shapeEnabled"] = (bool(shape["enabled"]) if "enabled" in shape else None)
     if shape.get("enabled"):
         out["shape"] = {
             "type": SHAPE_TYPES.get(shape.get("type"), shape.get("type")),
@@ -397,6 +564,8 @@ def decode_system(tree, resolve_node=None):
             "arcMode": (ARC_MODES.get(shape["arc"].get("mode"),
                                       shape["arc"].get("mode"))
                         if isinstance(shape.get("arc"), dict) else None),
+            **_shape_controls(shape),
+            **_shape_texture(shape),
             "boxThickness": _vec(shape.get("boxThickness", {})),
             "donutRadius": float(shape.get("donutRadius", 0.0)),
             "position": _vec(shape.get("m_Position", {})),
@@ -407,6 +576,22 @@ def decode_system(tree, resolve_node=None):
             "sphericalDirectionAmount": float(shape.get("sphericalDirectionAmount", 0.0)),
             # Where on the mesh a particle is born, and how far off its surface.
             "meshPlacement": shape.get("placementMode"),
+            # Mesh sampling is independent of the circular arc. Preserve its
+            # serialized owner and distinguish absent metadata from authored
+            # false/zero; consumers must not silently assume uniform vertices.
+            "meshEmission": {
+                "sourceVersion": 1,
+                "mode": _enum(ARC_MODES, (shape.get("m_MeshSpawn") or {}).get("mode")),
+                "spread": (shape.get("m_MeshSpawn") or {}).get("spread"),
+                "speed": (min_max_curve(shape["m_MeshSpawn"]["speed"])
+                          if isinstance((shape.get("m_MeshSpawn") or {}).get("speed"), dict) else None),
+                "useColors": shape.get("m_UseMeshColors"),
+                "useMaterialIndex": shape.get("m_UseMeshMaterialIndex"),
+                "texture": ({"fileId": shape["m_Texture"].get("m_FileID"),
+                             "pathId": str(shape["m_Texture"]["m_PathID"])
+                             if "m_PathID" in shape["m_Texture"] else None}
+                            if isinstance(shape.get("m_Texture"), dict) else None),
+            } if shape.get("type") == 6 else None,
             "meshNormalOffset": float(shape.get("m_MeshNormalOffset", 0.0)),
             "meshMaterialIndex": (shape.get("m_MeshMaterialIndex")
                                   if shape.get("m_UseMeshMaterialIndex") else None),
@@ -438,6 +623,24 @@ def decode_system(tree, resolve_node=None):
             out["rotationOverLifetime"]["x"] = min_max_curve(rotation.get("x", {}))
             out["rotationOverLifetime"]["y"] = min_max_curve(rotation.get("y", {}))
 
+    rotation_speed = tree.get("RotationBySpeedModule", {})
+    if rotation_speed.get("enabled"):
+        # Angular velocity driven by particle speed. Its serialized layout is
+        # the rotation module's: the engine's own module editor binds the z
+        # field to the unsuffixed `curve` and x/y to `x`/`y` (live only in
+        # separate-axes mode), and `range` is the speed interval the curve's
+        # 0..1 domain spans. Values are the serialized radians per second. A
+        # missing range stays unknown rather than becoming an authored 0..0.
+        out["rotationBySpeed"] = {
+            "separateAxes": bool(rotation_speed.get("separateAxes")),
+            "curve": min_max_curve(rotation_speed.get("curve", {})),
+            "range": (_vec(rotation_speed["range"], "xy")
+                      if isinstance(rotation_speed.get("range"), dict) else None),
+        }
+        if rotation_speed.get("separateAxes"):
+            out["rotationBySpeed"]["x"] = min_max_curve(rotation_speed.get("x", {}))
+            out["rotationBySpeed"]["y"] = min_max_curve(rotation_speed.get("y", {}))
+
     velocity = tree.get("VelocityModule", {})
     if velocity.get("enabled"):
         out["velocityOverLifetime"] = {
@@ -447,6 +650,12 @@ def decode_system(tree, resolve_node=None):
             "speedModifier": min_max_curve(velocity.get("speedModifier", {})),
             "inWorldSpace": bool(velocity.get("inWorldSpace")),
         }
+        # Orbital/radial motion belongs to this same enabled module. Omitting
+        # these curves silently turns an orbiting particle into a linear one.
+        for key in ("orbitalX", "orbitalY", "orbitalZ", "orbitalOffsetX",
+                    "orbitalOffsetY", "orbitalOffsetZ", "radial"):
+            out["velocityOverLifetime"][key] = (
+                min_max_curve(velocity[key]) if key in velocity else None)
 
     clamp = tree.get("ClampVelocityModule", {})
     if clamp.get("enabled"):
@@ -456,17 +665,25 @@ def decode_system(tree, resolve_node=None):
             "dampen": float(clamp.get("dampen", 0.0)),
             "drag": min_max_curve(clamp.get("drag", {})) if clamp.get("drag") else None,
             "inWorldSpace": bool(clamp.get("inWorldSpace")),
+            "multiplyDragBySize": clamp.get("multiplyDragByParticleSize"),
+            "multiplyDragByVelocity": clamp.get("multiplyDragByParticleVelocity"),
         }
+        for key in ("x", "y", "z"):
+            out["limitVelocity"][key] = min_max_curve(clamp[key]) if key in clamp else None
 
     uv = tree.get("UVModule", {})
     if uv.get("enabled"):
         out["textureSheet"] = {
+            "mode": uv.get("mode"),
             "tilesX": uv.get("tilesX"), "tilesY": uv.get("tilesY"),
             "animationType": uv.get("animationType"), "timeMode": uv.get("timeMode"),
             "fps": float(uv.get("fps", 0.0)),
             "cycles": uv.get("cycles"), "rowIndex": uv.get("rowIndex"),
             "startFrame": min_max_curve(uv.get("startFrame", {})),
             "frameOverTime": min_max_curve(uv.get("frameOverTime", {})),
+            "speedRange": _vec(uv["speedRange"], "xy") if "speedRange" in uv else None,
+            "uvChannelMask": uv.get("uvChannelMask"), "rowMode": uv.get("rowMode"),
+            "flipU": uv.get("flipU"), "flipV": uv.get("flipV"),
         }
 
     custom = tree.get("CustomDataModule", {})
@@ -493,9 +710,19 @@ def decode_system(tree, resolve_node=None):
             "randomizePerFrame": bool(force.get("randomizePerFrame")),
         }
 
+    inherit = tree.get("InheritVelocityModule", {})
+    if inherit.get("enabled"):
+        # Serialized names differ from the scripting API. Missing controls stay
+        # unknown so an enabled module cannot silently acquire a zero curve.
+        out["inheritVelocity"] = {
+            "mode": _enum({0: "initial", 1: "current"}, inherit.get("m_Mode")),
+            "curve": (min_max_curve(inherit["m_Curve"])
+                      if isinstance(inherit.get("m_Curve"), dict) else None),
+        }
+
     collision = tree.get("CollisionModule", {})
     if collision.get("enabled"):
-        out["collision"] = _collision(collision, resolve_node, gaps)
+        out["collision"] = _collision(collision, resolve_node, gaps, resolve_asset)
 
     trail = tree.get("TrailModule", {})
     if trail.get("enabled"):
@@ -505,6 +732,14 @@ def decode_system(tree, resolve_node=None):
                    for name in sorted(name for name, value in tree.items()
                                       if isinstance(value, dict) and value.get("enabled")
                                       and name not in MODELLED_MODULES)]
+    # The consumer must see enabled-but-unmodelled modules too. A report-only
+    # omission otherwise turns a source system into a different simulation.
+    out["sourceModules"] = {
+        "version": 1,
+        "enabled": sorted(name for name, value in tree.items()
+                          if isinstance(value, dict) and value.get("enabled")),
+        "unsupported": unsupported + gaps,
+    }
     return out, unsupported + gaps
 
 
@@ -555,7 +790,19 @@ def decode_renderer(tree, material, trail_material=None):
     A consumer that ignores it draws emitters the original never shows.
     """
     out = {
+        "geometrySchemaVersion": 1,
         "enabled": bool(tree.get("m_Enabled", 1)),
+        "normalDirection": tree.get("m_NormalDirection"),
+        "flip": _vec(tree["m_Flip"]) if "m_Flip" in tree else None,
+        "allowRoll": tree.get("m_AllowRoll"),
+        "freeformStretching": tree.get("m_FreeformStretching"),
+        "rotateWithStretchDirection": tree.get("m_RotateWithStretchDirection"),
+        "applyActiveColorSpace": tree.get("m_ApplyActiveColorSpace"),
+        "meshDistribution": tree.get("m_MeshDistribution"),
+        "sortingFudge": tree.get("m_SortingFudge"),
+        "sortingLayerId": tree.get("m_SortingLayerID"),
+        "renderingLayerMask": tree.get("m_RenderingLayerMask"),
+        "maskInteraction": tree.get("m_MaskInteraction"),
         "renderMode": RENDER_MODES.get(tree.get("m_RenderMode"), tree.get("m_RenderMode")),
         "sortMode": tree.get("m_SortMode"),
         "sortingOrder": tree.get("m_SortingOrder"),

@@ -283,8 +283,10 @@ def test_material_extras_record_shader_passes_and_light_modes(tmp_path,
     # renderState is empty for a pass that declares none -- empty is a state
     # here, not a gap, so the key is present and {} rather than absent.
     assert material["extras"]["shaderPasses"] == [
-        {"name": "Forward", "lightMode": "ForwardBase", "renderState": {}},
-        {"name": "ShadowCaster", "lightMode": None, "renderState": {}},
+        {"name": "Forward", "lightMode": "ForwardBase", "renderState": {},
+         "passIndex": 0, "subShaderIndex": 0, "subShaderTags": {}, "tags": {"LIGHTMODE": "ForwardBase"}},
+        {"name": "ShadowCaster", "lightMode": None, "renderState": {},
+         "passIndex": 1, "subShaderIndex": 0, "subShaderTags": {}, "tags": {}},
     ]
     assert material["extras"]["lightModes"] == ["ForwardBase", None]
 
@@ -490,13 +492,11 @@ def test_every_variant_is_exported_not_just_the_first(tmp_path, monkeypatch):
     assert index["summary"]["prefabs"] > index["summary"]["bundles"]
 
 
-def test_transforms_are_exported_verbatim_no_flip(tmp_path, monkeypatch):
-    """Red when a node transform is converted: the exported node translation and
-    rotation must equal the typetree value exactly — no axis reflection, no unit
-    change, no float truncation — or a placement at an attach point lands wrong."""
+def test_transforms_are_canonical_and_keep_tagged_source_evidence(tmp_path, monkeypatch):
+    """Nodes cross the shared X boundary once; authored evidence stays separate."""
     pkg = _Package("mysekai__fixture__mdl_verbatim")
-    goid, tpid = pkg.node("furniture", position=(0.0, 0.5, -1.25),
-                          rotation=(0.0, 1.0, 0.0, 0.0))
+    goid, tpid = pkg.node("furniture", position=(1.125, 0.5, -1.25),
+                          rotation=(0.1, 0.2, 0.3, 0.9))
     mesh_id = pkg.mesh([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2])
     mat = pkg.material()
     pkg.renderer(goid, mesh_id, [mat])
@@ -504,8 +504,12 @@ def test_transforms_are_exported_verbatim_no_flip(tmp_path, monkeypatch):
     _run(tmp_path, monkeypatch, {pkg.name: pkg.finish()})
     gltf = _glb(out / f"{pkg.name}.glb")
     root = gltf["nodes"][gltf["scenes"][0]["nodes"][0]]
-    assert root["translation"] == [0.0, 0.5, -1.25]
-    assert root["rotation"] == [0.0, 1.0, 0.0, 0.0]
+    assert root["translation"] == [-1.125, 0.5, -1.25]
+    assert root["rotation"] == [0.1, -0.2, -0.3, 0.9]
+    assert root["extras"]["coordinateContract"] == "moly-rh-y-up-reflect-x-v1"
+    assert root["extras"]["sourceTransform"]["translation"] == {"x": 1.125, "y": 0.5, "z": -1.25}
+    assert gltf["asset"]["extras"]["coordinateUnits"] == "source-unity-unit"
+    assert gltf["asset"]["extras"]["uvConvention"] == "unity-bottom-left"
 
 
 def test_attach_points_stay_findable_in_the_exported_hierarchy(tmp_path,

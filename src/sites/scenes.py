@@ -660,7 +660,11 @@ class PackageExtract:
         entry = self.components.setdefault(name, {"type": kind, "count": 0,
                                                   "instances": []})
         entry["count"] += 1
-        entry["instances"].append({"node": node, "fields": fields})
+        # The instance's own identity: a field elsewhere that points at this
+        # component (``fileId`` 0 means the referrer's file) is followed by
+        # (file, pathId), since a node name is shared by several components.
+        entry["instances"].append({"node": node, "file": record.archive,
+                                   "pathId": path_id, "fields": fields})
         if node_extras is not None:
             source_nodes.attach_component(node_extras, path_id, kind, name,
                                           record.tree(path_id))

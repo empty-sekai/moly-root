@@ -9,6 +9,8 @@ back to a default, it reads the decoy, and the assertion says so.
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from core.jsonio import dumps, normalize  # noqa: E402
@@ -16,8 +18,62 @@ from core.particles import (MODELLED_MODULES, decode_renderer,  # noqa: E402
                             decode_system)
 
 
+def test_curve_export_preserves_signed_step_tangents():
+    import json
+    from core.particles import min_max_curve
+    source = {"minMaxState": 1, "scalar": 1.0, "maxCurve": {"m_Curve": [
+        {"time": 0.0, "value": 2.0, "inSlope": float("inf"),
+         "outSlope": float("-inf"), "weightedMode": 0},
+    ]}}
+    encoded = json.loads(dumps(min_max_curve(source)))
+    key = encoded["keys"][0]
+    assert key["inSlope"] == "Infinity"
+    assert key["outSlope"] == "-Infinity"
+
+
 def _curve(value):
     return {"minMaxState": 0, "scalar": value, "minScalar": 0.0}
+
+
+def test_seed_ownership_preserves_missing_null_and_authored_values():
+    for source in ({}, {"randomSeed": None, "autoRandomSeed": None}):
+        system, _ = decode_system(source)
+        assert system["randomSeed"] is None
+        assert system["autoRandomSeed"] is None
+    for seed, unsigned in [(0, 0), (1, 1), (-1, 4294967295),
+                           (-2147483648, 2147483648), (2147483647, 2147483647),
+                           (4294967295, 4294967295), (-1029634089, 3265333207)]:
+        for automatic in (False, True):
+            system, _ = decode_system({"randomSeed": seed, "autoRandomSeed": automatic})
+            assert system["randomSeed"] == unsigned
+            assert system["autoRandomSeed"] is automatic
+
+
+@pytest.mark.parametrize("seed", [-2147483649, 4294967296, 0.5, 0.0,
+                                  True, False, "0", [], {}, float("inf")])
+def test_invalid_seed_values_are_not_wrapped_or_coerced(seed):
+    with pytest.raises(ValueError, match=r"ParticleSystem\.randomSeed"):
+        decode_system({"randomSeed": seed})
+
+
+@pytest.mark.parametrize("automatic", [0, 1, 0.0, "false", [], {}])
+def test_invalid_auto_seed_values_are_not_truthiness_defaults(automatic):
+    with pytest.raises(ValueError, match=r"ParticleSystem\.autoRandomSeed"):
+        decode_system({"autoRandomSeed": automatic})
+
+
+def test_inherited_velocity_reads_serialized_controls_and_keeps_unknowns():
+    source = {"InheritVelocityModule": {"enabled": True, "m_Mode": 1,
+              "m_Curve": _curve(0.75), "mode": 0, "curve": _curve(9.0)}}
+    decoded, gaps = decode_system(source)
+    assert decoded["inheritVelocity"] == {
+        "mode": "current", "curve": {"mode": "constant", "value": 0.75}}
+    assert "InheritVelocityModule" in decoded["sourceModules"]["enabled"]
+    assert not any(g.get("module") == "InheritVelocityModule" for g in gaps)
+    unknown, _ = decode_system({"InheritVelocityModule": {"enabled": True}})
+    assert unknown["inheritVelocity"] == {"mode": None, "curve": None}
+    disabled, _ = decode_system({"InheritVelocityModule": {"enabled": False}})
+    assert "inheritVelocity" not in disabled
 
 
 def _keyed(*values):
@@ -44,6 +100,42 @@ def _system(**modules):
     }
     tree.update(modules)
     return tree
+
+
+def test_disabled_shape_is_distinct_from_missing_source_module():
+    disabled, _ = decode_system(_system(ShapeModule={"enabled": 0, "type": 0}))
+    missing, _ = decode_system(_system())
+    enabled, _ = decode_system(_system(ShapeModule={"enabled": 1, "type": 0}))
+    assert disabled["shapeEnabled"] is False
+    assert not disabled.get("shape")
+    assert missing["shapeEnabled"] is None
+    assert enabled["shapeEnabled"] is True
+    assert enabled["shape"]
+
+
+def test_orbital_velocity_survives_and_missing_curves_are_not_zero():
+    module = {"enabled": 1, "x": _curve(1), "y": _curve(2), "z": _curve(3),
+              "speedModifier": _curve(1), "inWorldSpace": False,
+              "orbitalX": _curve(.15), "orbitalY": _curve(-.02),
+              "orbitalZ": _curve(0), "radial": _curve(.01)}
+    decoded = decode_system(_system(VelocityModule=module))[0]["velocityOverLifetime"]
+    assert decoded["orbitalX"] == {"mode": "constant", "value": .15}
+    assert decoded["orbitalY"] == {"mode": "constant", "value": -.02}
+    assert decoded["orbitalZ"] == {"mode": "constant", "value": 0}
+    assert decoded["radial"] == {"mode": "constant", "value": .01}
+    assert decoded["orbitalOffsetX"] is None
+
+
+def test_drag_multipliers_use_serialized_particle_field_names():
+    module = {"enabled": 1, "multiplyDragByParticleSize": True,
+              "multiplyDragByParticleVelocity": False,
+              "multiplyDragBySize": False, "multiplyDragByVelocity": True}
+    decoded = decode_system(_system(ClampVelocityModule=module))[0]["limitVelocity"]
+    assert decoded["multiplyDragBySize"] is True
+    assert decoded["multiplyDragByVelocity"] is False
+    missing = decode_system(_system(ClampVelocityModule={"enabled": 1}))[0]["limitVelocity"]
+    assert missing["multiplyDragBySize"] is None
+    assert missing["multiplyDragByVelocity"] is None
 
 
 def _custom_data(mode0=1, count0=4, mode1=0, count1=4, first=None):
@@ -220,6 +312,7 @@ def test_a_null_sub_emitter_pointer_emits_nothing_and_is_not_a_gap():
     entries = [{"emitter": NULL, "type": 0, "properties": 0, "emitProbability": 1.0}]
     out, unsupported = decode_system(_system(SubModule=_sub(entries)))
     assert out["subEmitters"][0]["emitter"] is None
+    assert out["subEmitters"][0]["sourcePointer"] == {"fileId": 0, "pathId": "0"}
     assert unsupported == []
 
 
@@ -229,6 +322,7 @@ def test_a_sub_emitter_this_package_cannot_resolve_is_reported():
     out, unsupported = decode_system(_system(SubModule=_sub(entries)),
                                      resolve_node=lambda pointer: None)
     assert out["subEmitters"][0]["emitter"] is None
+    assert out["subEmitters"][0]["sourcePointer"] == {"fileId": 0, "pathId": "55"}
     assert unsupported == [{"module": "SubModule",
                             "reason": "sub-emitter is not in this package"}]
 
@@ -241,9 +335,19 @@ def test_a_sub_emitter_resolves_to_the_node_it_sits_on():
     assert unsupported == []
     assert out["subEmitters"][0] == {
         "emitter": "splash", "type": "death", "properties": 0,
+        "sourcePointer": {"fileId": 0, "pathId": "55"},
         "inherit": {"color": False, "size": False, "rotation": False,
                     "lifetime": False, "duration": False},
         "emitProbability": 0.5}
+
+
+def test_sub_emitter_pointer_preserves_large_signed_ids_and_missing_identity():
+    entries = [{"emitter": {"m_FileID": 3, "m_PathID": -9223372036854775001},
+                "type": 0, "properties": 0, "emitProbability": 1.0},
+               {"type": 0, "properties": 0, "emitProbability": 1.0}]
+    out, _ = decode_system(_system(SubModule=_sub(entries)), resolve_node=lambda pointer: None)
+    assert out["subEmitters"][0]["sourcePointer"] == {"fileId": 3, "pathId": "-9223372036854775001"}
+    assert out["subEmitters"][1]["sourcePointer"] is None
 
 
 def test_inherit_flags_are_read_bit_by_bit_and_the_raw_value_survives():
@@ -411,7 +515,7 @@ def test_a_renderer_with_no_enabled_field_is_treated_as_enabled():
 def test_a_non_finite_number_is_written_as_its_name():
     text = dumps({"lifetime": float("inf"), "drift": float("-inf"),
                   "broken": float("nan")}, indent=None)
-    assert text == '{"lifetime": "Infinity", "drift": "-Infinity", "broken": "NaN"}'
+    assert text == '{"broken": "NaN", "drift": "-Infinity", "lifetime": "Infinity"}'
     # and it reads back as a number in any language that coerces numeric strings
     assert float(dumps(float("inf"), indent=None).strip('"')) == float("inf")
 
@@ -432,4 +536,127 @@ def test_normalising_leaves_finite_numbers_and_flags_alone():
     document = {"on": True, "off": False, "none": None, "zero": 0.0,
                 "count": 3, "nested": [{"value": 1.5}]}
     assert normalize(document) == document
-    assert dumps(document, indent=None).startswith('{"on": true, "off": false')
+    import json
+    decoded = json.loads(dumps(document, indent=None))
+    assert decoded == document
+    assert decoded["on"] is True and decoded["off"] is False
+    assert decoded["none"] is None
+    assert isinstance(decoded["zero"], float)
+
+
+def test_mesh_sampling_controls_preserve_serialized_owners_and_unknowns():
+    shape = {"enabled": True, "type": 6, "placementMode": 2,
+             "m_MeshSpawn": {"mode": 0, "spread": 0.0, "speed": _curve(1.0)},
+             "m_UseMeshColors": False, "m_UseMeshMaterialIndex": False,
+             "m_Texture": {"m_FileID": 0, "m_PathID": 0},
+             "meshSpawnMode": 3, "useMeshColors": True,
+             "arc": {"value": 360.0, "mode": 3}}
+    result = decode_system(_system(ShapeModule=shape))[0]["shape"]["meshEmission"]
+    assert result == {"sourceVersion": 1, "mode": "Random", "spread": 0.0,
+                      "speed": {"mode": "constant", "value": 1.0},
+                      "useColors": False, "useMaterialIndex": False,
+                      "texture": {"fileId": 0, "pathId": "0"}}
+    shape["m_MeshSpawn"] = {"mode": 3, "spread": .25, "speed": _curve(2.0)}
+    shape["m_Texture"] = {"m_FileID": 7, "m_PathID": 9223372036854775801}
+    shape["m_UseMeshColors"] = True
+    result = decode_system(_system(ShapeModule=shape))[0]["shape"]["meshEmission"]
+    assert result["mode"] == "BurstSpread" and result["spread"] == .25
+    assert result["texture"] == {"fileId": 7, "pathId": "9223372036854775801"}
+    assert result["useColors"] is True
+    missing = decode_system(_system(ShapeModule={"enabled": True, "type": 6}))[0]["shape"]["meshEmission"]
+    assert all(missing[key] is None for key in ["mode", "spread", "speed", "useColors", "useMaterialIndex", "texture"])
+
+
+def test_enabled_unmodelled_modules_are_carried_to_runtime_not_report_only():
+    tree = _system(LightsModule={"enabled": True, "mode": 1},
+                   NoiseModule={"enabled": False})
+    result, gaps = decode_system(tree)
+    inventory = result["sourceModules"]
+    assert inventory["version"] == 1
+    assert "InitialModule" in inventory["enabled"]
+    assert "LightsModule" in inventory["enabled"]
+    assert "NoiseModule" not in inventory["enabled"]
+    assert inventory["unsupported"] == gaps
+    assert any(gap["module"] == "LightsModule" for gap in gaps)
+    clean, gaps = decode_system(_system())
+    assert clean["sourceModules"]["unsupported"] == gaps == []
+
+
+# -- inputs the native route decision reads -----------------------------------
+
+
+def _lane(pre, post, *times):
+    return {"m_Curve": [{"time": t, "value": 1.0, "inSlope": 0.0, "outSlope": 0.0}
+                        for t in times],
+            "m_PreInfinity": pre, "m_PostInfinity": post, "m_RotationOrder": 4}
+
+
+def _emission(enabled, rate_over_distance):
+    return {"enabled": enabled, "rateOverTime": _curve(10.0),
+            "rateOverDistance": rate_over_distance, "m_Bursts": []}
+
+
+def test_distance_rate_is_reported_whether_or_not_emission_is_on():
+    # The native decision reads the distance rate's scalar without testing the
+    # emission switch, so a disabled module must still carry it; the emission
+    # block itself keeps meaning "switched on".
+    on, _ = decode_system(_system(EmissionModule=_emission(1, _curve(2.0))))
+    assert on["emissionRateOverDistance"] == {"mode": "constant", "value": 2.0}
+    assert on["emission"]["rateOverDistance"] == on["emissionRateOverDistance"]
+    off, _ = decode_system(_system(EmissionModule=_emission(0, _curve(5.0))))
+    assert off["emissionRateOverDistance"] == {"mode": "constant", "value": 5.0}
+    assert "emission" not in off
+    ranged = {"minMaxState": 3, "scalar": 8.0, "minScalar": 1.0}
+    off, _ = decode_system(_system(EmissionModule=_emission(False, ranged)))
+    assert off["emissionRateOverDistance"] == {"mode": "twoConstants",
+                                               "min": 1.0, "max": 8.0}
+    # Missing source data is unknown, not an authored zero rate.
+    assert decode_system(_system())[0]["emissionRateOverDistance"] is None
+    bare, _ = decode_system(_system(EmissionModule={"enabled": 0}))
+    assert bare["emissionRateOverDistance"] is None
+
+
+def test_curve_lanes_carry_their_own_serialized_wrap_modes():
+    from core.particles import min_max_curve
+    # Every lane and end holds a different value, so reading the other lane or
+    # swapping pre/post changes the result instead of passing by coincidence.
+    one = min_max_curve({"minMaxState": 1, "scalar": 2.0,
+                         "maxCurve": _lane(0, 3, 0.25, 0.5),
+                         "minCurve": _lane(1, 4, 0.0, 1.0)})
+    assert (one["preInfinity"], one["postInfinity"]) == (0, 3)
+    assert not any(k.startswith(("min", "max")) for k in one)
+    two = min_max_curve({"minMaxState": 2, "scalar": 2.0,
+                         "maxCurve": _lane(3, 0, 0.25, 0.5),
+                         "minCurve": _lane(1, 4, 0.0, 0.6)})
+    assert (two["maxPreInfinity"], two["maxPostInfinity"]) == (3, 0)
+    assert (two["minPreInfinity"], two["minPostInfinity"]) == (1, 4)
+    assert "preInfinity" not in two and "postInfinity" not in two
+    for state in (0, 3):
+        flat = min_max_curve({"minMaxState": state, "scalar": 1.0, "minScalar": 0.0,
+                              "maxCurve": _lane(0, 3, 0.5), "minCurve": _lane(1, 4, 0.5)})
+        assert not any("Infinity" in k for k in flat)
+    unknown = min_max_curve({"minMaxState": 1, "scalar": 1.0,
+                             "maxCurve": {"m_Curve": []}})
+    assert unknown["preInfinity"] is None and unknown["postInfinity"] is None
+    # Serialized raw integers only: a coerced value is refused, not guessed.
+    for bad in (2.0, True, "2"):
+        with pytest.raises(ValueError, match=r"AnimationCurve\.m_PreInfinity"):
+            min_max_curve({"minMaxState": 1, "maxCurve": _lane(bad, 2, 0.0)})
+
+
+def test_wrap_modes_reach_the_decoded_system_and_not_its_gradients():
+    import json
+    velocity = {"enabled": 1, "x": _curve(0.0), "z": _curve(0.0),
+                "y": {"minMaxState": 2, "scalar": 1.0,
+                      "maxCurve": _lane(2, 2, 0.0, 1.0),
+                      "minCurve": _lane(2, 1, 0.0, 0.6)},
+                "speedModifier": _curve(1.0), "inWorldSpace": False}
+    gradient = {"minMaxState": 1, "maxGradient": {"m_NumColorKeys": 0,
+                                                  "m_NumAlphaKeys": 0}}
+    out, _ = decode_system(_system(VelocityModule=velocity,
+                                   ColorModule={"enabled": 1, "gradient": gradient}))
+    lane = json.loads(dumps(out))["velocityOverLifetime"]["y"]
+    assert lane["mode"] == "twoCurves"
+    assert [lane[k] for k in ("maxPreInfinity", "maxPostInfinity",
+                              "minPreInfinity", "minPostInfinity")] == [2, 2, 2, 1]
+    assert not any("Infinity" in k for k in out["colorOverLifetime"])

@@ -195,7 +195,18 @@ class Store:
             glb, document = single_mesh(record.objects[path_id], tree)
             if is_builtin_archive(record.archive):
                 document["source"] = ENGINE_BUILTIN
-            self.by_key[key] = self._write(glb, document["name"], document)
+            reference = self._write(glb, document["name"], document)
+            # Content identity is shared; source object identity and authored
+            # bounds belong to this reference, not to the first equal GLB file.
+            # Two equal meshes may have different source Mesh.m_LocalAABB values.
+            box = tree.get("m_LocalAABB")
+            reference["sourceBounds"] = ({
+                "center": _vec(box["m_Center"], "xyz"),
+                "extents": _vec(box["m_Extent"], "xyz"),
+            } if isinstance(box, dict) and "m_Center" in box and "m_Extent" in box else None)
+            reference["meshSource"] = {"bundle": record.bundle,
+                "archive": record.archive, "pathId": str(path_id)}
+            self.by_key[key] = reference
         return dict(self.by_key[key])
 
     def model(self, record, path_id, follow, material_name=None, asset=None):

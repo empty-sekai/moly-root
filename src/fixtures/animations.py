@@ -28,18 +28,18 @@ Bindings and path hashes
     bind to whichever variant happened to be walked first.
 
 Space and interpolation
-    Values are written **verbatim** in the authored Unity frame, exactly like
-    the node transforms of this glb (see the module docstring of
-    :mod:`fixtures.meshes` for why this product deliberately does not convert
-    to glTF's right-handed frame).  Interpolation is mapped from the source
+    Values use the same canonical reflected-X frame as this glb's nodes.
+    Translation X and quaternion Y/Z are negated. The map is linear, so
+    in/out derivatives in a CUBICSPLINE sampler receive the same signs.
+    Interpolation is mapped from the source
     curve kind -- the three storage forms of :func:`chara.mecanim.clip.decode`:
     ``StreamedClip`` keys are cubic polynomial coefficients and become a
     ``CUBICSPLINE`` sampler (tangents recovered from the ``(a, b, c, d)``
     coefficients: the value is ``d``, the out-tangent ``c``, the in-tangent
     the neighbouring segment's ``3a*dt^2 + 2b*dt + c``); ``DenseClip`` frames
     are evenly sampled and become ``LINEAR``; ``ConstantClip`` values become
-    ``STEP`` with their single key.  Rotation stays the authored quaternion
-    (attribute 2 carries the four components directly); Euler rotation
+    ``STEP`` with their single key. Rotation retains the source's quaternion
+    components after basis conjugation (attribute 2); Euler rotation
     (attribute 4) has no glTF channel and is counted, not converted.
 
 What is *not* exported, on purpose
@@ -52,11 +52,13 @@ What is *not* exported, on purpose
     binding whose hash resolves to no node here is reported, not guessed.
 """
 import collections
+import math
 import struct
 import zlib
 
 from chara.mecanim.clip import TRANSFORM_TYPEID, curve_index_map, decode, hermite_keyframes
 from core.assets.identity import identity, json_pointers
+from core.gltf import COORDINATE_SPACE, reflect_position, reflect_quaternion
 
 # Unity Transform generic-binding attribute -> glTF channel property, and the
 # component width each carries.  Attribute 4 is Euler rotation: three source
@@ -69,7 +71,7 @@ ATTR_WIDTH = {1: 3, 2: 4, 3: 3}
 INTERPOLATION = {"cubic": "CUBICSPLINE", "linear": "LINEAR", "const": "STEP"}
 
 BINDING_SEMANTICS = "unity-crc32-path-bindings"
-SPACE = "authored-unity"
+SPACE = COORDINATE_SPACE
 
 # Curve-slot accounting classes.  Every decoded slot lands in exactly one, and
 # the classes must sum to the slot count -- the same contract the perf lane's
@@ -234,7 +236,7 @@ def decode_clip(tt, table):
     return channels, dict(accounting), anomalies, len(decoded)
 
 
-def _write_channels(glb, name, channels):
+def _write_channels(glb, name, channels, duration=None):
     """One glTF animation from *channels*; returns the glTF animation entry."""
     anim = {"name": name, "samplers": [], "channels": []}
     resolved = {}
@@ -243,15 +245,30 @@ def _write_channels(glb, name, channels):
         interp = INTERPOLATION[ch["kind"]]
         width = len(ch["values"][0])
         atype = "VEC3" if width == 3 else "VEC4"
+        def canonical(row):
+            # The map is linear: Hermite derivatives use these same signs.
+            if ch["property"] == "translation":
+                return list(reflect_position(row))
+            if ch["property"] == "rotation":
+                return list(reflect_quaternion(row))
+            return list(row)
+
         if interp == "CUBICSPLINE":
             rows = []
             for i in range(ch["count"]):
-                rows.append(ch["inTangents"][i])
-                rows.append(ch["values"][i])
-                rows.append(ch["outTangents"][i])
+                rows.append(canonical(ch["inTangents"][i]))
+                rows.append(canonical(ch["values"][i]))
+                rows.append(canonical(ch["outTangents"][i]))
         else:
-            rows = ch["values"]
-        times_acc = _accessor(glb, [[t] for t in ch["times"]], "SCALAR")
+            rows = [canonical(row) for row in ch["values"]]
+        times = ch["times"]
+        if interp == "STEP" and len(times) == 1 and duration is not None and duration > times[0]:
+            # Unity ConstantClip defines a constant over the source clip's
+            # complete time domain. A sole t=0 glTF key gives engines a zero
+            # duration clip; retain the same value at the authored endpoint.
+            times = [times[0], duration]
+            rows = [rows[0], rows[0]]
+        times_acc = _accessor(glb, [[t] for t in times], "SCALAR")
         values_acc = _accessor(glb, rows, atype)
         anim["samplers"].append({"input": times_acc, "output": values_acc,
                                  "interpolation": interp})
@@ -324,9 +341,18 @@ def embed(glb, package, tables, report):
                     {"type": "clip-no-channel", "clip": name,
                      "slots": slots})
             index = len(glb.g.get("animations", []))
-            anim = _write_channels(glb, name, channels)
+            muscle = tt.get("m_MuscleClip") or {}
+            start, stop = muscle.get("m_StartTime"), muscle.get("m_StopTime")
+            duration = stop - start if isinstance(start, (int, float)) and isinstance(stop, (int, float)) else None
+            if duration is not None and (not math.isfinite(duration) or duration <= 0):
+                duration = None
+            anim = _write_channels(glb, name, channels, duration)
             anim.setdefault("extras", {}).update(
                 sourceClip=identity(record, pid),
+                sourceDuration=duration,
+                sourceStartTime=start,
+                sourceStopTime=stop,
+                sourceLoopTime=muscle.get("m_LoopTime"),
                 sourceEvents=json_pointers(tt.get("m_Events", [])))
             glb.g.setdefault("animations", []).append(anim)
             summary["clipCount"] += 1
@@ -341,6 +367,9 @@ def embed(glb, package, tables, report):
                 summary["anomalies"].append(
                     {"type": "clip-anomaly", "clip": name, "detail": anomaly})
             clips.append({"name": name, "animation": index,
+                          "sourceClip": identity(record, pid),
+                          "sourceStartTime": start, "sourceStopTime": stop,
+                          "sourceLoopTime": muscle.get("m_LoopTime"),
                           "bindings": len((tt.get("m_ClipBindingConstant")
                                            or {}).get("genericBindings") or []),
                           "slots": slots, "channels": len(channels),

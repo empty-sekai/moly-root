@@ -3,9 +3,11 @@ import json
 import os
 from pathlib import Path
 
+from chara.rotation_encoding import DEFAULT_ROTATION_ENCODING
 from .assets.manifest import parse_manifest
 from .assets.router import route
 from .master import record_master_inputs
+from .player_resources import is_loose_player_data, player_data_paths
 
 # Furniture geometry is the one pass whose output is measured in gigabytes: one
 # ``.glb`` per package over the whole ``mysekai__fixture__`` family.  Making it
@@ -26,8 +28,59 @@ FIXTURE_MESHES_SKIPPED = ("furniture geometry was not requested; it is one glb "
 FIXTURE_PARTICLES_SKIPPED = ("furniture particle emitters were not requested; "
                              "the pass is second-order over the fixture-"
                              "interface, cutscene-timeline and fixture-"
-                             "timeline families, so it is opt-in via "
-                             "fixture_particles=True")
+                             "timeline families (plus the site-move, foot and "
+                             "harvest-object effect packages and the travel "
+                             "cannon), so it is opt-in via fixture_particles=True")
+
+# The particle-source pass covers the three furniture families and, with the
+# same document schema, the three site effect families (the site-move effects,
+# the player's foot effects and the harvest-object effects, whose emitters the
+# runtime reads through this schema).  Of the site domain it covers the travel
+# cannon, named here, and every package whose timelines drive a
+# ParticleSystem (a scene director's Control clips and Signal reactions, a step
+# item's own timeline; see :mod:`fixtures.timeline_reach`), found by that reach
+# over every package of the run rather than by name.  A domain-wide claim on
+# ``site`` would export every scene's particles; the scenes' own play-on-awake
+# systems stay the scene reader's.
+PARTICLE_DOMAINS = ("fixture-interface", "cutscene-timeline", "fixture-timeline",
+                    "site-action-effect", "site-common-action-effect",
+                    "site-harvest-object-effect", "site-home-effect",
+                    "fixture-put-effect")
+PARTICLE_PACKAGES = ("mysekai__site__move__cannon",)
+# Of the site domain it also covers every harvest prop and field object
+# (``mysekai/site/field/object/<prefab>``): the rocks, trees, flowers, drops and
+# treasure boxes carry their own emitters, which the runtime installs by package
+# name through this schema.  Selected by the prefix, so a prop added under it is
+# covered; the prefix names no scene, so the scenes stay out.
+PARTICLE_PACKAGE_PREFIXES = ("mysekai__site__field__object__",)
+
+# The site effect families, each exported by its own function of
+# :mod:`sites.action_effects` into its own directory with its own index:
+# ``(routed domain, function, output directory)``.
+EFFECT_FAMILY_JOBS = (
+    ("site-action-effect", "extract_site_action_effects", "site-action-effects"),
+    ("site-common-action-effect", "extract_site_common_action_effects",
+     "site-common-action-effects"),
+    ("site-harvest-object-effect", "extract_site_harvest_object_effects",
+     "site-harvest-object-effects"),
+    ("site-home-effect", "extract_site_home_effects", "site-home-effects"),
+    ("fixture-put-effect", "extract_fixture_put_effects", "fixture-put-effects"),
+)
+
+# Prefabs the game loads by an exact name out of a package whose domain is read
+# for something else, or that no other reader claims.  FieldCameraManager's
+# SetupFieldCamera instantiates the asset FieldCamera of the camera package (the
+# field camera, carrying the speed-line canvas of the site move); the door
+# transitioner manager's Init loads SiteTransitionerNormal from the house
+# transition package.  Each is exported with the site package reader.
+FIELD_CAMERA_PREFAB = "fieldcamera.prefab"
+HOUSE_TRANSITION_PREFAB = "sitetransitionernormal.prefab"
+
+# A prefab the player build ships in its Resources: the live transitioner, the
+# cover shown while the game enters MySekai (UIUtility.PlayLiveTransition loads
+# it by this name).  Its MonoBehaviours carry no typetree in the player data, so
+# reading it needs the same build's managed assembly stubs as well.
+LIVE_TRANSITIONER_LOAD_NAME = "Common/Transition/LiveTransitioner"
 
 # The version a bundle whose header carries none is read against.  Several
 # extractor modules assign this at import, which is enough when the caller comes
@@ -72,6 +125,7 @@ DOMAIN_OBJECT_TYPES = {
     "talk": {"TextAsset"},
     "talk-constants": {"TextAsset"},
     "camera": {"MonoBehaviour", "PlayableDirector"},
+    "fixture-reaction": {"MonoBehaviour"},
     "fixture-interface": {"MonoBehaviour", "Mesh", "MeshFilter", "MeshRenderer",
                           "SkinnedMeshRenderer", "Material", "Texture2D"},
     "cutscene-timeline": {"MonoBehaviour", "PlayableDirector", "AnimationClip"},
@@ -80,6 +134,25 @@ DOMAIN_OBJECT_TYPES = {
                     "Shader"},
     "harvest-tool": {"Mesh", "MeshFilter", "MeshRenderer", "Material", "Texture2D",
                      "Shader"},
+    "player-tool-model": {"Mesh", "MeshFilter", "MeshRenderer", "Material", "Texture2D",
+                          "Shader"},
+    "site-action-effect": {"ParticleSystem", "ParticleSystemRenderer", "Mesh",
+                           "MeshFilter", "MeshRenderer", "Material", "Texture2D",
+                           "MonoBehaviour"},
+    "site-common-action-effect": {"ParticleSystem", "ParticleSystemRenderer", "Mesh",
+                                  "MeshFilter", "MeshRenderer", "Material", "Texture2D",
+                                  "MonoBehaviour"},
+    "site-harvest-object-effect": {"ParticleSystem", "ParticleSystemRenderer", "Mesh",
+                                   "MeshFilter", "MeshRenderer", "Material",
+                                   "Texture2D", "MonoBehaviour"},
+    "site-home-effect": {"ParticleSystem", "ParticleSystemRenderer", "Mesh",
+                         "MeshFilter", "MeshRenderer", "Material", "Texture2D",
+                         "MonoBehaviour"},
+    "fixture-put-effect": {"ParticleSystem", "ParticleSystemRenderer", "Mesh",
+                           "MeshFilter", "MeshRenderer", "Material", "Texture2D",
+                           "MonoBehaviour"},
+    "house-transition": {"Canvas", "MonoBehaviour", "Material", "Texture2D", "Sprite",
+                         "Animator", "AnimationClip"},
 }
 
 
@@ -102,6 +175,11 @@ DERIVED_PASS_COVERAGE = {
     "fixture-gimmick/gimmicks.json": {
         "fixture-interface": {"Animator", "AnimatorController",
                               "AnimatorOverrideController", "AnimationClip"},
+    },
+    # The field camera prefab is a second read of the camera package, through
+    # the site package reader; its behaviours are already the camera domain's.
+    "field-camera/": {
+        "camera": {"Camera", "Canvas", "Material"},
     },
 }
 
@@ -227,11 +305,25 @@ FIXED_ARTIFACT_PATHS = (
     "emoticons/emoticons.json",
     "avatar-parts/avatar-parts.json",
     "avatar/tools/index.json",
+    "avatar/player-tool-models/index.json",
+    "site-action-effects/index.json",
+    "site-common-action-effects/index.json",
+    "site-harvest-object-effects/index.json",
+    "site-home-effects/index.json",
+    "fixture-put-effects/index.json",
     "phenomena/index.json",
     "site/index.json",
     "site/harvest.json",
+    "site-sound-wave/site-sound-wave.json",
+    "field-camera/",
+    "house-transition/",
+    "live-transitioner/",
+    "effect-resources/",
+    "graphics-config/",
+    "layout-grid/",
     "fixture-interface/attach-points.json",
     "fixture-interface/areas.json",
+    "fixture-reactions.json",
     "fixture-models/",
     "fixture-particles/index.json",
     "fixture-gimmick/gimmicks.json",
@@ -329,6 +421,11 @@ def _registry_artifact(names, out, master, master_cache=None):
         entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
     return entry
 
+
+# Why the container-only UI readers skip a loose-file player data.
+LOOSE_PLAYER_UI = ("the player data is loose files in the APKs, not one container; "
+                   "the dialogue UI, atlas and screen-layer readers take a container, "
+                   "and this layout's UI documents are read by `ui-layout --region jp`")
 
 # The dialogue window and the head-up display are the two things this UI lane is
 # about, so these three behaviour classes are its roots.  Every other hand
@@ -488,6 +585,182 @@ def _ui_atlas_artifact(out, player_data):
     return entry
 
 
+def _live_transitioner_artifact(out, player_data, player_types):
+    """Build ``live-transitioner/`` from the player data's Resources.
+
+    The live transitioner (see :data:`LIVE_TRANSITIONER_LOAD_NAME`) is loaded
+    from the player build's Resources, not from any downloadable package, so
+    like the other player-data artifacts it is ``skipped`` *with the reason*
+    when the file is not supplied.  It has a second input the other artifacts
+    do not: its MonoBehaviours carry no typetree in the player data, and their
+    fields are read with a typetree generated from the same build's managed
+    assembly stubs, so without *player_types* it is skipped with that reason.
+    """
+    entry = {"artifact": "live-transitioner/", "domain": "resource-prefab",
+             "status": "skipped", "counts": {},
+             "error": "no player-data file supplied; the live transitioner is "
+                      "loaded from the APK player data's Resources, which is not "
+                      "a downloadable package"}
+    if not player_data:
+        return entry
+    if not player_types:
+        entry["error"] = ("no managed assembly stubs supplied (player_types); the "
+                          "live transitioner's behaviours carry no typetree in the "
+                          "player data and are read with one generated from the "
+                          "same build's stubs")
+        return entry
+    try:
+        from .resource_exports import export_resource_prefab
+        missing = [path for path in player_data if not Path(path).is_file()]
+        if missing:
+            raise FileNotFoundError(f"player data file not found: {', '.join(missing)}")
+        document = export_resource_prefab(player_data, str(player_types),
+                                          LIVE_TRANSITIONER_LOAD_NAME,
+                                          out / "live-transitioner")
+        objects = document.get("objects") or {}
+        counts = {"objects": objects.get("total", 0),
+                  "exported": objects.get("exported", 0),
+                  "skipped": objects.get("skipped", 0),
+                  "unsupported": len(document.get("unsupported") or []),
+                  "particles": len(document.get("particles") or []),
+                  "textures": len(document.get("textures") or [])}
+        entry.update(status="succeeded", error="", counts=counts,
+                     path=document["file"])
+    except Exception as exc:
+        entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+    return entry
+
+
+def _resources_entry(artifact, what, player_data, player_types):
+    """A Resources-object artifact's entry, or ``None`` when it can run.
+
+    Like the live transitioner, these objects are loaded from the player data's
+    Resources, and their MonoBehaviour fields are read with a typetree generated
+    from the build's assembly stubs, so each input left out is its own reason.
+    """
+    entry = {"artifact": artifact, "domain": "resource-object", "status": "skipped",
+             "counts": {},
+             "error": (f"no player-data file supplied; {what} is loaded from the APK "
+                       "player data's Resources, which is not a downloadable package")}
+    if not player_data:
+        return entry
+    if not player_types:
+        entry["error"] = (f"no managed assembly stubs supplied (player_types); {what} "
+                          "carries no typetree in the player data and is read with one "
+                          "generated from the same build's stubs")
+        return entry
+    missing = [path for path in player_data if not Path(path).is_file()]
+    if missing:
+        entry.update(status="failed",
+                     error=f"FileNotFoundError: player data file not found: {', '.join(missing)}")
+        return entry
+    return None
+
+
+def _effect_resources_artifact(out, player_data, player_types, declarations, bundles):
+    """Build ``effect-resources/`` -- the effect manager's type table.
+
+    The table (effect type -> bundle, prefab, pool size) is in no package; the
+    effect manager loads it from Resources.  With *declarations* each type's
+    declared name is attached; each row's bundle and prefab is checked against
+    the run's bundle directory, and a row whose bundle is not there is listed
+    under ``missing`` (an input gap, not a guessed row).
+    """
+    what = "the effect manager's type table"
+    entry = _resources_entry("effect-resources/", what, player_data, player_types)
+    if entry is not None:
+        return entry
+    entry = {"artifact": "effect-resources/", "domain": "resource-object",
+             "status": "failed", "counts": {}, "error": ""}
+    try:
+        from .resource_exports import export_effect_resources
+        path = out / "effect-resources" / "effect-resources.json"
+        summary = export_effect_resources(player_data, str(player_types), path,
+                                          declarations=declarations,
+                                          bundle_root=str(bundles))
+        document = json.loads(path.read_text(encoding="utf-8"))
+        absent = sorted(row["assetBundleName"] for row in document["resources"]
+                        if row["bundle"] is not None and not row["bundle"]["onDisk"])
+        counts = {key: summary[key] for key in ("rows", "duplicates", "bundlesChecked",
+                                                "bundlesOnDisk", "prefabsFound")}
+        counts["namedTypes"] = sum(1 for row in document["resources"]
+                                   if row["effectTypeName"] is not None)
+        entry.update(status="succeeded", counts=counts, path=str(path))
+        if absent:
+            entry["missing"] = absent
+            entry["error"] = ("rows whose bundle is not in the bundle directory: "
+                              + ", ".join(absent))
+        if not declarations:
+            entry["error"] = (entry["error"] + "; " if entry["error"] else "") + (
+                "no declaration dump supplied (player_declarations): effect type "
+                "names are null, the numbers are exact")
+    except Exception as exc:
+        entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+    return entry
+
+
+def _graphics_config_artifact(out, player_data, player_types):
+    """Build ``graphics-config/drop-item-shade.json``,
+    ``graphics-config/stencil-shadow.json`` and
+    ``graphics-config/npc-dither.json`` from the player data.
+
+    The drop-item shading values are a field of the MySekai graphics
+    configuration, a ScriptableObject in the player data's Resources; the
+    document names the global shader property each value is written to. The
+    stencil-shadow document carries the same object's character stencil-shadow
+    colour and its per-attribute material rendering settings. The NPC dither
+    document carries the four distances of the NPC view's camera dither.
+    """
+    what = "the graphics configuration"
+    entry = _resources_entry("graphics-config/", what, player_data, player_types)
+    if entry is not None:
+        return entry
+    entry = {"artifact": "graphics-config/", "domain": "resource-object",
+             "status": "failed", "counts": {}, "error": ""}
+    try:
+        from .resource_exports import (export_drop_item_shade, export_npc_dither,
+                                       export_stencil_shadow)
+        path = out / "graphics-config" / "drop-item-shade.json"
+        summary = export_drop_item_shade(player_data, str(player_types), path)
+        stencil = export_stencil_shadow(player_data, str(player_types),
+                                        out / "graphics-config" / "stencil-shadow.json")
+        dither = export_npc_dither(player_data, str(player_types),
+                                   out / "graphics-config" / "npc-dither.json")
+        entry.update(status="succeeded", path=str(path),
+                     counts={"values": summary["values"],
+                             "byteSize": summary["byteSize"],
+                             "stencilShadowAttributes": stencil["attributes"],
+                             "npcDitherValues": dither["values"]})
+    except Exception as exc:
+        entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+    return entry
+
+
+def _layout_grid_artifact(out, player_data, player_types):
+    """Build ``layout-grid/grid.json`` -- the layout editor's placement grid.
+
+    The grid settings (line sizes, offsets, a material per grid part) and the
+    colour profile table are ScriptableObjects in the player data's Resources;
+    each material's shader pass state and GL program come with them.
+    """
+    what = "the layout grid's settings and colour profiles"
+    entry = _resources_entry("layout-grid/", what, player_data, player_types)
+    if entry is not None:
+        return entry
+    entry = {"artifact": "layout-grid/", "domain": "resource-object",
+             "status": "failed", "counts": {}, "error": ""}
+    try:
+        from .layout_grid import export_layout_grid
+        summary = export_layout_grid(player_data, str(player_types),
+                                     out / "layout-grid")
+        entry.update(status="succeeded", path=summary["path"],
+                     counts={key: summary[key] for key in
+                             ("materials", "emptySlots", "shaders", "programs", "profiles")})
+    except Exception as exc:
+        entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+    return entry
+
+
 def _entry(name):
     return {"bundle": name, "status": "failed", "artifacts": [], "counts": {}, "error": ""}
 
@@ -599,7 +872,9 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                      fixture_particles=False,
                      builtin_resources=None,
                      master_cache=None, vgmstream=None, ffmpeg=None,
-                     accept_input_gaps=()):
+                     accept_input_gaps=(), shader_compiler=None,
+                     rotation_encoding=DEFAULT_ROTATION_ENCODING,
+                     player_types=None, player_declarations=None):
     """Extract every logical bundle in *manifest* and write a JSON report.
 
     With ``manifest=None`` the bundle set is discovered from the *bundles*
@@ -619,10 +894,23 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
     locomotion come only from there, so without it the registry artifact is
     reported as skipped rather than silently omitted.
 
-    *player_data* is the caller-supplied APK player-data file.  The dialogue UI
+    *player_data* is the caller-supplied APK player data: the container file,
+    or the APKs of a build whose player data is loose files (see
+    :func:`core.player_resources.player_data_paths`).  The dialogue UI
     lives there and in no downloadable package, so it is not a routed domain at
     all; without the path its artifact is likewise reported as skipped with the
     reason, never left out.
+
+    *player_types* is the directory of the same player build's managed assembly
+    stubs.  The live transitioner prefab, the effect manager's type table and
+    the graphics configuration's drop-item shading are read out of the player
+    data's Resources, whose MonoBehaviours carry no typetree, so their fields
+    are read with a typetree generated from these stubs; without them those
+    artifacts are skipped with the reason, never left out.
+
+    *player_declarations* is the same build's declaration dump; it only names
+    the effect types in the type table (the numbers are exact without it, and
+    the entry says so).
 
     Furniture controller/event metadata is always written for the routed
     furniture packages in this run, using the same opened PackageStore as
@@ -638,7 +926,10 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
 
     *fixture_particles* asks for the furniture particle-emitter pass, which
     writes one document per particle-emitting package of the fixture-interface,
-    cutscene-timeline and fixture-timeline families into ``fixture-particles/``.
+    cutscene-timeline and fixture-timeline families, of the site-move and foot
+    effect families, of the travel cannon and of the site's field objects
+    (:data:`PARTICLE_DOMAINS`, :data:`PARTICLE_PACKAGES`,
+    :data:`PARTICLE_PACKAGE_PREFIXES`) into ``fixture-particles/``.
     It is off by default for the same reason as the geometry pass; off, its
     entry is likewise reported ``skipped`` with the reason, never omitted.
 
@@ -660,6 +951,8 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
     default when the caller configured nothing, so a direct call behaves like
     the command line rather than depending on import order.
     """
+    from chara.motion_storage import validate_rotation_encoding
+    validate_rotation_encoding(rotation_encoding)
     _configure_unity_version(unity_version)
     if manifest is None:
         names, ignored = discover_bundles(bundles)
@@ -754,6 +1047,51 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 str(out / "avatar" / "tools"), bundle_root=bundles)
         except Exception as exc:
             harvest_tool_error = f"{type(exc).__name__}: {exc}"
+    # The avatar's hand items share the tool reader and index shape, in their
+    # own directory.
+    player_tool_paths, player_tool_errors = {}, {}
+    for name in names:
+        target = route(name)
+        if target is None or target.domain != "player-tool-model":
+            continue
+        try:
+            player_tool_paths[name] = _bundle_path(bundles, name)
+        except Exception as exc:
+            player_tool_errors[name] = f"{type(exc).__name__}: {exc}"
+    player_tool_result, player_tool_error = None, None
+    if player_tool_paths:
+        try:
+            from chara.harvest_tools import extract_player_tool_models
+            player_tool_result = extract_player_tool_models(
+                [str(path) for path in player_tool_paths.values()],
+                str(out / "avatar" / "player-tool-models"), bundle_root=bundles)
+        except Exception as exc:
+            player_tool_error = f"{type(exc).__name__}: {exc}"
+    # The site effect families share the package reader with the site packages
+    # (the travel cannon's particle rows come from the same walk); each family
+    # is extracted together so its index is written once.  One job per family,
+    # in this table's order.
+    effect_jobs = {}
+    for domain, function, directory in EFFECT_FAMILY_JOBS:
+        paths, errors = {}, {}
+        for name in names:
+            target = route(name)
+            if target is None or target.domain != domain:
+                continue
+            try:
+                paths[name] = _bundle_path(bundles, name)
+            except Exception as exc:
+                errors[name] = f"{type(exc).__name__}: {exc}"
+        result, error = None, None
+        if paths:
+            try:
+                from sites import action_effects
+                result = getattr(action_effects, function)(
+                    [str(path) for path in paths.values()],
+                    str(out / directory), bundle_root=bundles)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+        effect_jobs[domain] = {"errors": errors, "result": result, "error": error}
     # A phenomenon spans several packages (a global one, a shared one, and one per
     # site), so its packages are extracted together in one job rather than one at a
     # time, and the shared index is written once from what that job produced.
@@ -781,7 +1119,7 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 [str(path) for path in phenomena_paths.values()],
                 str(out / "phenomena"), bundle_root=bundles, master=master,
                 master_cache=master_cache, vgmstream=vgmstream, ffmpeg=ffmpeg,
-                extra_archives=builtin_resources)
+                extra_archives=builtin_resources, shader_compiler=shader_compiler)
         except Exception as exc:
             phenomena_error = f"{type(exc).__name__}: {exc}"
     # The site domain is one job over all of its packages too: a room module's
@@ -808,6 +1146,24 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 bundle_root=bundles, master=master, master_cache=master_cache)
         except Exception as exc:
             site_error = f"{type(exc).__name__}: {exc}"
+    # The footstep surface of each site scene (the mesh its site view's
+    # ``_soundWaveMeshFilter`` names) is a second read of the scene packages the
+    # site job was given, with its own document and its own outcome: the scene
+    # geometry keeps the pointer only, and this pass resolves it.
+    sound_wave_scenes = {}
+    if site_paths:
+        from sites.census import scene_name
+        sound_wave_scenes = {name: path for name, path in site_paths.items()
+                             if scene_name(name) is not None}
+    sound_wave_result, sound_wave_error = None, None
+    if sound_wave_scenes:
+        try:
+            from sites.sound_wave import extract_site_sound_wave
+            sound_wave_result = extract_site_sound_wave(
+                [str(path) for path in sound_wave_scenes.values()],
+                out / "site-sound-wave" / "site-sound-wave.json", bundle_root=bundles)
+        except Exception as exc:
+            sound_wave_error = f"{type(exc).__name__}: {exc}"
     # The fixture-interface family is one job over all its packages: the
     # attach-points index and the per-fixture grid are each written once from
     # what that job produced, not once per package.
@@ -876,69 +1232,85 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                     fixture_store, str(out / "fixture-models"))
             except Exception as exc:
                 fixture_mesh_error = f"{type(exc).__name__}: {exc}"
-        # Particle emitters are a second-order read over three domains --
-        # fixture-interface, cutscene-timeline and fixture-timeline -- because
-        # a package's ParticleSystem and ParticleSystemRenderer components are
-        # read across the same families whose attach points, tracks and clips
-        # are each read as their own job elsewhere in this function.  The
-        # ``fixture_store`` opened above only holds the fixture-interface
-        # family, so it is not reused here; a second, wider store is opened
-        # instead, which pays the fixture-interface packages' read cost a
-        # second time.  fixtures.particles.extract_from_store does its own
-        # per-domain filtering and counting once every package of the three
-        # domains is in the store, so this driver only gathers their paths
-        # rather than re-implementing that filtering.  The domain stays
-        # ``fixture-interface`` in the report (its subject is the routing that
-        # gates this whole job), the same reason the geometry entry keeps it.
-        if fixture_particles:
+    # Particle emitters are a second-order read over the furniture families --
+    # fixture-interface, cutscene-timeline and fixture-timeline -- because a
+    # package's ParticleSystem and ParticleSystemRenderer components are read
+    # across the same families whose attach points, tracks and clips are each
+    # read as their own job elsewhere in this function; the same schema also
+    # carries the site-move and foot effect families and the travel cannon
+    # (:data:`PARTICLE_DOMAINS`, :data:`PARTICLE_PACKAGES`).  The
+    # ``fixture_store`` opened above only holds the fixture-interface family,
+    # so it is not reused here; a second, wider store is opened instead, which
+    # pays the fixture-interface packages' read cost a second time.
+    # fixtures.particles.extract_from_store does its own per-domain filtering
+    # and counting once every target package is in the store, so this driver
+    # only gathers their paths rather than re-implementing that filtering.  The
+    # domain stays ``fixture-interface`` in the report (the furniture family is
+    # the subject of the pass), the same reason the geometry entry keeps it.
+    particle_paths = {}
+    named_particle_packages = set(PARTICLE_PACKAGES)
+    reach_candidates = []
+    for name in names:
+        target = route(name)
+        named = name in PARTICLE_PACKAGES or name.startswith(PARTICLE_PACKAGE_PREFIXES)
+        covered = target is not None and (target.domain in PARTICLE_DOMAINS or named)
+        try:
+            path = _bundle_path(bundles, name)
+        except Exception:
+            continue
+        if covered:
+            particle_paths[name] = path
+            if named:
+                named_particle_packages.add(name)
+        else:
+            reach_candidates.append(path)
+    particle_asked = bool(fixture_paths or particle_paths)
+    timeline_reach = None
+    if fixture_particles and particle_paths:
+        try:
+            from core.assets.packages import PackageStore
+            from fixtures.interface import extract_particles
+            from fixtures.timeline_reach import reached_packages
+            # The packages outside the pass's domains whose timelines drive a
+            # ParticleSystem (every other package of the run is read for it).
+            timeline_reach = reached_packages(reach_candidates, bundles)
+            reach_packages = tuple(sorted(name for name in timeline_reach
+                                          if name not in particle_paths))
+            for name in reach_packages:
+                particle_paths[name] = _bundle_path(bundles, name)
+            # A renderer's material slots, and a mesh-drawn renderer's own
+            # mesh, commonly point into a companion package this domain's own
+            # selection never names on its own: an ``mysekai__effect__*``
+            # package supplies the fixture and cut-scene family's materials and
+            # meshes, and the shared ``mysekai__shader`` package supplies their
+            # shaders.  The router does not assign most of them to one of this
+            # pass's domains, and discovery may not have selected them into
+            # *names* at all, so the bundle directory is scanned by name
+            # directly; every match that is not itself a target is loaded to
+            # serve as a pointer target and is never extracted.
+            supply_paths = {}
             try:
-                from core.assets.packages import PackageStore
-                from fixtures.interface import extract_particles
-                particle_domains = ("fixture-interface", "cutscene-timeline",
-                                    "fixture-timeline")
-                particle_paths = dict(fixture_paths)
-                for name in names:
-                    if name in particle_paths:
+                for entry in sorted(os.listdir(bundles)):
+                    if entry in particle_paths:
                         continue
-                    target = route(name)
-                    if target is None or target.domain not in particle_domains:
+                    candidate = Path(bundles) / entry
+                    if not candidate.is_file():
                         continue
-                    try:
-                        particle_paths[name] = _bundle_path(bundles, name)
-                    except Exception:
-                        pass
-                # A renderer's material slots, and a mesh-drawn renderer's own
-                # mesh, commonly point into a companion package this domain's
-                # own selection never names on its own: an
-                # ``mysekai__effect__*`` package supplies the fixture and
-                # cut-scene family's materials and meshes, and the shared
-                # ``mysekai__shader`` package supplies their shaders.  The
-                # router does not assign either to one of this pass's three
-                # domains, and discovery may not have selected them into
-                # *names* at all, so the bundle directory is scanned by name
-                # directly; every match is loaded to serve as a pointer
-                # target and is never itself extracted as a target package.
-                supply_paths = {}
-                try:
-                    for entry in sorted(os.listdir(bundles)):
-                        if entry in particle_paths:
-                            continue
-                        candidate = Path(bundles) / entry
-                        if not candidate.is_file():
-                            continue
-                        if entry.startswith("mysekai__effect__") or entry == "mysekai__shader":
-                            supply_paths[entry] = str(candidate)
-                except OSError:
-                    pass
-                particle_store = PackageStore(
-                    [str(path) for path in particle_paths.values()]
-                    + list(supply_paths.values())
-                    + list(builtin_resources or []),
-                    root=bundles)
-                fixture_particle_result = extract_particles(
-                    particle_store, str(out / "fixture-particles"))
-            except Exception as exc:
-                fixture_particle_error = f"{type(exc).__name__}: {exc}"
+                    if entry.startswith("mysekai__effect__") or entry == "mysekai__shader":
+                        supply_paths[entry] = str(candidate)
+            except OSError:
+                pass
+            particle_store = PackageStore(
+                [str(path) for path in particle_paths.values()]
+                + list(supply_paths.values())
+                + list(builtin_resources or []),
+                root=bundles)
+            fixture_particle_result = extract_particles(
+                particle_store, str(out / "fixture-particles"),
+                shader_compiler=shader_compiler, domains=PARTICLE_DOMAINS,
+                packages=tuple(sorted(named_particle_packages | set(reach_packages))))
+        except Exception as exc:
+            fixture_particle_error = f"{type(exc).__name__}: {exc}"
     # The dialogue-camera domain is one package today, but the reader takes a
     # family and reports per package, so it is driven exactly like the other
     # shared-read domains rather than being special-cased on today's count.
@@ -962,6 +1334,23 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 str(out / "camera"), bundle_root=bundles)
         except Exception as exc:
             camera_error = f"{type(exc).__name__}: {exc}"
+    # The camera package feeds a second reader: the field camera prefab the
+    # site scene instantiates (see FIELD_CAMERA_PREFAB) is exported with the
+    # site package reader, its canvas and material included.  Its outcome is
+    # its own derived entry, so a failure there is not read as a failure of the
+    # camera curves, nor hidden behind their success.
+    field_camera_asked = bool(camera_paths or camera_errors)
+    field_camera_result, field_camera_error = None, None
+    if field_camera_asked:
+        try:
+            if not camera_paths:
+                raise FileNotFoundError("; ".join(sorted(camera_errors.values())))
+            from sites.prefab_package import extract_prefab_package
+            field_camera_result = extract_prefab_package(
+                str(next(iter(camera_paths.values()))), FIELD_CAMERA_PREFAB,
+                str(out / "field-camera"), bundle_root=bundles)
+        except Exception as exc:
+            field_camera_error = f"{type(exc).__name__}: {exc}"
     # The two timeline families each run their three timeline reads as one job
     # over the whole family, for the same cross-package reason.
     cutscene_paths = {}
@@ -1104,10 +1493,16 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                                            facial=facial_data, aux=tuple(aux_bundles))
             elif target.domain == "motion":
                 from chara.motion_library import export_motion_library
-                reference = next((n for n in names if route(n) and route(n).domain == "character"), None)
-                if not reference:
+                characters = [n for n in names if route(n) and route(n).domain == "character"]
+                if not characters:
                     raise ValueError("motion extraction requires a character reference bundle in manifest")
-                result = export_motion_library(str(_bundle_path(bundles, reference)), str(bundle), str(out))
+                # The characters' AnimatorControllers name the clips they play
+                # by serialized identity; same-name duplicates in the motion
+                # package are resolved by that reference, never by listing order.
+                result = export_motion_library(str(_bundle_path(bundles, characters[0])), str(bundle), str(out),
+                                               rotation_encoding=rotation_encoding,
+                                               controller_bundles=[str(_bundle_path(bundles, n))
+                                                                   for n in characters])
             elif target.domain == "emoticon":
                 if name in emoticon_errors:
                     raise FileNotFoundError(emoticon_errors[name])
@@ -1129,6 +1524,27 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 if result.get("status") != "succeeded":
                     raise RuntimeError(result.get("error", "harvest-tool package did not produce a result"))
                 result["index"] = harvest_tool_result["path"]
+            elif target.domain == "player-tool-model":
+                if name in player_tool_errors:
+                    raise FileNotFoundError(player_tool_errors[name])
+                if player_tool_error:
+                    raise RuntimeError(player_tool_error)
+                result = dict((player_tool_result or {}).get("perBundle", {}).get(name, {}))
+                if result.get("status") != "succeeded":
+                    raise RuntimeError(result.get(
+                        "error", "player-tool-model package did not produce a result"))
+                result["index"] = player_tool_result["path"]
+            elif target.domain in effect_jobs:
+                job = effect_jobs[target.domain]
+                if name in job["errors"]:
+                    raise FileNotFoundError(job["errors"][name])
+                if job["error"]:
+                    raise RuntimeError(job["error"])
+                result = dict((job["result"] or {}).get("perBundle", {}).get(name, {}))
+                if result.get("status") != "succeeded":
+                    raise RuntimeError(result.get(
+                        "error", f"{target.domain} package did not produce a result"))
+                result["index"] = job["result"]["path"]
             elif target.domain == "phenomena":
                 if name in phenomena_errors:
                     raise FileNotFoundError(phenomena_errors[name])
@@ -1161,6 +1577,9 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                     raise RuntimeError(site_error)
                 result = dict((site_result or {}).get("perBundle", {}).get(name, {}))
                 result["index"] = (site_result or {}).get("path", "")
+            elif target.domain == "fixture-reaction":
+                from fixtures.reactions import extract_fixture_reactions
+                result = extract_fixture_reactions(str(bundle), out / "fixture-reactions.json")
             elif target.domain == "fixture-interface":
                 if name in fixture_errors:
                     raise FileNotFoundError(fixture_errors[name])
@@ -1192,6 +1611,14 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                         f"camera package not read: {name}")
                 result = {k: v for k, v in record.items() if k != "package"}
                 result["json"] = str(out / "camera" / f"{name}.json")
+            elif target.domain == "house-transition":
+                # One package, one prefab the door transitioner loads by name
+                # (HOUSE_TRANSITION_PREFAB); the package's other prefab is kept
+                # as a scene of its own by the reader.
+                from sites.prefab_package import extract_prefab_package
+                result = extract_prefab_package(str(bundle), HOUSE_TRANSITION_PREFAB,
+                                                str(out / "house-transition"),
+                                                bundle_root=bundles)
             elif target.domain == "talk":
                 # Which talks belong to one character is decided by master tables,
                 # so without them the corpus cannot be scoped and is not written.
@@ -1309,6 +1736,16 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             "counts": {k: v for k, v in (site_result or {}).items()
                        if isinstance(v, int)},
             "error": site_error or ""})
+    if sound_wave_scenes:
+        failed_scenes = (sound_wave_result or {}).get("failed") or {}
+        report["derived"].append({
+            "artifact": "site-sound-wave/site-sound-wave.json",
+            "domain": "site",
+            "status": "failed" if (sound_wave_error or failed_scenes) else "succeeded",
+            "counts": {k: v for k, v in (sound_wave_result or {}).items()
+                       if isinstance(v, int)},
+            "error": sound_wave_error or "; ".join(
+                f"{name}: {error}" for name, error in sorted(failed_scenes.items()))})
     if fixture_paths:
         report["derived"].append({
             "artifact": "fixture-interface/attach-points.json",
@@ -1332,11 +1769,13 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             "status": geometry_status,
             "counts": geometry_counts,
             "error": geometry_error})
-        # Always present, never omitted, for the same reason as the geometry
-        # entry above: skipped-with-a-reason when the caller did not ask for
-        # the particle-emitter pass, otherwise the outcome of the pass -- and
-        # the same failed-not-succeeded shape for a pass that produced no
-        # counts at all (see ``_optional_pass_status``).
+    # Always present when the run selected a package the pass covers, never
+    # omitted, for the same reason as the geometry entry above:
+    # skipped-with-a-reason when the caller did not ask for the particle-emitter
+    # pass, otherwise the outcome of the pass -- and the same
+    # failed-not-succeeded shape for a pass that produced no counts at all (see
+    # ``_optional_pass_status``).
+    if particle_asked:
         particle_counts = {k: v for k, v in (fixture_particle_result or {}).items()
                            if isinstance(v, int)}
         particle_status, particle_error = _optional_pass_status(
@@ -1346,6 +1785,8 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             "artifact": "fixture-particles/index.json",
             "domain": "fixture-interface",
             "status": particle_status,
+            "sourcePrograms": (fixture_particle_result or {}).get("sourcePrograms"),
+            "timelineReach": {"candidates": len(reach_candidates), "reached": timeline_reach},
             "counts": particle_counts,
             "error": particle_error})
     if fixture_paths or fixture_errors:
@@ -1386,6 +1827,15 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             "counts": {k: v for k, v in (fixture_talks_result or {}).items()
                        if isinstance(v, int)},
             "error": fixture_talks_error or ""})
+    if field_camera_asked:
+        report["derived"].append({
+            "artifact": "field-camera/",
+            "domain": "camera",
+            "status": "failed" if field_camera_error else "succeeded",
+            "counts": {k: v for k, v in (field_camera_result or {}).items()
+                       if isinstance(v, int)},
+            "path": (field_camera_result or {}).get("json"),
+            "error": field_camera_error or ""})
     if animation_asked:
         # A package that failed to export is reported as a failure of this pass,
         # not folded into the count of what did export.
@@ -1405,9 +1855,23 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
     # caller hands in -- so it is reported under its own key rather than among
     # the artifacts derived from the extracted packages.  It is always present:
     # skipped-with-a-reason when no path was supplied, never absent.
-    report["playerData"] = [_ui_artifact(out, player_data),
-                            _ui_atlas_artifact(out, player_data),
-                            _sitemap_screen_layer_artifact(out, player_data)]
+    # A build whose player data is loose files in its APKs has no container
+    # for the UI readers below, which take one; its UI documents are read by
+    # the region's own layout reader, so those three say so and are skipped.
+    player_paths = player_data_paths(player_data)
+    loose = bool(player_paths) and is_loose_player_data(player_paths)
+    container = player_paths[0] if player_paths and not loose else None
+    ui_rows = [_ui_artifact(out, container), _ui_atlas_artifact(out, container),
+               _sitemap_screen_layer_artifact(out, container)]
+    if loose:
+        for row in ui_rows:
+            row["error"] = LOOSE_PLAYER_UI
+    report["playerData"] = [*ui_rows,
+                            _live_transitioner_artifact(out, player_paths, player_types),
+                            _effect_resources_artifact(out, player_paths, player_types,
+                                                       player_declarations, bundles),
+                            _graphics_config_artifact(out, player_paths, player_types),
+                            _layout_grid_artifact(out, player_paths, player_types)]
     pack_manifest = write_pack_manifest(out)
     report["derived"].append({
         "artifact": "manifest.json",

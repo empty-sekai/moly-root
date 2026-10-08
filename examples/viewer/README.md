@@ -78,6 +78,7 @@ http://localhost:8000/examples/viewer/index.html?base=../../local-data
 | 参数 | 作用 |
 | --- | --- |
 | `base=<url>` | 设置数据根目录。用于把提取产物放在示例目录之外。 |
+| `portrait=1` | 纯头部透明导出模式：按 Head 蒙皮筛选三角形，冻结姿态/布料/眨眼，由几何自动确定相机。批量导出与校验见下方。 |
 | `ui=0` | 以纯净模式启动(全部界面隐藏,`H` 召回)。 |
 | `unit=<n>` | 载入指定编号的角色;换角色后地址栏会自动更新这一项。 |
 | `play=1` | 载入后以动作预览模式自动播放第一个可用动作族（编排挂起）。 |
@@ -104,6 +105,7 @@ http://localhost:8000/examples/viewer/index.html?base=../../local-data&play=1&fr
 | 模块 | 职责 |
 | --- | --- |
 | `viewer.js` | 页面入口和编排层。创建场景、加载 JSON/glTF、组装材质与控制器、连接 UI、处理查询参数、更新布料和头顶件，并运行自检。 |
+| `portrait.js` | 纯头部几何选择与 crown-to-chin 自动相机；保持真实 toon / facial / stencil 材质，禁止用半身截图裁切。 |
 | `shading.js` | 角色 toon `ShaderMaterial`、身体遮罩、面部分支、光照参数、眉毛 stencil overlay 和渲染状态更新。纹理按线性采样，渲染器不做 tone mapping。 |
 | `facial.js` | 眼睛和嘴巴图集索引、UV 偏移、默认表情、眨眼状态机以及说话口型状态机。索引按一开始、四列和下限一的规则处理。 |
 | `cloth.js` | 90 Hz Verlet 布料模拟、距离和根距离约束、角度限制、球体/胶囊/平面碰撞、有限值保护、传送重置以及 glTF 节点索引绑定。 |
@@ -115,6 +117,17 @@ http://localhost:8000/examples/viewer/index.html?base=../../local-data&play=1&fr
 | `OrbitControls.js` | Three.js 相机轨道控制器，提供拖拽旋转、缩放和阻尼。 |
 | `BufferGeometryUtils.js` | Three.js 几何工具模块，由 glTF 加载器使用。 |
 | `three.module.min.js` | Three.js r160 的压缩 ES module 运行时。许可证见仓库根目录的 `THIRD_PARTY_NOTICES.md`。 |
+
+## 纯头部批量导出
+
+生产化工具位于 [`tools/head-portraits`](../../tools/head-portraits/README.md)。它自动启动独立本地 HTTP 服务、遍历源 manifest 的角色，使用本示例的真实渲染链生成 512 × 512 RGBA。输出 generator 为 `moly-root-chara-head-v1`；源区域/版本、GLB、rig、渲染器和图片 SHA-256 均写入 manifest 并验证。头顶及左右边界不得裁切，长发允许离开下边缘。无需手工调整相机，不按角色硬编码。
+
+```sh
+node tools/head-portraits/export.mjs --source local-data --out ../portraits-cn --region cn --version 6.0.0
+python tools/head-portraits/finalize.py --source local-data --out ../portraits-cn --verify
+```
+
+首次使用须按工具文档安装 Playwright / Pillow。导出目录须为空，生成的游戏图片不提交到本仓库。完整产物应人工检查 `qa-light.png` 与 `qa-dark.png`。
 
 ## 契约对应关系
 

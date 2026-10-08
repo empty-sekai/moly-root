@@ -17,7 +17,8 @@ import venv
 import zipfile
 
 RESOURCES = {"categories.toml", "groups.toml", "transforms.toml",
-             "_node_codec.mjs", "transform_glb.mjs", "manifest.schema.json"}
+             "_node_codec.mjs", "transform_glb.mjs", "manifest.schema.json",
+             "manifest-v2.schema.json", "catalog-v2.schema.json", "channel.schema.json"}
 
 
 def check(source, work):
@@ -96,7 +97,7 @@ print(json.dumps({"python": sys.version, "node_fallback_checked": node_fallback}
     for version in ("v1", "v2"):
         (assets / "characters.json").write_text(json.dumps({"version": version}), encoding="utf-8")
         run("groups-" + version, [str(python), "-m", "pack.groups", "--src", str(assets),
-                                  "--out", str(grouped), "--version", version])
+                                  "--out", str(grouped), "--version", version, "--region", "cn"])
     run("groups-verify", [str(python), "-m", "pack.verify", "--out", str(grouped)])
     historical = next((grouped / "catalogs").glob("*.json"))
     run("history-verify", [str(python), "-m", "pack.verify", "--catalog", str(historical)])

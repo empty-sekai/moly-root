@@ -29,8 +29,9 @@ def declared_passes(parsed):
         return result
 
     result = []
-    for subshader in parsed.get("m_SubShaders") or []:
-        for shader_pass in subshader.get("m_Passes") or []:
+    for subshader_index, subshader in enumerate(parsed.get("m_SubShaders") or []):
+        subshader_tags = {str(key): value for key, value in pairs((subshader.get("m_Tags") or {}).get("tags"))}
+        for pass_index, shader_pass in enumerate(subshader.get("m_Passes") or []):
             state = shader_pass.get("m_State") or {}
             tags = {str(key).upper(): value
                     for key, value in pairs((state.get("m_Tags") or {}).get("tags"))}
@@ -41,5 +42,7 @@ def declared_passes(parsed):
             if "rtBlend0" in state:
                 raster["blend"] = {key: scalar(value) for key, value in state["rtBlend0"].items()}
             result.append({"name": name or None, "lightMode": tags.get("LIGHTMODE"),
+                           "subShaderIndex": subshader_index, "passIndex": pass_index,
+                           "subShaderTags": subshader_tags, "tags": tags,
                            "renderState": raster})
     return result

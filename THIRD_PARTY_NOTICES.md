@@ -12,9 +12,12 @@ MIT, (c) 2024 mos9527). The oracle itself is not distributed here, but the
 development process benefited from sssekai, so its MIT license text is
 reproduced below in good faith.
 
-moly-root includes an independently written AssetBundle decryption implementation
-and does not depend on sssekai's network, encryption, or command-line modules.
-Consumers supplying bundles are responsible for providing readable input files.
+moly-root's AssetBundle decryption implementation is independently written.
+The Japanese-server protocol framing, endpoint construction, guest-session
+sequence, and manifest URL shape were adapted from sssekai 0.8.0 at upstream
+commit `523a3659ea6641a6aa9c5f940341ad458391344c`; moly-root does not invoke its
+command-line program or import it as a library. Consumers can also supply an
+offline manifest descriptor and perform no network discovery.
 
 ### sssekai MIT License
 

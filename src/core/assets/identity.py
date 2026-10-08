@@ -56,3 +56,25 @@ def json_pointers(value):
     if isinstance(value, (list, tuple)):
         return [json_pointers(item) for item in value]
     return value
+
+
+def object_identity(record, object_id):
+    """Object address including the logical package that owns its serialized file."""
+    return {"bundle": str(record.bundle), "archive": str(record.archive),
+            "pathId": path_id(object_id)}
+
+
+def source_reference(record, owner_path_id, pointer, follow):
+    """Both ends of a source graph edge, including authored null/unresolved PPtrs."""
+    pointer = pointer or {}
+    copied = pointer_value({"m_FileID": pointer.get("m_FileID", 0),
+                            "m_PathID": pointer.get("m_PathID", 0)})
+    file_id = copied["m_FileID"]
+    externals = getattr(record, "externals", ())
+    external = (str(externals[file_id - 1])
+                if 0 < file_id <= len(externals) else None)
+    target = follow(record, pointer) if copied["m_PathID"] != "0" else None
+    return {"owner": object_identity(record, owner_path_id),
+            "pointer": {"fileId": file_id, "pathId": copied["m_PathID"]},
+            "external": external,
+            "target": object_identity(*target) if target else None}

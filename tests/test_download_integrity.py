@@ -264,3 +264,18 @@ def test_ambiguous_resumption_discards_the_checkpoint_before_retrying(http_sourc
     download_one(entry(), base, tmp_path, retries=3)
     assert (tmp_path / "probe").read_bytes() == b"abcdef"
     assert [request["range"] for request in requests] == [None, "bytes=3-", None]
+
+
+def test_verified_md5_complete_cache_is_reused_without_network(http_source, tmp_path):
+    base, _, requests = http_source
+    target = tmp_path / "probe"
+    target.write_bytes(b"already complete")
+    receipt = download.download_file(base + "/probe", target,
+                                     expected_hash="md5:" + hashlib.md5(b"already complete").hexdigest())
+    assert receipt["cached"] is True
+    assert receipt["bytes"] == len(b"already complete")
+    assert not requests
+
+
+def test_jp_manifest_md5_is_passed_to_shared_verifier():
+    assert download._expected("md5:d41d8cd98f00b204e9800998ecf8427e") == ("md5", "d41d8cd98f00b204e9800998ecf8427e")

@@ -5,6 +5,11 @@ Keep their parent chains so a consumer can resolve the current house instance
 without baking a particular placement into reusable package metadata.
 """
 from core.assets.identity import identity, reference
+from core.gltf import COORDINATE_SPACE, SOURCE_SPACE, reflect_position, reflect_quaternion
+
+
+def _canonical(value, channels, convert):
+    return dict(zip(channels, convert([value[channel] for channel in channels])))
 
 
 def _transform_chain(store, owner, pointer, transforms):
@@ -26,9 +31,16 @@ def _transform_chain(store, owner, pointer, transforms):
             "asset": identity(record, path_id),
             "gameObject": reference(store, record, tree["m_GameObject"]),
             "parent": reference(store, record, tree["m_Father"]),
-            "localPosition": dict(tree["m_LocalPosition"]),
-            "localRotation": dict(tree["m_LocalRotation"]),
+            "coordinateContract": COORDINATE_SPACE,
+            "localPosition": _canonical(tree["m_LocalPosition"], "xyz", reflect_position),
+            "localRotation": _canonical(tree["m_LocalRotation"], "xyzw", reflect_quaternion),
             "localScale": dict(tree["m_LocalScale"]),
+            "sourceTransform": {
+                "coordinateSpace": SOURCE_SPACE,
+                "localPosition": dict(tree["m_LocalPosition"]),
+                "localRotation": dict(tree["m_LocalRotation"]),
+                "localScale": dict(tree["m_LocalScale"]),
+            },
         }
         parent = tree["m_Father"]
         target = store.follow(record, parent) if parent["m_PathID"] else None
@@ -53,4 +65,6 @@ def read(store, package):
                 "outsideDoorActionPoint": _transform_chain(
                     store, record, tree["outsideDoorActionPoint"], transforms),
             })
-    return {"views": views, "transforms": list(transforms.values())}
+    return {"schemaVersion": 2, "coordinateContract": COORDINATE_SPACE,
+            "coordinateUnits": "source-unity-unit",
+            "views": views, "transforms": list(transforms.values())}

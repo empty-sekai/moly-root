@@ -16,6 +16,12 @@ from core.unity import configure_fallback_unity_version
 TABLES = (
     "mysekaiFixtures", "mysekaiCustomFixtures", "mysekaiSites",
     "mysekaiSiteLevels", "mysekaiSiteLayouts", "mysekaiRankReleases",
+    "mysekaiCutScenes",
+    # The gate model a home places: the gate in the setting area shows its
+    # skin's bundle (skin row -> unit or common skin table by the skin type)
+    # when the player set a skin, else the gate row's own bundle.
+    "mysekaiGates", "mysekaiGateSkins", "mysekaiGateUnitSkins",
+    "mysekaiGateCommonSkins",
 )
 
 

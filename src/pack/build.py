@@ -37,6 +37,7 @@ from core.atomic import PUBLIC_FILE_MODE, json_bytes, write_bytes
 from . import codecs
 from .categories import VALID_XF, load_categories
 from .hashing import sha256_bytes, sha256_file
+from .identity import MANIFEST_V2, canonical_bytes, manifest_v2
 from .paths import canonical_inputs, output_path, separate_output
 from .verify import verify_blob, verify_manifest
 
@@ -81,8 +82,12 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
           progress=None, xf_overlay=None, xf_name=None,
           xf_overlay_expect_files=None, xf_overlay_expect_bytes=None,
           transforms_path=None, paths=None, manifest_name="manifest.json",
-          previous_manifest=None) -> dict:
+          previous_manifest=None, format_version=1) -> dict:
     """Pack *src* into *out*/blobs/ + *out*/manifest.json. Returns a report dict."""
+    if format_version not in (1, 2):
+        raise ValueError("unsupported manifest format version")
+    if format_version == 2 and blob_prefix != DEFAULT_BLOB_PREFIX:
+        raise ValueError("v2 deployment prefixes belong to the store, not the package")
     src, out = separate_output(src, out, xf_overlay)
     if not isinstance(version, str) or not version:
         raise ValueError("version must be a non-empty string")
@@ -137,13 +142,16 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
                 f"({xf_overlay}) files total {overlay_bytes_total} bytes")
 
     table = load_categories(categories_path)
+    encoders = codecs.encoding_profiles(table.classify(path.suffix) for path in inputs.values()) if format_version == 2 else {}
     blobs_dir = output_path(out, "blobs")
     blobs_dir.mkdir(parents=True, exist_ok=True)
     previous_blobs = {}
     old_path = output_path(out, previous_manifest) if previous_manifest is not None else manifest_path
     if old_path is not None and old_path.is_file():
         previous = json.loads(old_path.read_text("utf-8"))
-        if previous.get("schema") == SCHEMA_ID:
+        reusable = (previous.get("schema") == SCHEMA_ID if format_version == 1 else
+                    previous.get("schema") == MANIFEST_V2 and previous.get("encoders") == encoders)
+        if reusable:
             for entry in previous.get("entries", []):
                 if isinstance(entry, dict) and all(isinstance(entry.get(key), str)
                         for key in ("content_sha256", "codec", "http_encoding")):
@@ -274,6 +282,9 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
         "entries": entries,
     }
 
+    if format_version == 2:
+        manifest = manifest_v2(manifest, encoders)
+
     # Reused bytes may have been produced with a previous private-file policy.
     # They are public release objects too, even when no rewrite was necessary.
     if os.name == "posix":
@@ -284,7 +295,7 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
     errors, _ = verify_manifest(manifest, blobs_dir, check_orphans=False)
     if errors:
         raise RuntimeError("refusing to publish invalid manifest: " + "; ".join(errors))
-    data = json_bytes(manifest)
+    data = canonical_bytes(manifest) if format_version == 2 else json_bytes(manifest)
     if manifest_path is None:
         manifest_path = output_path(out, f"packages/{sha256_bytes(data)}.json")
     write_bytes(manifest_path, data, mode=PUBLIC_FILE_MODE)
@@ -295,6 +306,9 @@ def build(src, out, version, *, categories_path=None, blob_prefix=DEFAULT_BLOB_P
     dedup_saved_bytes = logical_bytes - content_bytes
 
     return {
+        "format_version": format_version,
+        "content_id": manifest.get("content_id"),
+        "manifest_sha256": sha256_bytes(data),
         "src": str(src),
         "out": str(out),
         "version": version,
@@ -323,7 +337,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="pack.build", description="pack a source tree into a content-addressed blob store + manifest")
     ap.add_argument("--src", required=True, help="asset root to pack")
     ap.add_argument("--out", required=True, help="output directory (gets blobs/ and manifest.json)")
-    ap.add_argument("--version", required=True, help="opaque build identity written into the manifest")
+    ap.add_argument("--version", required=True, help="release label (not part of a v2 package identity)")
     ap.add_argument("--categories", default=None, help="alternate categories.toml (default: the bundled table)")
     ap.add_argument("--blob-prefix", default=DEFAULT_BLOB_PREFIX)
     ap.add_argument("--progress", type=int, default=0, help="print progress every N files (0 = silent)")
@@ -350,7 +364,7 @@ def main(argv=None):
                     xf_overlay=args.xf_overlay, xf_name=args.xf_name,
                     xf_overlay_expect_files=args.xf_overlay_expect_files,
                     xf_overlay_expect_bytes=args.xf_overlay_expect_bytes,
-                    transforms_path=args.transforms)
+                    transforms_path=args.transforms, format_version=2)
     report["wall_seconds"] = time.time() - t0
 
     if args.json:

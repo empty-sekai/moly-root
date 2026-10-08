@@ -10,8 +10,9 @@ module's job, and it is not a single field read:
   lists that slice it.  Each of the three is a list *of lists* when a platform
   was written as several LZ4 segments, and a bare integer when it was written
   as one; both spellings occur, so both are accepted here and normalised.
-* A platform's segments are decompressed individually and then joined.  The
-  index table's offsets address the joined buffer.
+* A platform's segments are decompressed individually. Each index entry names
+  its source segment, and its offset is local to that segment. Preserve the
+  boundaries until shaders.blob.parse_segments has resolved those addresses.
 
 Two facts about this container cost real time to rediscover, so they are
 written down rather than left to the reader:
@@ -33,11 +34,11 @@ What is verified and what is not:
   world package and every shader in the player build decodes with no error,
   and :func:`shaders.blob.parse_blob` consumes each record exactly (that byte
   account is the verification, not a spot check).
-* Every blob seen so far carries a **single** segment per platform.  The
-  multi-segment path below is written from the field layout, not from a
-  sample, so a multi-segment blob's join order is **unverified**.
-  :func:`platform_blobs` reports the segment count it saw so a caller can tell
-  which case it is in rather than assuming.
+* Multi-segment assets can store only the index table in segment zero and
+  program records at offset zero of segment one. The segment-aware reader
+  validates each address against its own segment and accounts for every byte.
+  Use :func:`platform_segments` for parsing; a flattened byte string alone
+  cannot recover the original segment boundaries.
 """
 from UnityPy.helpers import CompressionHelper
 
@@ -96,7 +97,8 @@ def passes(tree):
     out = []
     for sub_index, subshader in enumerate(parsed_form(tree).get("m_SubShaders") or []):
         for pass_index, entry in enumerate((subshader or {}).get("m_Passes") or []):
-            tags = (entry or {}).get("m_Tags") or {}
+            state = (entry or {}).get("m_State") or {}
+            tags = state.get("m_Tags") or (entry or {}).get("m_Tags") or {}
             table = tags.get("tags") if isinstance(tags, dict) else None
             if isinstance(table, dict):
                 lookup = {str(k).upper(): str(v) for k, v in table.items()}
@@ -106,16 +108,15 @@ def passes(tree):
                 lookup = {str(k).upper(): str(v) for k, v in (tags or {}).items()
                           if isinstance(k, str)}
             out.append((sub_index, pass_index, lookup.get("LIGHTMODE", ""),
-                        str((entry or {}).get("m_Name") or "")))
+                        str((entry or {}).get("m_Name") or state.get("m_Name") or "")))
     return out
 
 
-def platform_blobs(tree):
-    """``[(platform, decompressed bytes, segment count)]`` for one Shader.
+def platform_segments(tree):
+    """Preserved decompressed segments per compiler platform.
 
-    The segment count is reported rather than hidden: everything observed so
-    far is 1, and a value above 1 means the caller has reached the join order
-    this module documents as unverified.
+    Segment positions are part of the binary address contract, not compression
+    trivia. Reject malformed slice arrays instead of silently truncating zip.
     """
     blob = tree.get("compressedBlob")
     if isinstance(blob, (list, tuple)):
@@ -127,13 +128,30 @@ def platform_blobs(tree):
         offsets = _as_list(tree["offsets"][index])
         packed = _as_list(tree["compressedLengths"][index])
         unpacked = _as_list(tree["decompressedLengths"][index])
-        segments = [
-            bytes(CompressionHelper.decompress_lz4(
-                blob[offsets[part]:offsets[part] + packed[part]], unpacked[part]))
-            for part in range(len(packed))
-        ]
-        out.append((int(platform), b"".join(segments), len(segments)))
+        if not (len(offsets) == len(packed) == len(unpacked)) or not packed:
+            raise ValueError(f"platform {platform} has inconsistent segment slice arrays")
+        segments = []
+        for offset, size, expected in zip(offsets, packed, unpacked):
+            if min(offset, size, expected) < 0 or offset + size > len(blob):
+                raise ValueError(f"platform {platform} has an out-of-bounds compressed slice")
+            part = bytes(CompressionHelper.decompress_lz4(
+                blob[offset:offset + size], expected))
+            if len(part) != expected:
+                raise ValueError(f"platform {platform} decompressed segment length mismatch")
+            segments.append(part)
+        out.append((int(platform), tuple(segments)))
     return out
+
+
+def platform_blobs(tree):
+    """Legacy byte/hash inspection API, NOT a multi-segment parsing API.
+
+    The concatenation is useful for a storage fingerprint, but its indices are
+    still segment-relative. Parsing callers must use platform_segments and
+    shaders.blob.parse_segments rather than passing this concatenation alone.
+    """
+    return [(platform, b"".join(parts), len(parts))
+            for platform, parts in platform_segments(tree)]
 
 
 def shaders_in(environment):

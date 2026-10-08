@@ -30,7 +30,7 @@ from core.unity import configure_fallback_unity_version
 
 from core.assets.packages import PackageStore
 from core.jsonio import write_json
-from .directors import read_prefab_directors
+from .directors import read_effect_prefabs, read_prefab_directors
 
 configure_fallback_unity_version()
 
@@ -108,7 +108,8 @@ def _walk_package(store, name, out):
     """One package: its timelines, its documents, and its structural counts."""
     package = store.package(name)
     document = {"package": name, "timelines": [], "unread": [],
-                "prefabs": read_prefab_directors(store, package)}
+                "prefabs": read_prefab_directors(store, package),
+                "effectPrefabs": read_effect_prefabs(store, package)}
     counts = {"package": name, "missing": False, "timelineAssets": 0,
               "top": 0, "marker": 0, "children": 0, "childrenOfGroup": 0,
               "childrenOfNonGroup": 0, "nested": 0, "groupTracks": 0,

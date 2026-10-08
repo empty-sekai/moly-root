@@ -41,7 +41,9 @@ import json
 from pathlib import Path
 
 from core.jsonio import dumps
-from .audio import DECODER, Library, TRANSCODER, archive_bytes
+from core.atomic import PUBLIC_FILE_MODE, write_json
+from core.assets.router import AMBIENCE_PACKAGE
+from .audio import DECODER, Library, NO_CUE, TRANSCODER, archive_bytes
 
 # Package families, in manifest form (slash-separated) and store form (the
 # flattened names the decrypted tree uses).
@@ -68,6 +70,9 @@ NO_ARCHIVE = "package holds no audio archive"
 # A run walks a thousand-plus packages; the loop sidecar is rewritten every
 # so often so a stopped run resumes from what is already on disk.
 CHECKPOINT_EVERY = 50
+# Old corpus runs returned after the first TextAsset. A bundle can contain
+# several ACBs (e.g. toaster embeds tea_set and toaster), each still source-owned.
+ARCHIVE_SET_REVISION = 2
 
 SEMANTICS = {
     "families": ("per family: `requested` packages against the manifest "
@@ -123,13 +128,19 @@ def voice_requests(document):
     sorted cues asked of it, and the sorted set of cues themselves.
     """
     cues = set()
+    requests = {}
     for talk in _corpus_talks(document):
         for cue in talk.get("voices") or []:
             if cue.startswith(CUE_PREFIX):
                 cues.add(cue)
-    requests = {}
-    for cue in sorted(cues):
-        requests.setdefault(TALK_VOICE + voice_stem(cue), []).append(cue)
+                script = talk.get("lua")
+                # Vocal variants can end in e.g. _023_street or _002_b.
+                # The authored script identity separates it from the suffix;
+                # stripping a fixed number of underscore fields does not.
+                stem = script if isinstance(script, str) and cue.startswith(
+                    CUE_PREFIX + script + "_") else voice_stem(cue)
+                requests.setdefault(TALK_VOICE + stem, set()).add(cue)
+    requests = {name: sorted(values) for name, values in requests.items()}
     return requests, sorted(cues)
 
 
@@ -158,16 +169,39 @@ def _extract_one(store, library, flat, cues, failures,
     if package is None:
         failures.append({"package": flat, "reason": absent_reason})
         return False
-    for asset_name, record, path_id in package.contents:
-        if record.kinds.get(path_id) != "TextAsset":
-            continue
-        tree = record.tree(path_id)
-        name = str(tree.get("m_Name", "") or asset_name).rsplit(".", 1)[0]
-        library.add(flat, name, archive_bytes(tree.get("m_Script")), cues)
+    try:
+        archives, seen, names = [], set(), set()
+        for asset_name, record, path_id in package.contents:
+            identity = (id(record), path_id)
+            if record.kinds.get(path_id) != "TextAsset" or identity in seen:
+                continue
+            seen.add(identity)
+            tree = record.tree(path_id)
+            name = str(tree.get("m_Name", "") or asset_name).rsplit(".", 1)[0]
+            if name in names:
+                raise ValueError(f"distinct audio archives share an output name in {flat}: {name}")
+            names.add(name)
+            archives.append((name, archive_bytes(tree.get("m_Script"))))
+        found, entries = set(), []
+        for index, (name, payload) in enumerate(archives):
+            # An embedded archive may share its name with another package's
+            # different ACB. Never overwrite that package's bytes or waveforms.
+            entry = library.add(flat, name, payload, cues, namespace=flat, report_missing=False)
+            entry.update(archiveSetRevision=ARCHIVE_SET_REVISION,
+                         archiveSetCount=len(archives), archiveSetIndex=index)
+            entries.append(entry)
+            found.update(stream.get("cue") for stream in entry["streams"])
+        # A requested voice may live in the second ACB. Absence is a package
+        # result, not one diagnostic for every sibling archive without that cue.
+        if entries and library.decoder:
+            for cue in sorted(set(cues or ()) - found):
+                library.unsupported.append({"package": flat, "cue": cue, "reason": NO_CUE})
+                entries[-1]["streams"].append({"cue": cue, "error": NO_CUE})
+        if not archives:
+            failures.append({"package": flat, "reason": NO_ARCHIVE})
+        return bool(archives)
+    finally:
         store.forget(flat)
-        return True
-    failures.append({"package": flat, "reason": NO_ARCHIVE})
-    return False
 
 
 def _family_summary(requested, succeeded, failures, extra=None):
@@ -194,7 +228,7 @@ def _merge_loop(audio_root, library):
                 if entry.get("package") not in known]
         document["packages"] = kept + document["packages"]
     if document["packages"]:
-        path.write_text(dumps(document) + "\n", encoding="utf-8", newline="\n")
+        write_json(path, document, mode=PUBLIC_FILE_MODE)
         document["file"] = "audio/loop.json"
     return document
 
@@ -279,7 +313,7 @@ def _merge_corpus(path, document, answered_on_disk):
 
 
 def extract_audio_corpus(talks_path, manifest_path, bundle_root, out_dir,
-                         decoder=None, transcoder=None, skip_existing=True):
+                         decoder=None, transcoder=None, skip_existing=True, progress=None):
     """Extract the sound families the phenomena job does not ask for.
 
     *talks_path* names the talk corpus whose voice cues are the talk-voice
@@ -305,6 +339,36 @@ def extract_audio_corpus(talks_path, manifest_path, bundle_root, out_dir,
     audio_root.mkdir(parents=True, exist_ok=True)
     existing = _existing_packages(audio_root) if skip_existing else []
     existing_set = set(existing)
+    existing_voices = {}
+    if existing:
+        old_loop = json.loads((audio_root / "loop.json").read_text(encoding="utf-8"))
+        rows_by_package = {}
+        for entry in old_loop.get("packages", []):
+            rows_by_package.setdefault(entry["package"], []).append(entry)
+            existing_voices.setdefault(entry["package"], set()).update(
+                stream.get("cue") for stream in entry.get("streams", [])
+                if stream.get("wav") and (Path(out_dir) / stream["wav"]).is_file())
+        # Repair the affected fixture-SE family once. Legacy ambience/BGM/voice
+        # jobs retain their separate cache policy; no whole voice-corpus redo.
+        def complete_fixture(package):
+            rows = rows_by_package.get(package, [])
+            return bool(rows) and all(row.get("archiveSetRevision") == ARCHIVE_SET_REVISION
+                and row.get("archiveSetCount") == len(rows)
+                and row.get("status") == "succeeded" and bool(row.get("streams"))
+                and all(not stream.get("error") and any(stream.get(kind)
+                        and (Path(out_dir) / stream[kind]).is_file() for kind in ("wav", "ogg"))
+                        for stream in row["streams"]) for row in rows) and {
+                    row.get("archiveSetIndex") for row in rows} == set(range(len(rows)))
+        existing = [package for package in existing if not package.startswith("mysekai__sound__se__fixture__")
+                    or complete_fixture(package)]
+        # The phenomena job decodes the shared ambience package only as the
+        # cue subset its master rows name (the weather ambience); the se
+        # family wants every cue of that archive, the UI button cues among
+        # them.  Only an entry this job wrote (whole) counts as done.
+        existing = [package for package in existing if package != AMBIENCE_PACKAGE
+                    or all(row.get("archiveSetRevision") == ARCHIVE_SET_REVISION
+                           for row in rows_by_package.get(package, []))]
+        existing_set = set(existing)
 
     requests, voice_cues = voice_requests(talks)
 
@@ -312,7 +376,7 @@ def extract_audio_corpus(talks_path, manifest_path, bundle_root, out_dir,
     plan = {"talk-voice": [], "se": [], "bgm": [], "part-voice": []}
     for package, cues in sorted(requests.items()):
         flat = package.replace("/", "__")
-        if flat in existing_set:
+        if flat in existing_set and set(cues) <= existing_voices.get(flat, set()):
             continue                       # already in the library
         if package not in manifest_set:
             missing.append({"package": flat, "cues": cues,
@@ -332,8 +396,12 @@ def extract_audio_corpus(talks_path, manifest_path, bundle_root, out_dir,
     done = {"talk-voice": 0, "se": 0, "bgm": 0, "part-voice": 0}
     failures = {family: [] for family in done}
     walked = 0
+    total = sum(len(rows) for rows in plan.values())
     for family, wanted in plan.items():
         for flat, cues in wanted:
+            if progress is not None:
+                progress({"family": family, "package": flat, "completed": walked,
+                          "requested": total, "cached": len(existing_set)})
             # A package the manifest marks as player-build names its own
             # reason when it is absent; anything else is simply not there.
             absent = BUILT_IN if flat in builtin_flats else NO_BUNDLE
@@ -341,7 +409,7 @@ def extract_audio_corpus(talks_path, manifest_path, bundle_root, out_dir,
                             absent_reason=absent):
                 done[family] += 1
             walked += 1
-            if walked % CHECKPOINT_EVERY == 0:
+            if walked % CHECKPOINT_EVERY == 0 or progress is not None:
                 # progress so far is durable: a run stopped here resumes
                 # without redoing the packages already on disk
                 _merge_loop(audio_root, library)
@@ -357,8 +425,7 @@ def extract_audio_corpus(talks_path, manifest_path, bundle_root, out_dir,
     families["talk-voice"]["decodedCues"] = len(decoded & set(voice_cues))
     families["talk-voice"]["missingPackages"] = missing
     families["talk-voice"]["uncovered"] = [
-        {"cue": cue, "reason": NO_PACKAGE} for cue in voice_cues
-        if TALK_VOICE + voice_stem(cue) not in manifest_set]
+        {"cue": cue, "reason": NO_PACKAGE} for row in missing for cue in row["cues"]]
 
     loop = _merge_loop(audio_root, library)
 
@@ -387,7 +454,22 @@ def extract_audio_corpus(talks_path, manifest_path, bundle_root, out_dir,
     path = audio_root / "corpus.json"
     if path.exists():
         document = _merge_corpus(path, document, answered_on_disk)
-    path.write_text(dumps(document) + "\n", encoding="utf-8", newline="\n")
+    # A retry can repair a previous missing package or an older cue route.
+    # Remove those stale failures only when the decoded library answers them.
+    successful = {entry["package"] for entry in loop["packages"]
+                  if any(stream.get("wav") for stream in entry.get("streams", []))}
+    decoded_cues = {stream.get("cue") for entry in loop["packages"]
+                   for stream in entry.get("streams", []) if stream.get("wav")}
+    for family in document["families"].values():
+        for field in ("failed", "missingPackages"):
+            if field in family:
+                family[field] = [entry for entry in family[field]
+                                 if entry["package"] not in successful
+                                 and not (entry.get("cues") and set(entry["cues"]) <= decoded_cues)]
+        if "uncovered" in family:
+            family["uncovered"] = [entry for entry in family["uncovered"]
+                                   if entry["cue"] not in decoded_cues]
+    write_json(path, document, mode=PUBLIC_FILE_MODE)
     document["path"] = str(path)
     document["audio"] = loop
     return document

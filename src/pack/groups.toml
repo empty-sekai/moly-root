@@ -1,16 +1,8 @@
-# Lossless payloads that the native and browser asset readers can both decode.
+# Release stores keep every payload as its content bytes. HTTP delivery picks
+# one transparent Content-Encoding per published object (the browser and the
+# native web reader both decode it and verify the blob digest on the decoded
+# body), so a client-side codec here would be a second, weaker compression
+# policy for the same bytes.
 [default]
 codec = "identity"
-http_encoding = "identity"
-
-[extensions.json]
-codec = "gzip"
-http_encoding = "identity"
-
-[extensions.glb]
-codec = "gzip"
-http_encoding = "identity"
-
-[extensions.bin]
-codec = "gzip"
 http_encoding = "identity"

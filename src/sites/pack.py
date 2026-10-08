@@ -58,7 +58,10 @@ SEMANTICS = dict(PLACEMENT_SEMANTICS, **{
                  "package holds the scene the game places *and* the model assets "
                  "and dressing sets it was built from, and mesh data is shared "
                  "between the scenes rather than copied. `defaultScene` is the one "
-                 "the game places"),
+                 "the game places. Every texture coordinate set a drawn mesh "
+                 "authors is written as TEXCOORD_n, n being the set's own index, "
+                 "with V flipped like TEXCOORD_0; collision surfaces keep the first "
+                 "two"),
     "collision": ("collision surfaces are written one file per surface, outside the "
                   "visible scene, with the role their name states. A surface that is "
                   "also drawn is in both places and carries `visible: true`"),

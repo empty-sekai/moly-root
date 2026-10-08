@@ -212,7 +212,7 @@ cloth 包含坐标系、版本声明、组件、碰撞体、统计和结构检�
 
 每个会发射的节点一项，`{node, system, renderer}`。`node` 是该节点的 `path`。
 
-`system` 给出发射参数：`duration`、`looping`、`prewarm`、`playOnAwake`、`simulationSpeed`、`simulationSpace`、`randomSeed`、`maxParticles`、`start`，以及仅在对应模块启用时出现的 `emission`、`shape`、`sizeOverLifetime`、`colorOverLifetime`、`rotationOverLifetime`、`velocityOverLifetime`、`limitVelocity`、`textureSheet`、`customData`、`subEmitters`、`noise`、`forceOverLifetime`、`collision`、`trails`。模块启用但本导出器未建模时，该模块名进 `unsupported`，原因为 `particle module not modelled`。
+`system` 给出发射参数：`duration`、`looping`、`prewarm`、`playOnAwake`、`simulationSpeed`、`simulationSpace`、`randomSeed`、`autoRandomSeed`、`useUnscaledTime`、`cullingMode`、`stopAction`、`maxParticles`、`start`，以及仅在对应模块启用时出现的 `emission`、`shape`、`sizeOverLifetime`、`colorOverLifetime`、`rotationOverLifetime`、`velocityOverLifetime`、`limitVelocity`、`textureSheet`、`customData`、`subEmitters`、`noise`、`forceOverLifetime`、`collision`、`trails`。缺失或显式 `null` 的 seed owner 字段保持 `null`，不会被改写成自动 seed；模块启用但本导出器未建模时，该模块名进 `unsupported`，原因为 `particle module not modelled`。
 
 后六项的形状与**消费者必须照着做的四件事**见下面 [随生命变化之外的模块](#modules) 一节。
 
@@ -249,7 +249,7 @@ cloth 包含坐标系、版本声明、组件、碰撞体、统计和结构检�
 | 键 | 何时出现 | 内容 |
 |---|---|---|
 | `customData` | 自定义数据模块启用 | `{custom1, custom2}`，每项 `{mode, componentCount, components[4], color}`。`mode` 为 `disabled` / `vector` / `color`。 |
-| `subEmitters` | 子发射器模块启用 | 数组，每项 `{emitter, type, properties, inherit, emitProbability}`。 |
+| `subEmitters` | 子发射器模块启用 | 数组，每项 `{emitter, sourcePointer, type, properties, inherit, emitProbability}`。 |
 | `noise` | 噪声模块启用 | `{separateAxes, strength/strengthY/strengthZ, frequency, damping, octaves, octaveMultiplier, octaveScale, quality, dimensions, scrollSpeed, remapEnabled, remap/remapY/remapZ, positionAmount/rotationAmount/sizeAmount}`。 |
 | `forceOverLifetime` | 力模块启用 | `{x, y, z, inWorldSpace, randomizePerFrame}`。三轴是**加速度**：乘时间步长后加到速度上，不是位移、也不是冲量。 |
 | `collision` | 碰撞模块启用 | `{type, mode, dampen, bounce, lifetimeLoss, minKillSpeed, maxKillSpeed, radiusScale, quality, voxelSize, collidesWith, collidesWithDynamic, interiorCollisions, maxCollisionShapes, collisionMessages, colliderForce, multiplyColliderForceBy*, planeSlots, planes}`。`type` 为 `planes` / `world`；`mode` 为 `3d` / `2d`；`collidesWith` 是层掩码位；`lifetimeLoss` 是每次碰撞扣掉的**寿命比例**（`1.0` = 当场消亡），不是秒数。 |
@@ -257,7 +257,7 @@ cloth 包含坐标系、版本声明、组件、碰撞体、统计和结构检�
 
 `noise.quality` 是**维度数**，不是画质档：随附的 `dimensions` 把它写明白——`3` 采三维场，`1` 与 `2` 采二维场。`damping` 为真表示强度按频率缩放（即除以 `frequency`），频率升高时视觉幅度不变。噪声作用在**速度**上，与力同一个通道。
 
-`subEmitters[].emitter` 是子发射器所在的**节点路径**，`null` 表示这一项没指任何发射器、因而什么也不发（不要当成「发自己」）。`inherit` 是 `{color, size, rotation, lifetime, duration}` 五个布尔，从 `properties` 的位逐位取出；`properties` 同时原样保留，因为内容里存在把「全继承」写成全 1 位而不是枚举值 31 的情况，两种写法位测试的结果相同。指针指到本包外时该项 `emitter` 为 `null`，并在 `unsupported` 里登记，原因为 `sub-emitter is not in this package`——**空指针与解析不到是两回事**，前者不进 `unsupported`。
+`subEmitters[].emitter` 是子发射器所在的**节点路径**，`sourcePointer` 保留原始 `{fileId,pathId}` PPtr（包括大号或负的 `pathId`）；`null` 表示这一项没指任何发射器、因而什么也不发（不要当成「发自己」）。`inherit` 是 `{color, size, rotation, lifetime, duration}` 五个布尔，从 `properties` 的位逐位取出；`properties` 同时原样保留，因为内容里存在把「全继承」写成全 1 位而不是枚举值 31 的情况，两种写法位测试的结果相同。指针指到本包外时该项 `emitter` 为 `null`，并在 `unsupported` 里登记，原因为 `sub-emitter is not in this package`——**空指针与解析不到是两回事**，前者不进 `unsupported`。
 
 #### 四件必须照着做的事
 
@@ -279,6 +279,7 @@ phenomena/
   index.json                             现象清单
   icons/<图标名>.png                     全部现象图标（来自单一共享缩略图包）
   models/<资产名>-<摘要>.glb             模型资产与网格发射器的几何（跨现象共享，见下）
+  collision.json                         全部效果碰撞体及其作者网格，供粒子碰撞查询
   audio/loop.json                        音频状态与全部循环点
   audio/<档名>/<档名>.acb                音频档原样
   audio/<档名>/<cue>.wav|.ogg            解码后的波形（需外部解码器）
@@ -296,7 +297,7 @@ phenomena/
 
 `index.json` 里的一切文件路径都**相对该文件自身**。贴图文件名带包名前缀，因为贴图名在现象之间会重复；请按 `file` 字段取文件，不要自行拼接。
 
-当前内容规模：15 个现象、29 份配置（15 全局 + 14 覆盖）、29 份后处理、15 张渐变、14 处站点覆盖、107 个粒子效果（560 个发射器）、283 张贴图、29 处贴图数组绑定（共 124 层 PNG）、10 个模型资产（去重后 20 个 glTF 几何文件，合计约 182 KB）、1 份时间轴、13 个音频包共 31 段音频（给了外部解码器时；音频包由 master 行点名，与提取了几个现象无关）、15 张图标、192 条 `omitted`、9 条 `unsupported`。全部现象环境包合计约 9.9 MB——**现象资产很轻**，不必按大体量资产去做分批与缓存。15 个现象里 13 个六个站点齐全，一个只有两个站点，投递站那个没有站点包。
+当前内容规模：15 个现象、29 份配置（15 全局 + 14 覆盖）、29 份后处理、15 张渐变、14 处站点覆盖、107 个粒子效果（560 个发射器）、283 张贴图、29 处贴图数组绑定（共 124 层 PNG）、10 个模型资产（去重后 20 个 glTF 几何文件，合计约 182 KB）、1 份时间轴、13 个音频包共 31 段音频（给了外部解码器时；音频包由 master 行点名，与提取了几个现象无关）、15 张图标、157 条 `omitted`、9 条 `unsupported`。全部现象环境包合计约 9.9 MB——**现象资产很轻**，不必按大体量资产去做分批与缓存。15 个现象里 13 个六个站点齐全，一个只有两个站点，投递站那个没有站点包。
 
 ### 两级查找与覆盖
 
@@ -351,7 +352,7 @@ phenomena/
 
 粒子效果。顶层为 `version`（当前为 1）、`phenomenon`、`effects`、`summary`。
 
-`effects[<prefab 名>]` 为 `{kind, site, variant, nodes, particles, effectors, effectiveRotation}`：
+`effects[<prefab 名>]` 为 `{kind, site, variant, nodes, particles, colliders, effectors, effectiveRotation}`：
 
 | 字段 | 语义 |
 |---|---|
@@ -360,6 +361,7 @@ phenomena/
 | `variant` | 该 prefab 来自哪个包变体（`global` / `common` / `unique__<站点>`）。 |
 | `nodes` | 节点树，父节点在前。每项有 `name`、`path`、`parent`、`active`、`position`、`rotation`、`scale`。 |
 | `particles` | 发射器数组，见下。 |
+| `colliders` | prefab 节点上的碰撞体组件及其序列化开关；`MeshCollider` 记录还通过 `collisionGeometry` 指向 `collision.json` 里的作者网格（见该节）。 |
 | `effectors` | 生命周期组件数组，见下；没有则为 `[]`。 |
 | `effectiveRotation` | 该效果每帧的旋转律，只对 `kind` 为 `camera` 的效果给出，其余为 `null`。 |
 
@@ -543,15 +545,31 @@ layer = min(layers - 1, max(0, floor(fract(clamp(progressSource + progress, 0, 0
 
 当前 9 条 `unsupported` 的构成为：网格发射器指向引擎内置几何 8；模型资产内的动画片段 1。**未建模内容一律逐条保留，不静默丢弃。**
 
+### `collision.json`：天气粒子撞的是什么
+
+天气粒子系统带着世界模式的粒子碰撞模块，撞得到什么由它的层掩码决定，分两组。`006_rain`、`007_rainnight`、`008_thunder` 的雨滴，`009_meteorshower` 的流星，`011_snownight` 的雪，掩码是 8，只含地面层（第 3 层）；`010_snow` 的白天雪没有碰撞模块。它们撞的是**站点效果 prefab** 挂在这一层上的 `MeshCollider`。别的环境包与站点包在第 3 层上都没有碰撞体，所以对这些掩码为 8 的系统而言，`collision.json` 就是全部候选。碰撞体的网格住在一个共享的效果模型包里（JP 这一套里有一个水下站点变体自带一份）。`012_soapbubble` 的肥皂泡（`bubble` 与 `bubble_edge` 两个系统）是另一组：掩码是全部层（4294967295），而肥皂泡的包里一个碰撞体也没有，所以 `collision.json` 里没有它们的行，也不装它们撞的东西：站点包里第 0、4、9 层上的碰撞体，以及运行时摆放的家具（客户端给家具挂碰撞体时把它移到第 9 层）。
+
+`collision.json` 每次运行一份，`{schemaVersion, frame, units, semantics, summary, geometry, colliders}`：
+
+- `geometry[<id>]` 每个源对象一份作者网格：`positions` 与 `triangles` **在作者的左手系里**（`unity-lh-y-up-authored`、`source-unity-unit`），三角形角点按索引缓冲的顺序、保持作者的绕序；另有 `vertexCount`、`triangleCount`、`subMeshes`、`authoredBounds`（网格自己存的包围盒）、`vertexBounds`、`cleaningFacts`、`bakedPhysicsBytes`、`geometrySha256`（对打包数组求的，布局见 `semantics`）与 `source` `{bundle, archive, pathId, bundleSha256}`。
+- `colliders[]` 每个碰撞体组件一行：`{phenomenon, effect, kind, site, variant, node, component, queryShape, layer, enabled, isTrigger, convex, cooking, includeLayers, excludeLayers, activeInHierarchy, chain, geometry, source}`。`chain` 是从 prefab 根到碰撞体节点、父在前的每个节点的局部变换，各带 `active`；`cooking` 是序列化的选项值及其标志名。
+
+**这不是渲染那份。** `fx/effects.json` 里的碰撞体记录也指向该网格的渲染 GLB（`meshes`），那份被反射进查看器的坐标系、绕序也反了。粒子查询不要求网格两面都命中，所以绕序决定扫掠能撞到哪些面；它取最近的命中，所以三角形集合必须是作者的那一套：查询按 `collision.json` 建，不按 GLB 建。位置与链上的值都是存下来的浮点数，没有做任何反射。
+
+**没有做烘焙。** 引擎在查询前会烘焙网格；含网格清理的烘焙选项会删掉退化与重复的三角形、焊接重合顶点。导出的三角形是烘焙的*输入*；`cleaningFacts` 数出清理可能碰到的东西（精确重复的位置、重复索引的三角形、零面积三角形、焊接后会重合的三角形），但不施加。网格还可以带一份在游戏构建时就烘焙好的副本；`bakedPhysicsBytes` 给出它的字节长度（`triangleMesh`、`convexMesh`）。当前内容里每个碰撞网格都不带（两项都是 0），所以引擎在建碰撞体时自己烘焙，输入就是这里导出的数组，包里也没有烘焙结果可供对照。凸碰撞体（查询对象是引擎造的凸包）、多于一个子网格的网格（拼接顺序未确定）、压缩或外置流的网格、解析不到的指针，一律带 `reason` 报出，绝不近似；当前内容里一例也没有。
+
+**包里没有的**：prefab 根放在哪里（由安装效果的地方决定），以及查询报出的碰撞体与刚体 id（运行时的对象 id）。没有任何环境 prefab 带刚体。
+
+当前内容：JP 6.8.1 这一套有 45 个碰撞体，全是第 3 层上的 `MeshCollider`，启用、非触发器、非凸、处于激活，共用 6 个网格。**其中 44 个是活的**，在站点固有 prefab 里（`variant` 为 `unique__<站点>`）。第 45 个在彩虹的公共地面模板 `fx_env_site_017_common_ground_01` 里（`variant` 为 `common`、`site` 为 `null`、用海滩网格），客户端从不实例化它：站点环境加载器只向该现象的全局包与当前站点的固有包要天空、相机与 `fx_env_site_<现象>_<站点>` 这几个 prefab，而 `017_rainbow` 的每个固有 prefab 都自带一份模板里的地面节点与碰撞体。行里没有字段标明它不是活的，所以建碰撞场景时要把 `variant` 为 `common` 的行排除掉。烘焙选项值 30（`CookForFasterSimulation`、`EnableMeshCleaning`、`WeldColocatedVertices`、`UseFastMidphase`）的是 10 个活碰撞体（各家园变体与一个花园变体）；其余 34 个活碰撞体与那个模板都是 0。所有链都是单位变换，唯一的例外是流星雨的家园碰撞体被抬高 0.05。CN 6.0.0 这一套有 35 个碰撞体、5 个网格：34 个活的（烘焙 30 的 8 个、0 的 26 个）加同一个彩虹模板；它没有宇宙、水下与肥皂泡的包。
+
 ### `omitted`：读过并刻意不导出
 
-`unsupported` 与 `omitted` 是**两回事**：前者是「本该有而没有」，后者是「读过、判过、故意不出」。混在一起会把真缺口淹掉——当前 192 条 `omitted` 全部来自效果 prefab 的节点，构成为 `CanvasRenderer` 122、`MeshFilter` 35、`MeshCollider` 35。
+`unsupported` 与 `omitted` 是**两回事**：前者是「本该有而没有」，后者是「读过、判过、故意不出」。混在一起会把真缺口淹掉——当前 `omitted` 全部来自效果 prefab 的节点：CN 6.0.0 内容 157 条（`CanvasRenderer` 122、`MeshFilter` 35），JP 6.8.1 内容 176 条（`CanvasRenderer` 131、`MeshFilter` 45）。`MeshCollider` **不在** `omitted` 里：它有自己的记录（见 `collision.json`）。
 
 | 组件 | 为什么不导出 |
 |---|---|
 | `CanvasRenderer` | 它只画**图形组件**交给它的东西，而这些 prefab 里**没有任何图形组件**（那些节点上只有粒子系统或一个非图形脚本），所以它一件东西也不画。 |
-| `MeshFilter` | 这 35 处所在的节点**没有网格渲染器**，所以不可见；它在这里的作用只是给同节点的碰撞体指网格。 |
-| `MeshCollider` | 碰撞面而非几何：同上不可见，且它指的网格是**站点的导航面**、住在另一个包里（`mesh.fileId` 非 0）。与它相互作用的是粒子的碰撞模块。 |
+| `MeshFilter` | 所在节点**没有网格渲染器**，所以不可见；它在这里的作用只是给同节点的碰撞体指网格，而那份网格由碰撞体记录携带。 |
 
 每条 `omitted` 带 `{phenomenon, effect, node, component, reason}`，指网格的还带 `mesh: {fileId, pathId}`。**这个判断是窄的**：同一节点上一旦有网格渲染器，`MeshFilter` 就不再是 `omitted`，而是按「prefab 组件未建模」进 `unsupported`——可见几何不允许从这条规则里漏掉。
 
@@ -581,9 +599,9 @@ layer = min(layers - 1, max(0, floor(fract(clamp(progressSource + progress, 0, 0
 
 ## 家具几何与内嵌动画（`fixture-models/`）
 
-manifest `mysekai/fixture/` 全族 **999 包**，一包一个 `.glb`（`index.json` version 2）。场景数组每 prefab 变体一个场景；节点 TRS、顶点数据按 **authored（Unity 左手）空间逐字导出，不反射**——与角色 `.glb` 的反射约定**相反**，两族文件不得混用同一套坐标处理。
+manifest `mysekai/fixture/` 全族 **999 包**，一包一个 `.glb`（`index.json` version 3）。家具与站点、角色共用 `moly-rh-y-up-reflect-x-v1`：Unity 左手 Y-up 的 X 轴只在导出边界反射一次，节点平移/旋转、顶点法线/切线、三角形绕序、skin inverse bind 和动画 TRS 全在该右手 Y-up 空间。单位声明为 `source-unity-unit`，不推断物理米。UV 独立标记为 `unity-bottom-left`，不因空间反射隐式翻 V；原始 Unity TRS 作为 `sourceTransform` 证据保留，不能再次应用。
 
-**`animations[]` 内嵌**（2026-09-08 起）：包内每个 AnimationClip 成为一条 glTF animation，无 sidecar。绑定路径是 crc32 hash，解析**锚定**到携带 Animator 的 variant（Animator 锚相对路径优先、层级根相对次之、全路径兜底；先注册者赢——多尺寸变体共享相对路径时归属固定，不随遍历序漂移）。通道只有 Transform TRS（`translation` / `rotation` / `scale`），目标就是本 glb 节点树上既有的节点，值同样 verbatim authored 空间。插值按源曲线存储形式映射：StreamedClip 三次多项式 → `CUBICSPLINE`（切线由 (a,b,c,d) 系数恢复）、DenseClip → `LINEAR`、ConstantClip → `STEP`。
+**`animations[]` 内嵌**（2026-09-08 起）：包内每个 AnimationClip 成为一条 glTF animation，无 sidecar。绑定路径是 crc32 hash，解析**锚定**到携带 Animator 的 variant（Animator 锚相对路径优先、层级根相对次之、全路径兜底；先注册者赢——多尺寸变体共享相对路径时归属固定，不随遍历序漂移）。通道只有 Transform TRS（`translation` / `rotation` / `scale`），目标就是本 glb 节点树上既有的节点，值在 canonical 空间；CUBICSPLINE 的切线使用相同的线性反射映射。插值按源曲线存储形式映射：StreamedClip 三次多项式 → `CUBICSPLINE`、DenseClip → `LINEAR`、ConstantClip → `STEP`。
 
 **账目**（槽位级，类和恒等于解码槽总数）：`index.json` summary 增 `animatedPackages` / `animationClips` / `animationChannels` / `animationFloatSlots` / `animationUnresolvedSlots`；每包 `animations` 节含 `clipCount` / `gltfChannels` / `channeledSlots` / `floatSlots` / `unresolvedSlots` 与 `clips[]` 明细。非 Transform 绑定（m_Float 一族：物理/材质/blendshape/肌肉）与未解析 hash **只盘点不导**——retarget 不在本产品范围。当前内容报数：137 包带动画、1727 clips 内嵌、11751 通道；float 槽 109661、未解析槽 18602（绝大多数是 `act_*` 角色动作绑角色骨架——角色骨架不在家具包里，属另一消费面）。egg 家族（fixture 837–840，`change_fixture_timeline` 的门）已按逐 clip 通道数/采样数与解密包反序列化值对照验收：egg1 51 clips 2508/2508 通道逐项相等。
 
@@ -592,6 +610,11 @@ manifest `mysekai/fixture/` 全族 **999 包**，一包一个 `.glb`（`index.js
 ## `site/`
 
 站点资产包。九个站点共用**一个 Unity 世界坐标系**，一站一个偏移；八个场景包之外，同一路径下还有室内套件、房间皮肤、场地物件、移动大炮与世界地图，共 **109** 个包，一个都不落在契约外。
+
+GLB 节点 `extras.navMeshObstacles[]` 的 `schemaVersion=2`、`coordinateContract`
+明示 obstacle `center` 已与节点同属 canonical 本地空间；`extents` 是长度，保持不变。
+`sourceGeometry` 是带原坐标系标签的取证副本，禁止作为运行时 center 再次反射。
+`harvestView.fields` 是原始 typetree，由 `fieldCoordinateSpace` 显式声明源空间。
 
 **消费方须知（这一条决定产物能不能用）**：**每个 glb 都保持自己包的原点，站点的世界偏移只在放置表 `sites.json` 里，任何几何里都没有。** 九行站点里有三行（1F/2F/3F）用的是**同一个**场景包，只靠竖直偏移分开（0 / 500 / 1000），把偏移烤进网格会让这三层塌成一层，2F 与 3F **不可挽回地丢失**。落位由消费方施加：`world = sitePosition + grid × tileSize`，`tileSize = 0.25`。
 
@@ -709,7 +732,9 @@ glb 里的 glTF 材质是**预览近似**，不是翻译，每个取值都来自
 `outsideDoorActionPoint` 的完整身份（`file` + 十进制字符串 `pathId`）；源 null
 与非空 unresolved 引用分开保存。
 
-`transforms` 保留两个动作点及其祖先的父引用、原局部位置/旋转/缩放。消费时连接
+`houseViews.schemaVersion=2` 明示 `coordinateContract=moly-rh-y-up-reflect-x-v1`。
+`transforms` 保留两个动作点及其祖先的父引用，局部位置/旋转已转为 canonical 空间、缩放不变；
+原始 Unity TRS 只存于带 `coordinateSpace=unity-lh-y-up-authored` 的 `sourceTransform` 证据。消费时连接
 当前房屋实例，不把局部坐标当共用世界坐标。`animator` 身份连接同包现有
 `animators` 表，继续使用既有 controller clipTable、曲线和完整动画事件，
 不增加第二个控制器解析器，不按名字猜 clip。运行时 AttachComponents、

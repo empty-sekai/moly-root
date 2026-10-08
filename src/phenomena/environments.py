@@ -9,8 +9,8 @@ prefab, or — for the one indoor site — a configuration and profile that *ove
 the global ones.  Both are found through the same two-level lookup: the site's own
 package first, the phenomenon's global package second.
 
-Icons are not part of any of those.  All phenomenon icons live together in one
-shared thumbnail package, and which icon belongs to which phenomenon is stated by
+Icons are not part of any of those. They use an aggregate thumbnail package in
+older sources and per-icon packages in current sources. Their associations come from
 the caller's master tables, not by the asset names — so without master tables the
 icons are still exported, they are simply not attached to a phenomenon.
 
@@ -27,14 +27,19 @@ import UnityPy
 
 from core.assets.packages import PackageStore, pairs as _pairs
 from core.assets.router import (AMBIENCE_PACKAGE, BGM_PACKAGE_PREFIX,
-                                PHENOMENA_BUNDLE, PHENOMENA_THUMBNAIL)
+                                PHENOMENA_BUNDLE, PHENOMENA_THUMBNAIL,
+                                PHENOMENA_THUMBNAIL_ITEM)
 from core.jsonio import write_json
 from . import meshes as meshes_module
 from . import texarray
 from .audio import Library, archive_bytes
 from .config import flatten_config, volume_profile
 from .effects import decode_effect, light_modes
+from .collision import CollisionTable
 from .timeline import TIMELINE_SCRIPT, decode_timeline
+from .animations import decode_package as decode_animation_package
+from .icons import extract_icons
+from .controller import extract_environment_controller
 
 # Script classes that identify the authored assets inside a package.
 CONFIG_SCRIPT = "SiteEnvironmentConfig"
@@ -77,7 +82,14 @@ CROSS_FADE_SECONDS = 0.25
 # (`BGM_PACKAGE_PREFIX` and `AMBIENCE_PACKAGE` are imported above.)
 
 MASTER_TABLES = ("mysekaiPhenomenas", "mysekaiPhenomenaBgms", "mysekaiSiteBgms",
-                 "mysekaiSiteMysekaiPhenomenaSounds", "mysekaiRefreshTimePeriods")
+                 "mysekaiSiteMysekaiPhenomenaSounds", "mysekaiRefreshTimePeriods",
+                 "mysekaiPhenomenaBackgroundColors")
+
+# The site map's background: ScreenLayerMysekaiSiteMap.ChangeSiteMapColor looks
+# up today's phenomenon's mysekaiPhenomenaBackgroundColorId in this table and
+# tints six images with its five colour codes (the corner code twice).
+BACKGROUND_COLOR_FIELDS = ("baseColor", "gradationColor", "groundHighlightColor",
+                           "cornerColor", "groundColor")
 
 NO_MASTER = ("no master directory supplied; a phenomenon's identity, its time "
              "period and brightness, its music and its ambience rows are only in "
@@ -87,10 +99,11 @@ NO_AUDIO_PACKAGES = ("no sound package was supplied or reachable, so no audio "
                      "archive was extracted")
 NO_AUDIO_ROWS = ("music and ambience rows are only in caller-supplied master "
                  "tables, so no cue was asked for")
-NO_LUT = ("no colour-grading lookup texture exists in these packages: no profile "
-          "carries a lookup component, and the whole corpus these packages come "
-          "from holds no 3D texture at all; grading here is parametric")
-UNMODELLED_CLIP_ASSET = "animation clip inside a model asset not modelled"
+NO_LUT = ("these exports carry the authored grading parameters and any referenced "
+          "lookup assets; an absent lookup texture does not rule out a LUT generated "
+          "at runtime. LUT generation, layout, sampling and grading order must be "
+          "established from the source post-processing pipeline, not inferred from "
+          "the package texture census")
 MESH_NOT_EXPORTED = "mesh asset not reached through any model asset"
 
 SEMANTICS = {
@@ -127,6 +140,11 @@ SEMANTICS = {
                     "one site; `other` means the prefab does not follow those naming "
                     "patterns and its placement is not stated by its name. `site` "
                     "comes from the package variant, never guessed from the name"),
+    "backgroundColors": ("`backgroundColors` is the mysekaiPhenomenaBackgroundColors table "
+                         "verbatim (colour codes as the master writes them); a phenomenon "
+                         "names its row by `master.backgroundColorId`, and the site map "
+                         "logs an error and leaves its colours unchanged when the row is "
+                         "absent"),
     "musicMatch": ("music is matched on the phenomenon exactly, with no fallback: a "
                    "phenomenon with no row keeps the site's own music"),
     "musicLayers": ("music is two layers: `siteBgms` is the base, keyed by site and "
@@ -183,6 +201,12 @@ SEMANTICS = {
                  "value it drives, and each clip carries its own curve or gradient "
                  "on a normalized axis over the clip's duration"),
     "lut": NO_LUT,
+    "collision": ("`collision.json` carries every collider of the effect prefabs and of the "
+                  "site scene packages' site prefabs for the particle collision query: "
+                  "the authored mesh in the authored frame and index order, the "
+                  "collider's switches and layer, and the local transforms from the "
+                  "prefab root down to it; each effect's collider record names its mesh "
+                  "there through `collisionGeometry`"),
 }
 
 COUNTERS = ("configs", "profiles", "ramps", "effects", "emitters", "models",
@@ -271,7 +295,7 @@ class _Images:
         return dict(reference)
 
 
-def _material(store, record, path_id, images):
+def _material(store, record, path_id, images, source_materials=None):
     """Material name, shader, queue, texture bindings, light modes, and scalars.
 
     Light modes are read from the shader's parsed form, pass by pass; light_modes states what is promised and what is not.
@@ -329,9 +353,11 @@ def _material(store, record, path_id, images):
             f"shader of material {tree.get('m_Name')!r} has no parsed form; "
             f"its pass list cannot be read and its light modes must not "
             f"silently come out empty")
+    from core.shader_passes import declared_passes
     shader = str(parsed.get("m_Name")) if parsed.get("m_Name") else None
-    return {"name": tree.get("m_Name"), "shader": shader,
+    result = {"name": tree.get("m_Name"), "shader": shader,
             "lightModes": light_modes(parsed),
+            "shaderPasses": declared_passes(parsed),
             "renderQueue": tree.get("m_CustomRenderQueue", -1),
             "keywords": keywords,
             "textures": textures,
@@ -342,9 +368,12 @@ def _material(store, record, path_id, images):
             "colors": {n: [v.get(c, 0.0) for c in "rgba"]
                        for n, v in _pairs(properties.get("m_Colors"))
                        if isinstance(v, dict)}}
+    if source_materials is not None:
+        result.update(source_materials.describe(record, path_id, shader_target))
+    return result
 
 
-def _material_resolver(store, record, images):
+def _material_resolver(store, record, images, source_materials=None):
     """Resolve one material slot of a renderer, keeping unresolved states visible."""
     def resolve(renderer_tree, slot=0):
         materials = renderer_tree.get("m_Materials") or []
@@ -360,7 +389,7 @@ def _material_resolver(store, record, images):
                        if 0 <= index < len(record.externals) else None)
             return {"external": True, "fileId": pointer.get("m_FileID", 0),
                     "archive": archive}
-        return _material(store, *target, images)
+        return _material(store, *target, images, source_materials)
     return resolve
 
 
@@ -411,11 +440,14 @@ def _master_entry(row):
 class _Phenomenon:
     """Everything one phenomenon's packages produce, written as it is decoded."""
 
-    def __init__(self, name, out, store, geometry):
+    def __init__(self, name, out, store, geometry, source_materials=None,
+                 collision=None):
         self.name = name
+        self.collision = collision
         self.out = Path(out)
         self.store = store
         self.geometry = geometry
+        self.source_materials = source_materials
         self.directory = self.out / name
         self.images = _Images(self.directory / "textures", f"{name}/textures")
         self.effects = {}
@@ -423,12 +455,14 @@ class _Phenomenon:
         self.omitted = []
         self.models = []
         self.timeline = None
+        self.animations = []
+        self.animation_components = {}
         self.mesh_ids = set()
         self.entry = {"assetName": name, "id": None, "variants": [], "config": None,
                       "ramp": None, "postprocess": None, "overrides": {},
                       "fx": {"sky": 0, "camera": 0, "site": 0, "other": 0,
                              "emitters": 0, "file": None},
-                      "models": [], "timeline": None, "audio": None,
+                      "models": [], "timeline": None, "animations": None, "audio": None,
                       "icon": None, "master": None, "bgms": None, "siteSounds": None}
         self.counts = {}
 
@@ -472,6 +506,16 @@ class _Phenomenon:
                       reason="package could not be read")
             return
         site = _site_of(variant)
+        if any(kind in ("AnimationClip", "Animator", "AnimatorController", "PlayableDirector")
+               for record in package.files for kind in record.kinds.values()):
+            animation = decode_animation_package(self.store, package, variant)
+            self.animations.append(animation)
+            for row in [*animation["animators"], *animation["directors"]]:
+                source = row["source"]
+                self.animation_components[(source["archive"], source["pathId"])] = {
+                    "source": source, "document": f"{self.name}/animations.json"}
+            for gap in animation["unsupported"]:
+                self._gap(bundle_name, variant=variant, **gap)
         config = profile = None
         resolvers = {}
         models, standalone = [], []
@@ -496,7 +540,7 @@ class _Phenomenon:
             elif kind == "GameObject" and asset_name.endswith(".prefab"):
                 if record.archive not in resolvers:
                     resolvers[record.archive] = _material_resolver(
-                        self.store, record, self.images)
+                        self.store, record, self.images, self.source_materials)
                 self._effect(variant, bundle_name, asset_name, record, path_id, site,
                              resolvers[record.archive])
             elif kind == "GameObject":
@@ -504,9 +548,9 @@ class _Phenomenon:
             elif kind == "Mesh":
                 standalone.append((asset_name, record, path_id))
             elif kind == "AnimationClip":
-                self._gap(bundle_name, variant=variant, asset=asset_name,
-                          clip=str(record.tree(path_id).get("m_Name", "")),
-                          reason=UNMODELLED_CLIP_ASSET)
+                # Retained in animations.json together with controller/model
+                # ownership and every compiled curve slot, even without playback.
+                pass
         for asset_name, record, path_id in models:
             self._model(variant, bundle_name, asset_name, record, path_id)
         for asset_name, record, path_id in standalone:
@@ -547,7 +591,7 @@ class _Phenomenon:
     def _timeline(self, variant, bundle_name, asset_name, record, path_id):
         """Export the timeline that drives this phenomenon, if it has one."""
         document, gaps = decode_timeline(
-            path_id, record, lambda pointer: self.store.follow(record, pointer))
+            path_id, record, self.store.follow)
         for gap in gaps:
             self._gap(bundle_name, variant=variant, asset=asset_name, **gap)
         document["asset"] = asset_name
@@ -621,12 +665,19 @@ class _Phenomenon:
         effect, gaps = decode_effect(path_id, record.kinds, record.trees, resolver,
                                      kind=kind, site=site if kind == "site" else None,
                                      script_of=record.script_of,
-                                     resolve_mesh=self._mesh_resolver(record))
+                                     resolve_mesh=self._mesh_resolver(record),
+                                     resolve_animation=lambda cid: self.animation_components.get(
+                                         (record.archive, str(cid))))
         if name in self.effects:
             self._gap(bundle_name, variant=variant, effect=name,
                       reason="two packages hold an effect of the same name")
             return
         effect["variant"] = variant
+        effect["source"] = {"bundle": record.bundle, "archive": record.archive,
+                            "pathId": str(path_id)}
+        if self.collision is not None:
+            gaps = list(gaps) + self.collision.add_effect(self.name, name, effect,
+                                                          record)
         self.effects[name] = effect
         for gap in gaps:
             self._gap(bundle_name, variant=variant, effect=name, **gap)
@@ -697,6 +748,16 @@ class _Phenomenon:
 
     def finish(self):
         """Write the effect document and return this phenomenon's index entry."""
+        if self.animations:
+            counts = {kind: sum(len(package[kind]) for package in self.animations)
+                      for kind in ("animators", "controllers", "directors", "modelScopes", "clips")}
+            counts["curveSlots"] = sum(clip["accounting"]["decodedSlots"]
+                for package in self.animations for clip in package["clips"])
+            document = {"schemaVersion": 1, "phenomenon": self.name,
+                        "semantics": "source-scopes-and-curves-not-playback-acceptance",
+                        "packages": self.animations, "summary": counts}
+            _write_json(self.directory / "animations.json", document)
+            self.entry["animations"] = {"file": f"{self.name}/animations.json", **counts}
         if self.effects:
             document = {
                 "version": 1,
@@ -730,7 +791,7 @@ class _Phenomenon:
 
 def extract_phenomena(bundles, out_dir, bundle_root=None, master=None,
                       master_cache=None, vgmstream=None, ffmpeg=None,
-                      extra_archives=None):
+                      extra_archives=None, shader_compiler=None, site_bundles=None):
     """Extract phenomena packages into *out_dir*.
 
     *bundles* names the packages to extract: the environment packages of any number
@@ -757,31 +818,49 @@ def extract_phenomena(bundles, out_dir, bundle_root=None, master=None,
     where it came from (``source``), so a reader can tell the engine's own shapes
     from this game's.  The default per-collection behaviour is unchanged — pass
     nothing and nothing extra is loaded.
+
+    *site_bundles* names the site scene packages whose site prefab colliders go
+    into ``collision.json`` beside the effect colliders (soap bubbles collide with
+    them).  Left out, every scene package under *bundle_root* is used; with
+    neither, ``summary.missing.siteColliders`` says the site rows are absent.
     """
+    from shaders.bridge import Compiler
+    from shaders.programs import ProgramLibrary
+    from shaders.textures import TextureLibrary
+    from shaders.materials import MaterialLibrary
+    compiler = Compiler(shader_compiler) if shader_compiler is not None else None
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     store = PackageStore(list(bundles) + list(extra_archives or []), bundle_root)
     geometry = meshes_module.Store(out / "models", "models")
-    groups, thumbnail = {}, None
+    collision = CollisionTable(store)
+    programs = ProgramLibrary(store, out / "shaders", compiler=compiler)
+    textures = TextureLibrary(store, out / "shader-textures")
+    source_materials = MaterialLibrary(store, programs, textures)
+    groups, thumbnails = {}, set()
     for path in bundles:
         name = os.path.basename(str(path))
         matched = PHENOMENA_BUNDLE.match(name)
         if matched:
             groups.setdefault(matched.group("phenomenon"), {})[
                 matched.group("variant")] = name
-        elif name == PHENOMENA_THUMBNAIL:
-            thumbnail = name
+        elif name == PHENOMENA_THUMBNAIL or PHENOMENA_THUMBNAIL_ITEM.fullmatch(name):
+            thumbnails.add(name)
 
     index = {"version": 1, "semantics": SEMANTICS, "phenomena": {}, "icons": [],
              "models": [], "audio": None,
              "refreshTimePeriods": None, "siteBgms": None,
-             "siteSoundFallbacks": None,
+             "siteSoundFallbacks": None, "backgroundColors": None,
              "ambiencePackage": AMBIENCE_PACKAGE}
     totals = {"phenomena": 0, "configs": 0, "profiles": 0, "ramps": 0, "overrides": 0,
               "effects": 0, "emitters": 0, "images": 0, "textureArrays": 0,
               "arrayLayers": 0, "models": 0, "meshes": 0, "timelines": 0,
               "audioStreams": 0, "icons": 0, "omitted": 0, "unsupported": 0}
     unsupported, omitted, missing, per_bundle = [], [], {}, {}
+    controller, controller_gaps = extract_environment_controller(store)
+    index["environmentController"] = controller
+    if controller_gaps:
+        missing["environmentController"] = controller_gaps
 
     master_rows, absent_tables = {}, []
     if master:
@@ -802,6 +881,10 @@ def extract_phenomena(bundles, out_dir, bundle_root=None, master=None,
             {"id": row.get("id"), "startHour": row.get("startHour"),
              "endHour": row.get("endHour")}
             for row in master_rows["mysekaiRefreshTimePeriods"]]
+    if "mysekaiPhenomenaBackgroundColors" in master_rows:
+        index["backgroundColors"] = [
+            {"id": row.get("id"), **{field: row.get(field) for field in BACKGROUND_COLOR_FIELDS}}
+            for row in master_rows["mysekaiPhenomenaBackgroundColors"]]
     if "mysekaiSiteBgms" in master_rows:
         index["siteBgms"] = [
             {"id": row.get("id"), "siteId": row.get("mysekaiSiteId"),
@@ -820,7 +903,8 @@ def extract_phenomena(bundles, out_dir, bundle_root=None, master=None,
     for name in sorted(groups):
         variants = groups[name]
         store.load_dependencies(variants.values())
-        phenomenon = _Phenomenon(name, out, store, geometry)
+        phenomenon = _Phenomenon(name, out, store, geometry, source_materials,
+                                 collision)
         phenomenon.entry["variants"] = sorted(variants)
         for variant in sorted(variants):
             phenomenon.variant(variant, variants[variant])
@@ -880,6 +964,36 @@ def extract_phenomena(bundles, out_dir, bundle_root=None, master=None,
 
     index["models"] = geometry.entries
     totals["meshes"] = len(geometry.entries)
+    from sites import census as site_census
+    if site_bundles is not None:
+        site_paths = {os.path.basename(str(path)): str(path) for path in site_bundles}
+    elif bundle_root:
+        site_paths = {name: os.path.join(str(bundle_root), name)
+                      for name in sorted(os.listdir(str(bundle_root)))
+                      if site_census.classify(name)[0] == "scene"}
+    else:
+        site_paths = None
+        missing["siteColliders"] = ("no site scene package was supplied and no bundle "
+                                    "root to find them in: collision.json carries the "
+                                    "effect colliders only")
+    for name, path in sorted((site_paths or {}).items()):
+        site = site_census.scene_name(name)
+        if site is None:
+            unsupported.append({"package": name, "reason": "not a site scene package"})
+            continue
+        store.paths.setdefault(name, path)
+        package = store.package(name)
+        if package is None:
+            unsupported.append({"package": name, "reason": "site scene package not found"})
+            continue
+        unsupported.extend(dict(gap, reason="site collider: " + gap["reason"])
+                           for gap in collision.add_site(site, package))
+        store.forget(name)
+    collision_document = collision.document()
+    _write_json(out / "collision.json", collision_document)
+    index["collision"] = {"file": "collision.json",
+                          "schemaVersion": collision_document["schemaVersion"],
+                          **collision_document["summary"]}
 
     library = Library(out / "audio", "audio", vgmstream, ffmpeg)
     sound_packages = {}
@@ -916,29 +1030,13 @@ def extract_phenomena(bundles, out_dir, bundle_root=None, master=None,
                           or (package["package"] == AMBIENCE_PACKAGE
                               and stream.get("cue") in cues)]
 
-    if thumbnail is not None:
-        package = store.package(thumbnail)
-        icons = out / "icons"
-        for asset_name, record, path_id in (package.contents if package else []):
-            if record.kinds.get(path_id) != "Texture2D":
-                continue
-            name = str(record.tree(path_id).get("m_Name", "") or
-                       asset_name.rsplit(".", 1)[0])
-            try:
-                icons.mkdir(parents=True, exist_ok=True)
-                record.objects[path_id].read().image.save(icons / f"{name}.png")
-            except Exception as exc:                 # unreadable image format
-                unsupported.append({"icon": name,
-                                    "reason": f"{type(exc).__name__}: {exc}"})
-                continue
-            index["icons"].append(name)
-            totals["icons"] += 1
-        index["icons"].sort()
-        for entry in index["phenomena"].values():
-            wanted = (entry["master"] or {}).get("iconAssetbundleName")
-            if wanted and wanted in index["icons"]:
-                entry["icon"] = f"icons/{wanted}.png"
-    else:
+    icons, icon_sources, icon_gaps = extract_icons(
+        store, out, index["phenomena"], thumbnails)
+    index["icons"] = icons
+    index["iconSources"] = icon_sources
+    totals["icons"] = len(icons)
+    unsupported.extend(icon_gaps)
+    if not icons:
         missing["icons"] = NO_THUMBNAILS
 
     if store.missing:

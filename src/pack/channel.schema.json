@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "region",
+    "channel",
+    "catalog"
+  ],
+  "properties": {
+    "schema": {
+      "const": "moly-asset-channel/1"
+    },
+    "region": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,15}$"
+    },
+    "channel": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "catalog": {
+      "type": "string",
+      "pattern": "^catalogs/[0-9a-f]{64}\\.json$"
+    }
+  }
+}

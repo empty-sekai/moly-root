@@ -15,7 +15,11 @@ import json
 import sys
 from pathlib import Path
 
-from .verify import verify_catalog
+from .verify import verify_catalog, strict_json
+from .paths import output_path
+from .hashing import sha256_bytes
+from core.atomic import exclusive_lock
+import re
 
 
 def catalog_garbage(output):
@@ -25,9 +29,43 @@ def catalog_garbage(output):
     if errors:
         raise ValueError("cannot determine catalog garbage: " + "; ".join(errors))
     return {"delete": info["orphan_blobs"],
+            "delete_manifests": info["orphan_manifests"],
+            "delete_manifest_bytes": sum((output / path).stat().st_size for path in info["orphan_manifests"]),
+            "channel_roots": info["channel_roots"], "roots": info["roots"],
             "delete_bytes": sum((output / "blobs" / path).stat().st_size for path in info["orphan_blobs"]),
             "retained_catalogs": info["retained_catalogs"],
             "referenced_blobs": info["referenced_blobs"]}
+
+
+def collect_garbage(output, *, apply=False):
+    """Exclusive with publishers; never delete unrecognized files or history."""
+    output = Path(output).resolve()
+    with exclusive_lock(output / ".publish.lock"):
+        report = catalog_garbage(output)
+        objects = ["blobs/" + name for name in report["delete"]] + report["delete_manifests"]
+        if apply:
+            for name in objects:
+                if not re.fullmatch(r"(?:blobs/[0-9a-f]{2}/[0-9a-f]{64}\.(?:bin|gzz|brz|br)|packages/[0-9a-f]{64}\.json)", name):
+                    raise ValueError("refusing to delete an unrecognized store file: " + name)
+                output_path(output, name)  # reject all linked output paths before deleting anything
+            for name in objects:
+                output_path(output, name).unlink()
+        return {**report, "applied": apply}
+
+
+def retire_catalog(output, catalog_id):
+    """Explicitly forget one historical GC root; active roots cannot be retired."""
+    if not isinstance(catalog_id, str) or not re.fullmatch(r"[0-9a-f]{64}", catalog_id):
+        raise ValueError("catalog id must be a full SHA-256")
+    output = Path(output).resolve()
+    with exclusive_lock(output / ".publish.lock"):
+        report = catalog_garbage(output)
+        name = f"catalogs/{catalog_id}.json"
+        if (sha256_bytes((output / "asset-packs.json").read_bytes()) == catalog_id
+                or name in report["channel_roots"].values()):
+            raise ValueError("cannot retire an active default/channel catalog")
+        output_path(output, name).unlink()
+        return catalog_garbage(output)
 
 
 def _blob_bytes_index(manifest: dict) -> dict[str, int]:
@@ -86,12 +124,16 @@ def main(argv=None):
     ap.add_argument("--new", help="new standalone manifest.json")
     ap.add_argument("--out", help="grouped output directory; retain all archived catalogs")
     ap.add_argument("--json", action="store_true", help="print the full result as JSON")
+    ap.add_argument("--apply", action="store_true", help="delete only unreachable CAS objects under the publish lock")
+    ap.add_argument("--retire", help="explicit historical catalog SHA-256 to retire before collection")
     args = ap.parse_args(argv)
 
     if args.out:
         if args.old or args.new:
             ap.error("use --out or both --old/--new")
-        print(json.dumps(catalog_garbage(args.out), ensure_ascii=False, indent=2))
+        if args.retire:
+            retire_catalog(args.out, args.retire)
+        print(json.dumps(collect_garbage(args.out, apply=args.apply), ensure_ascii=False, indent=2))
         return 0
     if not args.old or not args.new:
         ap.error("need --out or both --old/--new")

@@ -24,7 +24,7 @@ own world position exactly as it offsets the scene.
 """
 import struct
 
-from core.gltf import GLB, flip_winding, unity_to_gltf_pos
+from core.gltf import COORDINATE_SPACE, SOURCE_SPACE, GLB, flip_winding, unity_to_gltf_pos
 from core.mesh import ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER, FLOAT, UNSIGNED_INT
 
 TILES_UNPARSED = ("navigation tiles are carried across as bytes: the tile format is "
@@ -99,6 +99,13 @@ def navmesh_document(tree):
         blob += data
     bounds = tree.get("m_SourceBounds") or {}
     document = {
+        "schemaVersion": 2,
+        "coordinateUnits": "source-unity-unit",
+        # Native tiles are deliberately opaque. Keep their associated placement
+        # and source bounds in the same authored frame; only height-mesh GLBs
+        # cross the canonical exporter boundary.
+        "fieldCoordinateSpace": {"position": SOURCE_SPACE, "rotation": SOURCE_SPACE,
+                                 "sourceBounds": SOURCE_SPACE, "buildSettings": SOURCE_SPACE},
         "name": str(tree.get("m_Name", "")),
         "agentTypeID": tree.get("m_AgentTypeID"),
         "position": _vector(tree.get("m_Position")),
@@ -112,12 +119,16 @@ def navmesh_document(tree):
                                 if isinstance(value, float) else value)
                           for key, value in settings.items()},
         "tiles": {"count": len(tiles), "bytes": len(blob), "parsed": False,
+                  "coordinateSpace": SOURCE_SPACE,
                   "reason": TILES_UNPARSED, "index": tiles, "file": None},
         "heightMeshes": [], "offMeshLinks": len(tree.get("m_OffMeshLinks") or []),
         "heightmaps": len(tree.get("m_Heightmaps") or []),
     }
     for mesh in tree.get("m_HeightMeshes") or []:
         document["heightMeshes"].append({
+            "fieldCoordinateSpace": {"bounds": SOURCE_SPACE, "file": COORDINATE_SPACE},
+            "geometryCoordinateContract": COORDINATE_SPACE,
+            "coordinateUnits": "source-unity-unit",
             "vertices": len(mesh.get("m_Vertices") or []),
             "indices": len(mesh.get("m_Indices") or []),
             "bvhNodes": len(mesh.get("m_Nodes") or []),

@@ -49,10 +49,13 @@ def test_offline_encrypted_sample_decrypts_byte_for_byte():
         pytest.skip("MOLY_ENCRYPTED_SAMPLE is not configured")
     path = Path(sample)
     if not path.is_file():
-        pytest.skip("MOLY_ENCRYPTED_SAMPLE does not point to a file")
+        pytest.fail("MOLY_ENCRYPTED_SAMPLE does not point to a file")
+    expected = os.environ.get("MOLY_DECRYPTED_SAMPLE_SHA256", "")
+    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        pytest.fail("set MOLY_DECRYPTED_SAMPLE_SHA256 to the expected plaintext digest")
     decrypted = decrypt_bundle(path.read_bytes())
     assert decrypted.startswith(b"UnityFS")
-    assert hashlib.sha256(decrypted).hexdigest() == "8b2c623972e3e9dd6dbe07ab2ed9074adc454e6c88f76f0cbbc9331db6333b1c"
+    assert hashlib.sha256(decrypted).hexdigest() == expected
 
 
 def entry_for(**fields) -> BundleEntry:

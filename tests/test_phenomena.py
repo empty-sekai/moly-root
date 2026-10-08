@@ -1,3 +1,4 @@
+import hashlib
 """Phenomena (weather) extraction: flattened config, ramp, profile, overrides, effects.
 
 Four properties decide whether a phenomena package is usable and none of them show
@@ -338,6 +339,10 @@ def _run(tmp_path, monkeypatch, mapping, engine=None, **kwargs):
     default one.
     """
     _store(monkeypatch, {**mapping, **(engine or {})})
+    for name in mapping:
+        source = tmp_path / "bundles" / name
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(("fixture:" + name).encode())
     out = tmp_path / "out" / "phenomena"
     if engine:
         kwargs["extra_archives"] = [str(tmp_path / "engine" / name) for name in engine]
@@ -607,12 +612,15 @@ def test_a_camera_effect_without_the_component_counter_rotates_instead():
     assert effect["effectiveRotation"] == "fix"
 
 
-def test_a_camera_effect_whose_component_asks_to_be_fixed_says_fixed():
+def test_existing_root_component_setup_normal_overrides_serialized_fix():
     kinds, trees, script_of = _read(_with_effector(_global_bundle("004_fine"),
                                                    rotation_type=1))
     effect, _ = decode_effect(200, kinds, trees, _no_material, kind="camera",
                               script_of=script_of)
-    assert effect["effectiveRotation"] == "fix"
+    # Source SiteEnvironmentUtility.EmitEffect explicitly calls Setup(0) on
+    # the existing-root branch; only AddComponent forwards the requested Fix.
+    assert effect["effectors"][0]["rotationType"] == "fix"
+    assert effect["effectiveRotation"] == "normal"
 
 
 def _every_document(out):
@@ -704,14 +712,15 @@ def _paths_in(document):
     return found
 
 
-def test_an_effect_that_is_not_camera_attached_claims_no_rotation_rule():
+def test_sky_factory_requests_normal_rotation():
     kinds, trees, script_of = _read(_with_effector(_global_bundle("015_cloud")))
     effect, _ = decode_effect(200, kinds, trees, _no_material, kind="sky",
                               script_of=script_of)
-    # the component is still reported, but how a sky effect is attached is not
-    # established here, so no rule is claimed
+    # RefreshGlobalEffect calls EmitEffect(..., Normal); this is not the
+    # camera factory's AddComponent(Fix) branch.
     assert effect["effectors"][0]["timeUntilDestroy"] == 2.0
-    assert effect["effectiveRotation"] is None
+    assert effect["effectiveRotation"] == "normal"
+    assert effect["lifecycle"]["stopBehavior"] == "stopEmitting"
 
 
 # -- package layout ---------------------------------------------------------
@@ -1330,6 +1339,7 @@ def _timeline_global_bundle(phenomenon):
             "m_MarkerTrack": {"m_FileID": 0, "m_PathID": 0}}, archive),
         _Object("MonoBehaviour", 710, {
             "m_Script": {"m_FileID": 0, "m_PathID": 911},
+            "m_Parent": {"m_FileID": 0, "m_PathID": 700},
             "m_Name": "Sky Flash Color", "m_Muted": 0, "m_Locked": 0,
             "_controlTarget": 1, "m_Children": [],
             "m_Clips": [{"m_Start": 0.9, "m_Duration": 1.55, "m_ClipIn": 0.0,
@@ -1341,6 +1351,7 @@ def _timeline_global_bundle(phenomenon):
                          "m_PostExtrapolationMode": 0}]}, archive),
         _Object("MonoBehaviour", 720, {
             "m_Script": {"m_FileID": 0, "m_PathID": 912},
+            "m_Parent": {"m_FileID": 0, "m_PathID": 700},
             "m_Name": "Light Flash", "m_Muted": 0, "m_Locked": 0,
             "_controlTarget": 2, "_scale": 2.56, "m_Children": [],
             "m_Clips": [{"m_Start": 5.0, "m_Duration": 1.2333, "m_ClipIn": 0.25,
@@ -1510,13 +1521,17 @@ def test_the_layer_a_progress_value_selects_is_a_floor_not_a_rounding():
                                              "constant": True}
 
 
-def test_no_lookup_texture_exists_and_the_index_says_so(tmp_path, monkeypatch):
-    """Absence has to be stated, or a consumer cannot tell it from an omission."""
+def test_absent_exported_lookup_does_not_exclude_runtime_generated_lut(tmp_path, monkeypatch):
+    """An asset census cannot establish absence of a runtime-generated LUT."""
     mapping = {"mysekai__effect__site__environment__001_sunny__global":
                _global_bundle("001_sunny")}
     _, _, index = _run(tmp_path, monkeypatch, mapping)
     assert index["summary"]["missing"]["lut"] == environments.NO_LUT
-    assert "3D texture" in index["semantics"]["lut"]
+    semantics = index["semantics"]["lut"]
+    assert semantics == environments.NO_LUT
+    assert "does not rule out a LUT generated" in semantics
+    assert "at runtime" in semantics
+    assert "source post-processing pipeline" in semantics
 
 
 # -- model assets and emitter meshes ----------------------------------------
@@ -1586,7 +1601,12 @@ def test_mesh_mode_calls_resolver_and_adapts_geometry_to_renderer_contract():
     assert calls == [{"m_FileID": 0, "m_PathID": 620}]
     assert unsupported == []
     assert renderer["meshes"] == [{"file": "models/probe-abcdef12.glb",
-                                    "node": "pt_009_meteorshower"}]
+        "node": "pt_009_meteorshower", "geometrySchemaVersion": 1,
+        "meshSlot": 0, "coordinates": "gltf-reflect-x-flip-v", "sha256": None,
+        "bytes": None, "source": None, "bounds": None}]
+    assert [slot["slot"] for slot in renderer["meshSlots"]] == [0, 1, 2, 3]
+    assert renderer["meshSlots"][0]["reference"] == {"fileId": 0, "pathId": "620"}
+    assert all(not slot["meshes"] for slot in renderer["meshSlots"][1:])
     assert "mesh" not in effect["particles"][0]
 
 
@@ -1649,8 +1669,7 @@ def test_a_built_in_primitive_resolves_once_the_engine_container_is_supplied(
                          .read_text(encoding="utf-8"))
     emitter = effects["effects"]["fx_env_site_008_thunder_beach"]["particles"][0]
     assert emitter["renderer"]["renderMode"] == "Mesh"
-    assert emitter["renderer"]["meshes"] == [{"file": index["models"][0]["file"],
-                                              "node": "Plane"}]
+    assert emitter["renderer"]["meshes"] == [_expected_engine_mesh_reference(index["models"][0])]
     assert (out / emitter["renderer"]["meshes"][0]["file"]).exists()
     assert effects["summary"]["meshEmitters"] == 1
     assert result["meshes"] == 1
@@ -1733,7 +1752,7 @@ def test_a_mesh_shaped_emitter_is_born_on_the_engines_surface_too(tmp_path,
     shape = (effects["effects"]["fx_env_site_008_thunder_beach"]["particles"][0]
              ["system"]["shape"])
     assert shape["type"] == "Mesh"
-    assert shape["meshes"] == [{"file": index["models"][0]["file"], "node": "Plane"}]
+    assert shape["meshes"] == [_expected_engine_mesh_reference(index["models"][0])]
     assert (out / shape["meshes"][0]["file"]).exists()
     assert index["models"][0]["source"] == environments.meshes_module.ENGINE_BUILTIN
     assert not [gap for gap in index["summary"]["unsupported"]
@@ -1831,24 +1850,29 @@ def test_a_canvas_renderer_with_no_graphic_is_omitted_not_unsupported(tmp_path,
     canvas = next(entry for entry in omitted if entry["component"] == "CanvasRenderer")
     assert canvas["node"] == "puff" and "no graphic" in canvas["reason"]
     assert not [gap for gap in index["summary"]["unsupported"]
-                if gap.get("component") in ("CanvasRenderer", "MeshFilter",
-                                            "MeshCollider")]
+                if gap.get("component") in ("CanvasRenderer", "MeshFilter")]
 
 
-def test_a_collider_mesh_with_no_renderer_is_omitted_with_what_it_points_at(
+def test_a_collider_mesh_with_no_renderer_retains_its_unresolved_geometry_owner(
         tmp_path, monkeypatch):
-    """Invisible collision surface, in another package: recorded, not exported."""
+    """A missing render component does not remove a collision obligation."""
     mapping = {"mysekai__effect__site__environment__006_rain__global":
                _global_bundle("006_rain"),
                "mysekai__effect__site__environment__006_rain__unique__beach":
                _inert_component_bundle("006_rain", "beach")}
     result, out, index = _run(tmp_path, monkeypatch, mapping)
     omitted = {entry["component"]: entry for entry in index["summary"]["omitted"]}
-    assert set(omitted) == {"CanvasRenderer", "MeshFilter", "MeshCollider"}
-    assert omitted["MeshCollider"]["node"] == "nav_collider"
-    assert omitted["MeshCollider"]["mesh"] == {"fileId": 3, "pathId": 777}
-    assert "no mesh renderer" in omitted["MeshCollider"]["reason"]
-    assert result["omitted"] == 3
+    assert set(omitted) == {"CanvasRenderer", "MeshFilter"}
+    gaps = [g for g in index["summary"]["unsupported"] if g.get("component") == "MeshCollider"]
+    assert len(gaps) == 1
+    assert gaps[0]["node"] == "nav_collider"
+    assert gaps[0]["mesh"]["fileId"] == 3 and gaps[0]["mesh"]["pathId"] == 777
+    effects = json.loads((out / index["phenomena"]["006_rain"]["fx"]["file"]).read_text())
+    collider = effects["effects"]["fx_env_site_006_rain_beach"]["colliders"][0]
+    assert collider["node"] == "nav_collider"
+    assert collider["meshPointer"] == {"fileId": 3, "pathId": "777"}
+    assert collider["enabled"] is None and collider["layer"] is None
+    assert result["omitted"] == 2
 
 
 def test_a_mesh_filter_next_to_a_renderer_is_not_omitted(tmp_path, monkeypatch):
@@ -1929,10 +1953,16 @@ def test_a_timeline_clip_class_that_is_not_modelled_stays_visible(tmp_path,
             obj._tree["m_ClassName"] = "SiteEnvironmentFogClip"
     mapping = {"mysekai__effect__site__environment__008_thunder__global": bundle}
     _, out, index = _run(tmp_path, monkeypatch, mapping)
-    assert {"variant": "global", "asset": "env_008_thunder.playable",
-            "track": "Sky Flash Color", "clipClass": "SiteEnvironmentFogClip",
-            "reason": "timeline clip class not modelled",
-            "phenomenon": "008_thunder"} in index["summary"]["unsupported"]
+    expected = {"variant": "global", "asset": "env_008_thunder.playable",
+                "track": "Sky Flash Color", "clipClass": "SiteEnvironmentFogClip",
+                "reason": "timeline clip class not modelled", "phenomenon": "008_thunder"}
+    gap = next(g for g in index["summary"]["unsupported"]
+               if g.get("clipClass") == "SiteEnvironmentFogClip")
+    assert {key: gap[key] for key in expected} == expected
+    assert gap["reference"]["owner"]["pathId"] == "710"
+    assert gap["reference"]["pointer"] == {"fileId": 0, "pathId": "730"}
+    assert not any(g["reason"] == "timeline parent/child PPtrs disagree"
+                   for g in index["summary"]["unsupported"])
     document = json.loads((out / "008_thunder" / "timeline.json")
                           .read_text(encoding="utf-8"))
     assert document["tracks"][0]["clips"][0]["asset"] is None
@@ -2383,3 +2413,100 @@ def test_the_extraction_report_keeps_its_shape_with_sound_packages_in_the_set(
     unasked = next(entry for entry in report["bundles"]
                    if entry["bundle"].endswith("music0001"))
     assert unasked["status"] == "unsupported" and "row" in unasked["error"]
+
+
+# Current JP thumbnails are independent packages, unlike the historical fixture.
+def test_current_per_icon_packages_resolve_by_master_key(tmp_path, monkeypatch):
+    mapping = {
+        "mysekai__effect__site__environment__001_sunny__global": _global_bundle("001_sunny"),
+        "mysekai__thumbnail__phenomena__env_sunny": _thumbnail_bundle(["env_sunny"]),
+        "mysekai__thumbnail__phenomena__env_default": _thumbnail_bundle(["env_default"]),
+    }
+    result, out, index = _run(tmp_path, monkeypatch, mapping,
+                              master=str(_master_dir(tmp_path)))
+    assert result["icons"] == 2
+    assert index["phenomena"]["001_sunny"]["icon"] == "icons/env_sunny.png"
+    receipt = index["iconSources"]["env_sunny"]
+    assert receipt["sources"][0]["bundle"] == "mysekai__thumbnail__phenomena__env_sunny"
+    assert receipt["sources"][0]["pathId"] == "400"
+    assert receipt["sha256"] == hashlib.sha256((out / receipt["file"]).read_bytes()).hexdigest()
+
+
+def test_current_icons_without_master_do_not_guess_associations(tmp_path, monkeypatch):
+    mapping = {
+        "mysekai__effect__site__environment__001_sunny__global": _global_bundle("001_sunny"),
+        "mysekai__thumbnail__phenomena__env_sunny": _thumbnail_bundle(["env_sunny"]),
+    }
+    _, _, index = _run(tmp_path, monkeypatch, mapping)
+    assert index["icons"] == ["env_sunny"]
+    assert index["phenomena"]["001_sunny"]["icon"] is None
+
+
+def test_conflicting_icon_packages_fail_closed(tmp_path, monkeypatch):
+    split = _thumbnail_bundle(["env_sunny"])
+    # The same master key in two source packages must not mean last writer wins.
+    for obj in split.objects:
+        if obj.type.name == "Texture2D":
+            obj.read = lambda: SimpleNamespace(image=Image.new("RGBA", (152, 152), "white"))
+    mapping = {
+        "mysekai__effect__site__environment__001_sunny__global": _global_bundle("001_sunny"),
+        "mysekai__thumbnail__phenomena": _thumbnail_bundle(["env_sunny"]),
+        "mysekai__thumbnail__phenomena__env_sunny": split,
+    }
+    _, out, index = _run(tmp_path, monkeypatch, mapping,
+                         master=str(_master_dir(tmp_path)))
+    assert index["phenomena"]["001_sunny"]["icon"] is None
+    assert not (out / "icons/env_sunny.png").exists()
+    assert any(gap["reason"] == "conflicting source icon pictures"
+               for gap in index["summary"]["unsupported"])
+
+
+def test_current_icon_router_does_not_claim_neighbouring_domains():
+    from core.assets.router import route
+    assert route("mysekai__thumbnail__phenomena__env_future").domain == "phenomena"
+    assert route("mysekai__thumbnail__phenomena").domain == "phenomena"
+    assert route("mysekai__thumbnail__phenomenas__env_future") is None
+
+
+def test_icon_receipt_keeps_container_reference_and_actual_input_hash(tmp_path, monkeypatch):
+    import hashlib
+    bundle_name = "mysekai__thumbnail__phenomena__env_future"
+    result, out, index = _run(tmp_path, monkeypatch, {bundle_name: _thumbnail_bundle(["env_future"])})
+    receipt = index["iconSources"]["env_future"]
+    assert receipt["schemaVersion"] == 2
+    assert receipt["sha256"] == hashlib.sha256((out / receipt["file"]).read_bytes()).hexdigest()
+    source = receipt["sources"][0]
+    assert source["assetPath"].endswith("/phenomena/env_future.png")
+    assert source["reference"]["owner"]["pathId"] == "1"
+    assert source["reference"]["pointer"] == {"fileId": 0, "pathId": "400"}
+    assert source["reference"]["target"]["pathId"] == "400"
+    assert source["inputs"] == [{"bundle": bundle_name,
+        "bytes": len(("fixture:" + bundle_name).encode()),
+        "sha256": hashlib.sha256(("fixture:" + bundle_name).encode()).hexdigest()}]
+
+
+def test_icon_container_route_not_editor_object_label_defines_asset_name(tmp_path, monkeypatch):
+    bundle_name = "mysekai__thumbnail__phenomena__env_future"
+    bundle = _thumbnail_bundle(["env_future"])
+    bundle.objects[0]._tree["m_Name"] = "renamed editor object"
+    result, out, index = _run(tmp_path, monkeypatch, {bundle_name: bundle})
+    assert index["icons"] == ["env_future"]
+    assert index["iconSources"]["env_future"]["sources"][0]["objectName"] == "renamed editor object"
+
+
+def test_identical_icons_retain_all_source_routes_deterministically(tmp_path, monkeypatch):
+    mapping = {"mysekai__thumbnail__phenomena__env_future": _thumbnail_bundle(["env_future"]),
+               "mysekai__thumbnail__phenomena": _thumbnail_bundle(["env_future"])}
+    _, _, first = _run(tmp_path / "a", monkeypatch, mapping)
+    _, _, second = _run(tmp_path / "b", monkeypatch, dict(reversed(list(mapping.items()))))
+    assert first["iconSources"] == second["iconSources"]
+    assert len(first["iconSources"]["env_future"]["sources"]) == 2
+
+
+def _expected_engine_mesh_reference(model):
+    # This legacy synthetic engine container deliberately lacks m_LocalAABB.
+    # Absence stays explicit; production consumers reject missing authored bounds.
+    return {"file": model["file"], "node": "Plane", "geometrySchemaVersion": 1,
+            "coordinates": "gltf-reflect-x-flip-v", "meshSlot": 0,
+            "sha256": model["sha256"], "bytes": model["bytes"], "bounds": None,
+            "source": {"bundle": "unity default resources", "archive": "unity default resources", "pathId": "10209"}}

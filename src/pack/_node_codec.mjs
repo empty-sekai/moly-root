@@ -20,7 +20,8 @@ switch (op) {
     });
     break;
   case 'brotli-decompress':
-    out = zlib.brotliDecompressSync(data);
+    out = zlib.brotliDecompressSync(data, process.argv[3]
+      ? { maxOutputLength: Number(process.argv[3]) } : undefined);
     break;
   case 'gzip-compress':
     // Node's zlib always writes MTIME = 0 in the gzip header (unlike

@@ -39,19 +39,21 @@ CLI 使用默认快照；不同版本应使用含版本的来源 URL，或另一
 
 POSIX 发布文件（blob、包清单、活动和历史 catalog）使用显式 `0644` 权限，临时文件在原子替换前设置权限。复用旧 blob 时也会恢复发布权限。`core.atomic` 的通用写入默认保留既有普通文件的权限位，新文件默认 `0600`；master 缓存和下载状态保持私密。显式 `mode` 覆盖创建和更新策略，不复制旧文件的所有权、ACL 或特殊权限位。目录的访问权限由部署目录配置决定。
 
-分组包清单使用 `packages/<完整清单 SHA-256>.json`。一次构建先完成并校验全部包的版本、路径所有权、依赖和 blob，再写入 `catalogs/<catalog SHA-256>.json`，最后原子替换入口 `asset-packs.json`。旧 catalog 引用的包清单始终保留；读取、编码或写入失败不会改写旧包清单。入口切换完成后发生异常时，新入口已经指向完整的新版本。
+分组包清单使用 `packages/<完整清单 SHA-256>.json`。v2 内容包不携带区服、release 版本或时间戳；一次构建先完成并校验全部包的内容身份、路径所有权、依赖和 blob，再写入 `catalogs/<catalog SHA-256>.json`，再依次原子替换 `channels/<region>/<channel>.json` 和默认入口 `asset-packs.json`。旧 catalog 引用的包清单始终保留；读取、编码或写入失败不会改写旧包清单。入口切换完成后发生异常时，新入口已经指向完整的新版本。
 
 ```sh
-python -m pack.groups --src extracted --out packages --version release-version
+python -m pack.groups --src extracted --out packages --region cn --version release-version
 python -m pack.verify --out packages
 python -m pack.gc --out packages --json
 ```
 
-`pack.verify --out` 自动识别 grouped catalog，并验证所有保留的历史 catalog；独立 manifest 仍可通过 `--manifest` 检查。schema 随安装包提供，`--schema` 仅用于覆盖。未被当前或历史 catalog 引用的 blob 单独列为 GC 候选。`pack.gc --out` 以所有保留代的引用并集计算候选，**只报告，不删除**。`--old/--new` 是两个独立 manifest 的差集，不可用来回收共享的 grouped blob store。
+`pack.verify --out` 自动识别 grouped catalog，并验证所有保留的历史 catalog；独立 manifest 仍可通过 `--manifest` 检查。schema 随安装包提供，`--schema` 仅用于覆盖。未被当前或历史 catalog 引用的 blob 单独列为 GC 候选。`pack.gc --out` 以默认 release、各区服 channel 和所有保留历史的引用并集计算 blob 与包清单候选，默认**只报告，不删除**；显式 `--apply` 才回收。`--retire <catalog-sha256>` 会删除非活动历史 root，即使没有 `--apply`，使用前应确认没有发布的客户端仍依赖它。`--old/--new` 是两个独立 manifest 的差集，不可用来回收共享的 grouped blob store。
 
 活动发布根可以叫 `catalogs`。`verify_catalog(..., root=...)` 始终使用显式根；CLI `--out` 和 GC 将该根传给校验器。没有显式根时，仅对实际内容地址匹配的 `catalogs/<SHA-256>.json` 历史条目向上定位一层，活动 `asset-packs.json` 使用自己的父目录。
 
 原子替换保证普通文件系统上的进程可见性；该流程不承诺断电后目录元数据的持久化，也不能把对象存储中的多次上传变成事务。远程发布需要先上传不可变包清单和 blob，再切换 catalog。
+
+完整的 v2 身份、共享存储、迁移及运行时选择契约见 [Asset Architecture v2](asset-architecture-v2.md)。
 
 ## 动作索引与 viewer
 
@@ -67,7 +69,7 @@ viewer 按索引版本读取循环语义：v1（含无版本的旧索引）读�
 
 ## 安装与验证
 
-wheel 和 sdist 显式携带三份 TOML、两份 MJS 和 manifest schema。默认 gzip 编解码使用标准库；Brotli 需要 Python `brotli` 或 Node.js，MJS 回退脚本随包分发。glTF 变换额外需要 `@gltf-transform/core`、`@gltf-transform/extensions`、`@gltf-transform/functions` 和 `meshoptimizer`，按 `transforms.toml` 选择版本，并用 `MOLY_QUANT_DIR` 指定依赖目录。音频解码程序仍由调用方提供。
+wheel 和 sdist 显式携带三份 TOML、两份 MJS，以及 v1 manifest、v2 manifest/catalog 和 channel 四份 schema。默认 gzip 编解码使用标准库；Brotli 需要 Python `brotli` 或 Node.js，MJS 回退脚本随包分发。glTF 变换额外需要 `@gltf-transform/core`、`@gltf-transform/extensions`、`@gltf-transform/functions` 和 `meshoptimizer`，按 `transforms.toml` 选择版本，并用 `MOLY_QUANT_DIR` 指定依赖目录。音频解码程序仍由调用方提供。
 
 完整安装验证在源码树外构建 sdist/wheel、创建全新虚拟环境、安装 wheel 及依赖，并运行 CLI help、合成独立分包、两代 grouped 分包、独立 verifier 和 GC 检查：
 

@@ -303,8 +303,10 @@ def _walk_package(store, name, out, index_compare=False):
     counts["targetKinds"] = {target: count for target, count
                              in counts["targets"].items() if count}
     counts["empty"] = counts["clips"] == 0
-    if counts["clips"] or document["clips"]:
-        write_json(out / f"{name}.json", document)
+    # Written for every package, an empty one included: a consumer joins this
+    # document with the package's tracks and clips, and an absent document
+    # reads as "not exported", never as "no animation segment".
+    write_json(out / f"{name}.json", document)
     return counts
 
 

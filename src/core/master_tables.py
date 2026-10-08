@@ -42,9 +42,87 @@ OPTIONAL_TABLES = {
     "mysekaiSystemFixtures": ("id", "mysekai-system-fixtures.json"),
     "mysekaiBlueprintMysekaiMaterialCosts": ("id", "mysekai-blueprint-material-costs.json"),
     "mysekaiBlueprintTerms": ("id", "mysekai-blueprint-terms.json"),
+    "mysekaiSiteFootsteps": ("id", "mysekai-site-footsteps.json"),
+    "mysekaiFixtureFootsteps": ("id", "mysekai-fixture-footsteps.json"),
+    "mysekaiSiteHarvestUnavailableSpots": ("id", "mysekai-site-harvest-unavailable-spots.json"),
+    # The common furniture reaction of a character: one row per (unit, polarity)
+    # naming a furniture group and a tweet group; the two group tables hold the
+    # members in source row order, which ordered pickers read.
+    "mysekaiCharacterTalkFixtureCommons": ("id", "mysekai-character-talk-fixture-commons.json"),
+    "mysekaiCharacterTalkFixtureCommonMysekaiFixtureGroups": (
+        "id", "mysekai-character-talk-fixture-common-fixture-groups.json"),
+    "mysekaiCharacterTalkFixtureCommonTweetGroups": (
+        "id", "mysekai-character-talk-fixture-common-tweet-groups.json"),
+    # Talk content terms: the start time a talk row's term id points at.
+    "mysekaiCharacterTalkTerms": ("id", "mysekai-character-talk-terms.json"),
+    # The action-point row a talk pre-action's together communication names:
+    # the NPC fixture talk that waits with a communication reads its members'
+    # action points from it.
+    "mysekaiCharacterTalkFixtureTogetherCommunications": (
+        "id", "mysekai-character-talk-fixture-together-communications.json"),
+    "mysekaiRanks": ("id", "mysekai-ranks.json"),
+    # The info rank page's put-cost limits: a fixture put-limit release names
+    # a level row by its externalId, and the highest level row per site
+    # category among the releases at or below the rank is the limit.
+    "mysekaiRankReleases": ("id", "mysekai-rank-releases.json"),
+    "mysekaiFixturePutLimitLevels": ("id", "mysekai-fixture-put-limit-levels.json"),
+    # The cue a decided furniture placement plays: a fixture row's
+    # ``mysekaiFixturePutSoundId`` names a row here, whose ``assetbundleName``
+    # is the cue name.
+    "mysekaiFixturePutSounds": ("id", "mysekai-fixture-put-sounds.json"),
+    # The talk rows a multiple-character fixture talk is played from as a
+    # some-character timeline, each naming the talk and its main character
+    # unit; the forced read-talk of an NPC's random fixture action chooses
+    # its talk-data builder by whether a row names the talk and that unit.
+    "mysekaiCharacterTalkSomeCharacterTalks": (
+        "id", "mysekai-character-talk-some-character-talks.json"),
+    # The zones of a site layout where the layout editor refuses a floor
+    # fixture: each row names its site layout (``mysekaiSiteLayoutId``) and
+    # a box from ``startX/startY/startZ`` over ``width/height/depth`` tiles.
+    "mysekaiSiteHousingLayoutUnavailableZones": (
+        "id", "mysekai-site-housing-layout-unavailable-zones.json"),
+    # The game's general materials (not the MySekai ones): each row's name,
+    # flavour text and material type; the birthday-party delivery cells show
+    # the name of the material they list.
+    "materials": ("id", "materials.json"),
+    # The honors a reward dialog shows: each row's name, rarity, group and
+    # image bundle (``assetbundleName``) with its levels; the honor image a
+    # reward dialog builds also reads the row's group (background bundle and
+    # honor type).
+    "honors": ("id", "honors.json"),
+    "honorGroups": ("id", "honor-groups.json"),
+    # The master configs (``MasterDataManager.GetMasterConfigToInt`` and its
+    # siblings): one string value per ``configKey``; the birthday-party
+    # delivery reads its base point and reward drop upper limit here.
+    "configs": ("configKey", "configs.json"),
+    # The avatar wear masters ``UserAvatar``'s four ids name: the costume and
+    # accessory bundles, the skin colour codes, and the coordinates (a full
+    # set naming its own costume, accessory and skin colour).
+    "avatarCostumes": ("id", "avatar-costumes.json"),
+    "avatarAccessories": ("id", "avatar-accessories.json"),
+    "avatarSkinColors": ("id", "avatar-skin-colors.json"),
+    "avatarCoordinates": ("id", "avatar-coordinates.json"),
 }
 
-REGISTERED_TABLES = {**TABLES, **OPTIONAL_TABLES}
+# Tables the game's suite master ships on their own, but which the master dump
+# keeps only as a copy embedded in every row of another table. The export
+# projects each row of that table onto the listed fields, verbatim, keyed by
+# the row's own key; a consumer rebuilds the standalone table from the
+# embedded copies. Two rows embedding the same group id with different
+# contents are an error, since the standalone table could not hold both.
+PROJECTED_TABLES = {
+    # A furniture piece's tag group: the group id and up to five tag ids.
+    # The fixture-tag talk condition compares the tag ids of the condition's
+    # furniture group with those of every placed piece.
+    "mysekaiFixtureTagGroups": (
+        "mysekaiFixtures", ("id", "mysekaiFixtureTagGroup"),
+        "mysekai-fixture-tag-groups.json"),
+}
+
+REGISTERED_TABLES = {
+    **TABLES, **OPTIONAL_TABLES,
+    **{name: ("id", filename) for name, (_, _, filename) in PROJECTED_TABLES.items()},
+}
 
 _MASKED_URL = "<external-url>"
 
@@ -81,6 +159,26 @@ def _keyed_rows(table, key_field, rows):
     return keyed
 
 
+def _projected_rows(table, master):
+    source, fields, _ = PROJECTED_TABLES[table]
+    rows = []
+    groups = {}
+    for row in master.table(source):
+        missing = [field for field in fields if field not in row]
+        if missing:
+            raise ValueError(f"{table}: {source} row {row.get('id')} lacks "
+                             f"{', '.join(missing)}")
+        projected = {field: row[field] for field in fields}
+        embedded = projected[fields[-1]]
+        if isinstance(embedded, dict) and "id" in embedded:
+            kept = groups.setdefault(embedded["id"], embedded)
+            if kept != embedded:
+                raise ValueError(f"{table}: group {embedded['id']} is embedded "
+                                 f"with different contents")
+        rows.append(projected)
+    return rows
+
+
 def extract_master_tables(master_source, out_dir, master_cache=None, *, tables=None):
     """Write one keyed document per selected table into *out_dir*.
 
@@ -99,7 +197,10 @@ def extract_master_tables(master_source, out_dir, master_cache=None, *, tables=N
     summary = {}
     for table in selected:
         key_field, filename = REGISTERED_TABLES[table]
-        rows = master.table(table)
+        if table in PROJECTED_TABLES:
+            rows = _projected_rows(table, master)
+        else:
+            rows = master.table(table)
         if not rows:
             raise ValueError(f"{table}: table is empty; a table with no rows "
                              f"cannot be told apart from a table that was "
@@ -132,6 +233,17 @@ def extract_master_tables(master_source, out_dir, master_cache=None, *, tables=N
             "entries": keyed,
             "summary": {"rows": len(rows), "externalUrlsMasked": masked},
         }
+        if table in PROJECTED_TABLES:
+            source, fields, _ = PROJECTED_TABLES[table]
+            doc["semantics"]["projection"] = {
+                "source": source,
+                "fields": list(fields),
+                "meaning": (
+                    "each source row reduced to these fields, verbatim; the "
+                    "last field is the embedded copy of the standalone table's "
+                    "row, and every copy of one group id is identical"
+                ),
+            }
         write_json(f"{out_dir}/{filename}", doc)
         summary[table] = {"rows": len(rows), "file": filename,
                           "externalUrlsMasked": masked}

@@ -16,6 +16,11 @@ from .atomic import exclusive_lock, write_json
 CHUNK_SIZE = 1024 * 1024
 
 
+class _NoCredentialRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class InvalidDownload(OSError):
     """The response or partial bytes cannot be used for another attempt."""
 
@@ -136,6 +141,9 @@ def download_file(url, destination, *, expected_hash=None, identity=None,
     identity = json.loads(json.dumps({"url": url, "object": identity, "expected": wanted}, sort_keys=True))
     last = None
     with exclusive_lock(lock):
+        if wanted and destination.is_file() and digest_file(destination, wanted[0]) == wanted[1]:
+            return {"sha256": digest_file(destination), "bytes": destination.stat().st_size,
+                    "cached": True}
         for attempt in range(1, retries + 1):
             state = _resume(part, metadata, identity, wanted)
             offset = state["offset"] if state else 0
@@ -146,7 +154,13 @@ def download_file(url, destination, *, expected_hash=None, identity=None,
                     request_headers["If-Range"] = state["etag"]
             request = urllib.request.Request(url, headers=request_headers)
             try:
-                with urllib.request.urlopen(request, timeout=timeout) as response:
+                # An authenticated caller must never forward credentials through
+                # urllib's default cross-host redirect handling.
+                sensitive = any(key.lower() in {"cookie", "authorization", "x-session-token"}
+                                for key in request_headers)
+                opener = (urllib.request.build_opener(_NoCredentialRedirect()).open
+                          if sensitive else urllib.request.urlopen)
+                with opener(request, timeout=timeout) as response:
                     response_headers = response.headers
                     if response_headers.get("Content-Encoding", "identity").lower() != "identity":
                         raise InvalidDownload("server ignored Accept-Encoding: identity")

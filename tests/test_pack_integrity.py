@@ -13,11 +13,16 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from core import atomic
 from pack.build import build
-from pack.groups import build_groups
+from pack.groups import build_groups, runtime_paths
 from pack.gc import catalog_garbage
 from pack.verify import verify, verify_catalog, verify_catalog_data
 
 build_module = importlib.import_module("pack.build")
+
+
+def test_runtime_membership_keeps_coordinate_provenance(tmp_path):
+    (tmp_path / "source.json").write_text('{"coordinateContract":"moly-rh-y-up-reflect-x-v1"}')
+    assert "source.json" in runtime_paths(tmp_path)
 
 
 def source(tmp_path):

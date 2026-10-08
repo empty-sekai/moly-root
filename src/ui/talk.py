@@ -101,6 +101,11 @@ class Reader:
 
     def string(self) -> str:
         n = self.i32()
+        # A short read here would leave the cursor at the end and report a
+        # clean zero residual; a length past the object is an over-read.
+        if n < 0 or n > self.remaining():
+            raise ValueError(f"string length {n} over-reads the object "
+                             f"({self.remaining()} bytes left)")
         data = self._b.read(n)
         self._align4()
         return data.decode("utf-8", errors="replace")
@@ -999,8 +1004,12 @@ def a64_float_constants(blob: bytes, entry_off: int, max_words: int):
     return out
 
 
-def decode_object(env, obj, mono_index, allow_partial=False):
-    """解一个对象：返回 dict + 语义信息 + 自证判据。"""
+def decode_object(env, obj, mono_index, allow_partial=False, decoders=None):
+    """解一个对象：返回 dict + 语义信息 + 自证判据。
+
+    decoders 为空时用本模块注册表；给出时整张表替换它（按客户端版本选链，
+    不按字节数猜链）。
+    """
     otype = obj.type.name
     raw = obj.get_raw_data()
 
@@ -1054,7 +1063,7 @@ def decode_object(env, obj, mono_index, allow_partial=False):
         }
 
     cls = resolve_script_class(obj, mono_index)
-    dec = _DECODERS.get(cls)
+    dec = (_DECODERS if decoders is None else decoders).get(cls)
     if dec is None:
         # 未知类形：报告未解（partial），不假装解了。前缀按 m_Name 长度可变。
         r = Reader(raw)

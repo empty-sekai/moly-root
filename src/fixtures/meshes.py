@@ -10,22 +10,15 @@ trees points at — the meshes, the materials and the textures — and writes on
 ``.glb`` whose ``scenes`` array holds one scene per variant, so nothing is
 flattened or merged.
 
-Two things are kept deliberately against the coordinate-conversion convention
-that the rest of this repository follows (see :mod:`core.gltf`):
-
-* Every node transform is exported **verbatim** from the Unity typetree —
-  ``m_LocalPosition`` / ``m_LocalRotation`` / ``m_LocalScale`` become the glTF
-  ``translation`` / ``rotation`` / ``scale`` with no unit conversion, no axis
-  reflection and no node merging.  The ``loc_startNNN`` / ``loc_endNNN`` attach
-  points (see :mod:`fixtures.attach`) are GameObjects in that same hierarchy and
-  were recorded verbatim; putting a character there needs the geometry and the
-  level to agree, so both are left in the authored (Unity, left-handed) space.
-  A package that needs a different convention is reported, never converted.
-* Vertex data follows the same rule: positions, normals, tangents and UVs are
-  written verbatim (no ``unity_to_gltf_pos`` reflection, no winding reordering,
-  no UV ``1 - v`` flip), and colors are written as the authored UNorm8 bytes
-  rather than as floats — writing a color as ``<4f`` would let a 0..255 byte read
-  as a 0..1 float plus a 255x glow (the fixture shaders ship byte colors).
+Nodes, meshes, skin matrices, animations and attach points use the shared
+``moly-rh-y-up-reflect-x-v1`` runtime basis (:mod:`core.gltf`). The reflection
+is applied once at export: position/normal/tangent X is negated, quaternion Y/Z
+is negated, triangle winding is reversed, and inverse bind matrices are
+conjugated by S. Local scale and source identities are retained. Source TRS
+evidence remains tagged separately in node extras; it is not a second runtime
+transform. UVs retain their authored bottom-left convention independently of
+the spatial migration. Tangent handedness is negated because UVs are unchanged.
+Colors are the authored UNorm8 bytes, not 0..255 values written as glTF floats.
 
 The extractor reads meshes from **both** a ``MeshFilter``/``MeshRenderer`` pair
 and a ``SkinnedMeshRenderer``.  ``fixture-mesh-topology`` reports 111 packages
@@ -41,7 +34,7 @@ in those the difference reaches 0.34 authored units.
 The AnimationClips each package ships are exported as glTF ``animations`` over
 these same node trees (:mod:`fixtures.animations`) -- position / rotation /
 scale curves become channels + samplers targeting the walked nodes, in this
-glb's authored frame, so a furniture performance can play without a sidecar.
+glb's canonical frame, so a furniture performance can play without a sidecar.
 """
 import io
 import json
@@ -55,7 +48,10 @@ from core.unity import configure_fallback_unity_version
 from UnityPy.helpers.MeshHelper import MeshHandler
 
 from core.assets.packages import PackageStore
-from core.gltf import GLB
+from core.fixture_collision_document import INDEX_VERSION, attach_fixture_collision
+from core.gltf import (GLB, COORDINATE_SPACE, coordinate_contract,
+                       reflect_position, reflect_quaternion, reflect_tangent,
+                       flip_winding)
 from core.jsonio import write_json
 from core.renderer import shadow_casting_mode_or_gap
 from core.shader_passes import declared_passes, texture_defaults
@@ -130,34 +126,32 @@ def _graph(record):
 
 
 def _local_transform(tree):
-    """A transform's local (translation, rotation, scale) read verbatim."""
+    """A transform's local TRS in the canonical reflected-X runtime basis."""
     lp = tree.get("m_LocalPosition") or {}
     lr = tree.get("m_LocalRotation") or {}
     ls = tree.get("m_LocalScale") or {}
-    return ([lp.get("x", 0.0), lp.get("y", 0.0), lp.get("z", 0.0)],
-            [lr.get("x", 0.0), lr.get("y", 0.0), lr.get("z", 0.0), lr.get("w", 1.0)],
+    return (reflect_position([lp.get("x", 0.0), lp.get("y", 0.0), lp.get("z", 0.0)]),
+            reflect_quaternion([lr.get("x", 0.0), lr.get("y", 0.0),
+                                lr.get("z", 0.0), lr.get("w", 1.0)]),
             [ls.get("x", 1.0), ls.get("y", 1.0), ls.get("z", 1.0)])
 
 
 def _mesh_channels(glb, mesh_obj, tree, skin=True):
-    """Write one mesh's vertex buffers into *glb*, verbatim, for composing.
+    """Write one mesh's vertex buffers into *glb* in canonical runtime space.
 
     Returns the ``buffers`` dict that :func:`core.mesh.compose_mesh` consumes:
     ``{"attributes", "submeshes", "name", "vertices", "triangles", "skin"}``.
-    Unlike ``core.mesh.mesh_accessors`` this does not reflect the X axis,
-    reorder winding or flip UVs — the surrounding node transforms are exported
-    verbatim, so the geometry is kept in the same (authored) space.  Colors are
-    written as the UNorm8 bytes they are authored in.
+    UVs remain authored bottom-left coordinates and are tagged separately from
+    the spatial basis. Colors are written as the UNorm8 bytes they are authored
+    in.
 
-    ``skin`` comes from ``core.mesh.skin_accessors`` with the reflection off, for
-    the same reason: an inverse bind matrix is read against the space the node
-    transforms are written in, and here that space is the authored one.  It is
-    ``None`` for a mesh with no bone weights or no bind pose.
+    ``skin`` uses the same reflected-X conjugation as node transforms.
     """
     handler = MeshHandler(mesh_obj.read())
     handler.process()
     count = handler.m_VertexCount
-    positions = [tuple(float(c) for c in v[:3]) for v in (handler.m_Vertices or [])]
+    positions = [tuple(float(c) for c in reflect_position(v[:3]))
+                 for v in (handler.m_Vertices or [])]
     bounds = ([min(p[axis] for p in positions) for axis in range(3)],
               [max(p[axis] for p in positions) for axis in range(3)])
     attributes = {"POSITION": glb.acc(
@@ -166,13 +160,13 @@ def _mesh_channels(glb, mesh_obj, tree, skin=True):
     normals = getattr(handler, "m_Normals", None)
     if normals:
         attributes["NORMAL"] = glb.acc(
-            b"".join(struct.pack("<3f", *tuple(float(c) for c in v[:3]))
+            b"".join(struct.pack("<3f", *tuple(float(c) for c in reflect_position(v[:3])))
                      for v in normals),
             FLOAT, "VEC3", count, ARRAY_BUFFER)
     tangents = getattr(handler, "m_Tangents", None)
     if tangents:
         attributes["TANGENT"] = glb.acc(
-            b"".join(struct.pack("<4f", *tuple(float(c) for c in v[:4]))
+            b"".join(struct.pack("<4f", *reflect_tangent(v[:4]))
                      for v in tangents),
             FLOAT, "VEC4", count, ARRAY_BUFFER)
     for slot, values in (("TEXCOORD_0", handler.m_UV0),
@@ -199,7 +193,7 @@ def _mesh_channels(glb, mesh_obj, tree, skin=True):
         if submesh.get("topology", TRIANGLES) != TRIANGLES:
             raise ValueError(NOT_TRIANGLE_LIST)
         length = int(submesh.get("indexCount", 0))
-        part = indices[base:base + length]
+        part = flip_winding(indices[base:base + length])
         base += length
         if part and max(part) >= count:
             raise ValueError(INDEX_RANGE)
@@ -209,7 +203,7 @@ def _mesh_channels(glb, mesh_obj, tree, skin=True):
         triangles += length // 3
     return {"name": str(tree.get("m_Name") or "mesh"), "attributes": attributes,
             "submeshes": submeshes, "vertices": count, "triangles": triangles,
-            "skin": skin_accessors(glb, handler, tree, reflect=False)
+            "skin": skin_accessors(glb, handler, tree, reflect=True)
                     if skin else None}
 
 
@@ -247,6 +241,39 @@ def _texture_index(glb, record, path_id, cache):
     index = len(glb.g["textures"]) - 1
     cache[key] = index
     return index
+
+
+def _pointer_texture_index(glb, record, pointer, cache, store):
+    """The glTF ``textures`` index of a material texture pointer.
+
+    A pointer into another file (``m_FileID`` != 0) is followed through the
+    store into the dependency archive that holds the texture, and the texture
+    is written into this glb: a glb is self-contained, so a texture a material
+    reaches in a dependency package is exported with it, as a material reached
+    in a dependency package is (see ``_material_index``).  Measured case: every
+    crystal furniture material binds its ``_NormalMap`` in the texture-common
+    package.  Same-file pointers resolve exactly as before.  Raises
+    ``ValueError`` when the pointer does not resolve.
+    """
+    pointer = pointer or {}
+    path_id = pointer.get("m_PathID", 0)
+    if store is not None and pointer.get("m_FileID", 0):
+        target = store.follow(record, pointer)
+        if target is None:
+            raise ValueError(TEXTURE_DECODE_FAILED)
+        record, path_id = target
+    return _texture_index(glb, record, path_id, cache)
+
+
+def _texenv_pointer(texenvs, key):
+    """The texture pointer named *key* in a material's ``m_TexEnvs``, or ``None``."""
+    for entry in texenvs:
+        if (isinstance(entry, (list, tuple)) and len(entry) == 2
+                and entry[0] == key):
+            return (entry[1] or {}).get("m_Texture")
+        if isinstance(entry, dict) and entry.get("first") == key:
+            return (entry.get("second") or {}).get("m_Texture")
+    return None
 
 
 def _texenvs(tt):
@@ -338,7 +365,7 @@ def _shader_keywords(tree):
             "shaderKeywords": valid + invalid}
 
 
-def _material_properties(tree, glb, record, tex_cache):
+def _material_properties(tree, glb, record, tex_cache, store=None):
     """Every authored property of a material: floats, colors, texture slots.
 
     The three named properties this exporter used to keep -- cull mode, alpha
@@ -417,7 +444,8 @@ def _material_properties(tree, glb, record, tex_cache):
         # The slot is reported either way; None means the image is not in this
         # package, which is a different fact from the slot being unused.
         try:
-            textures[str(name)] = _texture_index(glb, record, path_id, tex_cache)
+            textures[str(name)] = _pointer_texture_index(
+                glb, record, value.get("m_Texture"), tex_cache, store)
         except ValueError:
             textures[str(name)] = None
     out = {"floats": floats, "colors": colors, "textures": textures,
@@ -458,11 +486,12 @@ def _material_index(glb, record, path_id, cache, tex_cache, store):
     material = {"name": name, "doubleSided": False,
                 "pbrMetallicRoughness": {"metallicFactor": 0.0,
                                          "roughnessFactor": 1.0}}
-    tex_path = _texenv(texenvs, "_MainTex")
-    if tex_path:
+    tex_pointer = _texenv_pointer(texenvs, "_MainTex")
+    if (tex_pointer or {}).get("m_PathID"):
         try:
             material["pbrMetallicRoughness"]["baseColorTexture"] = {
-                "index": _texture_index(glb, record, tex_path, tex_cache)}
+                "index": _pointer_texture_index(glb, record, tex_pointer,
+                                                tex_cache, store)}
         except ValueError:
             pass
     shader = _shader_value(store, record, tt)
@@ -472,7 +501,7 @@ def _material_index(glb, record, path_id, cache, tex_cache, store):
               "fixtureShaderUsage": _float_prop(tt, "_FixtureShaderUsage"),
               "shader": shader["name"] if shader["status"] == "resolved" else shader}
     extras.update(_shader_keywords(tt))
-    extras.update(_material_properties(tt, glb, record, tex_cache))
+    extras.update(_material_properties(tt, glb, record, tex_cache, store))
     if shader["status"] == "resolved":
         extras["shaderTextureDefaults"] = shader["textureDefaults"]
         if "shaderPasses" in shader:
@@ -539,11 +568,18 @@ def _walk(glb, record, store, tpid, parent, ctx, prefix="", fence_scope=False):
     translation, rotation, scale = _local_transform(tt)
     node = {"name": name, "translation": translation,
             "rotation": rotation, "scale": scale,
-            "extras": {"sourcePathId": tpid, "gameObjectId": goid}}
+            "extras": {"sourcePathId": tpid, "gameObjectId": goid,
+                       "sourceTransform": {
+                           "coordinateSpace": "unity-lh-y-up-authored",
+                           "translation": tt.get("m_LocalPosition"),
+                           "rotation": tt.get("m_LocalRotation"),
+                           "scale": tt.get("m_LocalScale")}}}
     # Reuse the scene importer's exact object/component identity contract.
     # Legacy numeric extras remain for existing consumers; runtime animation
     # binding uses the lossless serialized-file + signed string identities.
     node["extras"].update(source_identity(record, ctx["source_graph"], tpid))
+    node["extras"]["sourceCollision"] = ctx["collision"].node(record, tpid)
+    node["extras"]["active"] = bool(ctx["gameobjects"][goid]["m_IsActive"])
     if goid in ctx["roadCells"]:
         node["extras"]["roadCellType"] = ctx["roadCells"][goid]
     fence_scope = fence_scope or goid in ctx["fenceRoots"]
@@ -565,6 +601,10 @@ def _walk(glb, record, store, tpid, parent, ctx, prefix="", fence_scope=False):
     ctx["variantGoids"].add(goid)
     if goid in ctx["fixtureView"]:
         ctx["fvRoots"].add(ctx["root"])
+        # Placement semantics attach to this exact source view, not a name or
+        # the largest prefab variant. The runtime replaces this view's authored
+        # position/rotation with the layout pose while preserving its scale.
+        node["extras"]["fixtureViewRoot"] = True
 
     for cid, kind in _components(record, goid):
         if kind == "Animator":
@@ -763,6 +803,10 @@ def _variants(glb, record, store, transforms, gameobjects, roots, ctx,
         ctx["table"] = {"paths": {}, "root": root_name, "animators": []}
         before = ctx["report"]["nodeNames"].copy()
         node_index = _walk(glb, record, store, root, None, ctx)
+        glb.g["nodes"][node_index]["extras"].update(
+            coordinateContract=COORDINATE_SPACE,
+            coordinateUnits="source-unity-unit",
+            uvConvention="unity-bottom-left")
         skins = _bind_skins(glb, ctx)
         ctx["tables"].append(ctx["table"])
         container_paths = [path for path, goid in container
@@ -829,6 +873,30 @@ def _fixture_view_game_objects(record):
     return out
 
 
+def _validate_fixture_view_roots(record, transforms, roots):
+    """The runtime placement override is defined on the FixtureView root.
+
+    A nested FixtureView would require composing its parent chain when placing
+    locators; silently treating the prefab root as the view would put geometry
+    and action points in different frames. Fail the export until that explicit
+    resolver exists.
+    """
+    root_set = set(roots)
+    by_game_object = {
+        (tree.get("m_GameObject") or {}).get("m_PathID"): transform
+        for transform, tree in transforms.items()
+    }
+    for game_object in _fixture_view_game_objects(record):
+        transform = by_game_object.get(game_object)
+        if transform is None:
+            raise ValueError("FixtureView GameObject has no exported root Transform")
+        if transform not in root_set:
+            raise ValueError(
+                "FixtureView is nested below its prefab root; canonical placement "
+                "requires an explicit parent-chain resolver"
+            )
+
+
 def _container(record):
     """The bundle's container: ``[(asset path, asset path id), ...]``."""
     for cid, kind in record.kinds.items():
@@ -843,7 +911,7 @@ def _container(record):
     return []
 
 
-def _export_package(store, name, out_dir):
+def _export_package(store, name, out_dir, *, animation_sources=()):
     """One furniture package to ``<out_dir>/<name>.glb`` plus its record."""
     package = store.package(name)
     if package is None:
@@ -861,11 +929,20 @@ def _export_package(store, name, out_dir):
     for dependency in package.dependencies:
         store.package(str(dependency).replace("/", "__"))
     glb = GLB(generator="moly-root fixture extractor")
+    from .collision import CollisionExport
+    collision = CollisionExport(store)
+    glb.g["asset"]["extras"] = {
+        "coordinateContract": COORDINATE_SPACE,
+        "coordinateUnits": "source-unity-unit",
+        "uvConvention": "unity-bottom-left",
+        "coordinateSemantics": coordinate_contract(),
+    }
     report = {"name": name, "nodeNames": set(), "vertexCount": 0,
               "meshCount": 0, "zeroVertexMeshes": 0, "hasGeometry": False,
               "skinCount": 0, "jointCount": 0, "anomalies": [],
               "animations": []}
     ctx = {"fixtureView": set(), "fvRoots": set(), "root": None,
+           "collision": collision,
            "variantGoids": set(), "mesh_cache": {}, "material_cache": {},
            "tex_cache": {}, "skin_cache": {}, "channel_cache": {},
            "nodeIndex": {}, "pendingSkins": [], "tables": [], "table": None,
@@ -875,12 +952,14 @@ def _export_package(store, name, out_dir):
         if not record.kinds:
             continue
         transforms, gameobjects, roots = _graph(record)
+        _validate_fixture_view_roots(record, transforms, roots)
         ctx["source_graph"] = Graph(record)
         ctx["transforms"] = transforms
         ctx["gameobjects"] = gameobjects
         ctx["fenceRoots"], ctx["fenceParts"] = _fence_views(record)
         ctx["roadCells"] = _road_cells(record)
         ctx["fixtureView"] |= set(_fixture_view_game_objects(record))
+        collision.prepare(record, ctx["source_graph"], ctx["fixtureView"])
         if not container:
             container = _container(record)
         local_roots, local_variants = _variants(glb, record, store,
@@ -907,7 +986,29 @@ def _export_package(store, name, out_dir):
     # :mod:`fixtures.animations`).  A clip failure must not lose the geometry,
     # so the embed reports per-clip problems instead of raising; they join the
     # package's anomaly list so the run summary aggregates them like any other.
-    animations = embed(glb, package, ctx["tables"], report)
+    animation_package = package
+    if animation_sources:
+        from types import SimpleNamespace
+        files = list(package.files)
+        owned = {(record.archive, str(pid)) for record in files
+                 for pid, kind in record.kinds.items() if kind == "AnimationClip"}
+        selected = {}
+        for source_package, archive, path_id in animation_sources:
+            if (archive, str(path_id)) in owned:
+                continue
+            source = store.package(source_package)
+            records = [record for record in source.files if record.archive == archive] if source else []
+            if len(records) != 1 or records[0].kinds.get(int(path_id)) != "AnimationClip":
+                raise ValueError(f"fixture animation source is absent: {source_package}/{archive}/{path_id}")
+            record = records[0]
+            key = (source_package, archive)
+            if key not in selected:
+                selected[key] = SimpleNamespace(archive=archive, kinds={}, objects={})
+            selected[key].kinds[int(path_id)] = "AnimationClip"
+            selected[key].objects[int(path_id)] = record.objects[int(path_id)]
+        files.extend(selected.values())
+        animation_package = SimpleNamespace(files=files)
+    animations = embed(glb, animation_package, ctx["tables"], report)
     report["anomalies"].extend(animations["anomalies"])
     animations["anomalies"] = []
 
@@ -940,6 +1041,7 @@ def _export_package(store, name, out_dir):
         if len(house_scenes) != 1:
             raise ValueError("HouseView must resolve to one exported prefab scene")
         glb.g["scene"] = house_scenes[0]
+    attach_fixture_collision(glb.g, collision.document())
     path = out_dir / f"{name}.glb"
     try:
         glb.save(path)
@@ -959,6 +1061,9 @@ def _export_package(store, name, out_dir):
         raise
     document = {
         "name": name,
+        "coordinateContract": COORDINATE_SPACE,
+        "coordinateUnits": "source-unity-unit",
+        "uvConvention": "unity-bottom-left",
         "status": "exported" if report["hasGeometry"] else "no-mesh",
         "glb": path.name,
         "roots": len(root_nodes),
@@ -1068,7 +1173,10 @@ def extract_from_store(store, out_dir):
         "noMeshNames": resolution,
         "failedNames": failures,
     }
-    document = {"version": 2, "summary": summary, "packages": packages}
+    document = {"version": INDEX_VERSION, "coordinateContract": COORDINATE_SPACE,
+                "coordinateUnits": "source-unity-unit",
+                "uvConvention": "unity-bottom-left",
+                "summary": summary, "packages": packages}
     index_path = write_json(out / "index.json", document)
     return dict(summary, path=str(index_path))
 

@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema",
+    "download_bytes",
+    "resident_bytes",
+    "content_bytes",
+    "logical_bytes",
+    "transforms",
+    "entries",
+    "content_id",
+    "encoders"
+  ],
+  "properties": {
+    "schema": {
+      "const": "moly-asset-manifest/2"
+    },
+    "download_bytes": {
+      "$ref": "#/$defs/size"
+    },
+    "resident_bytes": {
+      "$ref": "#/$defs/size"
+    },
+    "content_bytes": {
+      "$ref": "#/$defs/size"
+    },
+    "logical_bytes": {
+      "$ref": "#/$defs/size"
+    },
+    "transforms": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "meshopt": {"$ref": "#/$defs/meshoptRecipe"},
+        "draco": {"$ref": "#/$defs/recipe"},
+        "ktx2": {"$ref": "#/$defs/recipe"}
+      }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    },
+    "content_id": {
+      "$ref": "#/$defs/sha256"
+    },
+    "encoders": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "recipe": {
+      "type": "object",
+      "required": ["tool", "tool_version", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "tool": {"type": "string", "minLength": 1},
+        "tool_version": {"type": "string", "minLength": 1},
+        "params": {
+          "type": "object",
+          "description": "Semantic parameters must recursively contain only strings, null, booleans and nonnegative safe integers; independent verification rejects floats."
+        }
+      }
+    },
+    "meshoptRecipe": {
+      "allOf": [
+        {"$ref": "#/$defs/recipe"},
+        {
+          "properties": {
+            "params": {
+              "type": "object",
+              "required": ["quantize_position", "quantize_normal", "quantize_texcoord", "weld", "simplify", "reorder"],
+              "additionalProperties": false,
+              "properties": {
+                "quantize_position": {"$ref": "#/$defs/quantizeBits"},
+                "quantize_normal": {"$ref": "#/$defs/quantizeBits"},
+                "quantize_texcoord": {"$ref": "#/$defs/quantizeBits"},
+                "weld": {"type": "boolean"},
+                "simplify": {"type": "boolean"},
+                "reorder": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "quantizeBits": {"type": "integer", "minimum": 1, "maximum": 16},
+    "size": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "entry": {
+      "type": "object",
+      "required": [
+        "path",
+        "blob",
+        "blob_bytes",
+        "blob_sha256",
+        "bytes",
+        "content_sha256",
+        "codec",
+        "http_encoding",
+        "xf"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "blob": {
+          "type": "string",
+          "minLength": 1
+        },
+        "blob_bytes": {
+          "$ref": "#/$defs/size"
+        },
+        "blob_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes": {
+          "$ref": "#/$defs/size"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "codec": {
+          "enum": [
+            "identity",
+            "gzip",
+            "brotli"
+          ]
+        },
+        "http_encoding": {
+          "enum": [
+            "identity",
+            "br"
+          ]
+        },
+        "xf": {
+          "enum": [
+            null,
+            "meshopt",
+            "draco",
+            "ktx2"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

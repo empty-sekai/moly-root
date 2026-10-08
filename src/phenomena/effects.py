@@ -16,24 +16,23 @@ camera, and a *site* effect belongs to one named site.  Materials commonly live
 in a companion package rather than next to the emitter, so resolution is handed
 in by the caller; an unresolved pointer stays visible instead of becoming null.
 
-Two components on these nodes are not exported, and both are decisions rather than
-gaps.  A canvas renderer draws only what a *graphic* component submits to it, and
-these prefabs carry no graphic of any kind, so it contributes nothing to draw.  A
-mesh collider paired with a mesh filter and *no* mesh renderer is collision surface,
-not geometry: it is invisible by construction, its mesh is a site's navigation
-surface reached from another package, and what collides with it is a particle
-module.  Both are reported under ``omitted`` with what they point at, so a consumer
-can see they were read and judged rather than missed.
+A canvas renderer draws only what a graphic component submits to it; a bare
+canvas renderer is recorded under ``omitted``. Collider components have their
+own records and mesh references, even when there is no visible mesh renderer.
+Their geometry participates in particle world queries, not scene drawing.
 
 One script component *is* exported, because it decides when an effect stops
 existing rather than how it looks: a lifecycle wrapper that plays every emitter
-under it, and on teardown keeps the object alive until its emitters have finished
-and a fixed grace time has passed.  It also carries the rotation rule for a
+under it, and on teardown stops emission, then destroys the object after its authored
+grace time. Particle lifetimes do not extend that destruction deadline.  It also carries the rotation rule for a
 camera-attached effect, and that rule is **not uniform** — see ``effectiveRotation``.
 """
+import math
+
 from core.particles import (TRAIL_MATERIAL_SLOT, decode_renderer,  # noqa: F401
                             decode_system)
 from core.assets.packages import pairs
+from core.colliders import COLLIDER_COMPONENTS, decode_collider
 
 # Components these prefabs use.  Anything else on a node is reported.
 MODELLED_COMPONENTS = ("Transform", "RectTransform", "ParticleSystem",
@@ -52,10 +51,7 @@ OMITTED_COMPONENTS = {
     "CanvasRenderer": ("a canvas renderer draws only what a graphic component "
                        "submits to it, and these prefabs carry no graphic"),
     "MeshFilter": ("a mesh filter with no mesh renderer beside it draws nothing; "
-                   "here it names the mesh of the collider on the same node"),
-    "MeshCollider": ("collision surface, not geometry: the node has no mesh "
-                     "renderer, and the mesh is a site's navigation surface in "
-                     "another package"),
+                   "collision geometry is carried by the collider record"),
 }
 
 # Render mode that draws each particle as a copy of a mesh.
@@ -93,30 +89,49 @@ def _effector(tree):
     particles finish their lives while the incoming one is already emitting.
     """
     rotation = tree.get("_initializeRotateType")
-    return {"timeUntilDestroy": float(tree.get("_timeUntilDestroy", 0.0)),
+    delay = tree.get("_timeUntilDestroy")
+    return {"timeUntilDestroy": float(delay) if delay is not None else None,
             "rotationType": ROTATION_TYPES.get(rotation, rotation)}
 
 
 def _effective_rotation(kind, effectors):
-    """Which rotation rule a camera-attached effect actually ends up with.
+    """Resolve the host's Setup call, not merely the serialized rotation field.
 
-    The host looks for the lifecycle component **on the prefab root only**.  When
-    it finds one it starts it with no argument, so the component's own serialized
-    rotation type wins; when it does not, the host adds one and asks for ``fix``,
-    which counter-rotates the effect every frame so it stays aligned to the world
-    while its position still follows the camera.  The two branches disagree, so
-    this is per-prefab and not a constant.
-
-    ``None`` for any other kind of effect: how those are attached is not
-    established here, and guessing would be worse than saying nothing.
+    SiteEnvironmentUtility.EmitEffect calls Setup(Normal) when a root component
+    exists; only the AddComponent branch forwards the caller's requested type.
+    Camera callers request Fix, sky/site callers request Normal. A component on
+    a child does not change the root lookup. See phenomena-effect-lifecycle.
     """
-    if kind != CAMERA_KIND:
+    if kind not in ("sky", "camera", "site"):
         return None
-    for entry in effectors:
-        if entry["node"] == "":
-            return entry["rotationType"]
+    if kind != CAMERA_KIND or any(entry["node"] == "" for entry in effectors):
+        return "normal"
     return ADDED_ROTATION_TYPE
 
+
+def effective_lifecycle(kind, effectors):
+    """Explicit factory contract consumed by runtime, with no downstream default.
+
+    The added component's 2-second constructor value is a source transcription
+    (SiteEnvironmentEffector constructor; canon phenomena-effect-lifecycle),
+    not Unity's generic particle lifetime. Root serialized values override it.
+    Auxiliary/unclassified prefabs do not acquire this factory by inference.
+    """
+    if kind not in ("sky", "camera", "site"):
+        return None
+    roots = [entry for entry in effectors if entry["node"] == ""]
+    if len(roots) > 1:
+        return None
+    if roots:
+        delay = roots[0].get("timeUntilDestroy")
+        origin = "serializedRoot"
+    else:
+        delay = 2.0
+        origin = "addedComponentConstructor"
+    if not isinstance(delay, (float, int)) or not math.isfinite(delay) or delay < 0:
+        return None
+    return {"stopBehavior": "stopEmitting", "timeUntilDestroy": float(delay),
+            "delaySource": origin}
 
 
 def _vec(node, keys):
@@ -170,6 +185,13 @@ def hierarchy(root_id, kinds, trees):
     ``node_of`` maps a game-object id to the node path components sit on.  The
     root's own path is ``""``, so paths read the same way animation and effect
     paths do elsewhere in this repository.
+
+    ``siblingIndex`` is the node's position in its parent transform's
+    ``m_Children`` list (``None`` on the root).  Instantiating a prefab walks
+    the hierarchy depth first in that order and assigns each produced object
+    the next instance id, so the order in which the engine sorts objects of
+    one clone by instance id follows from these indices; the path ids the
+    children are queued by here say nothing about it.
     """
     transform_of, owner = {}, {}
     for path_id, kind in kinds.items():
@@ -188,9 +210,9 @@ def hierarchy(root_id, kinds, trees):
     root_transform = transform_of.get(root_id)
     if root_transform is None:
         return nodes, node_of
-    queue = [(root_transform, None, "")]
+    queue = [(root_transform, None, "", None)]
     while queue:
-        transform, parent_path, path = queue.pop(0)
+        transform, parent_path, path, sibling_index = queue.pop(0)
         game_object = owner[transform]
         tree = trees[transform]
         game_object_tree = trees.get(game_object, {})
@@ -207,16 +229,21 @@ def hierarchy(root_id, kinds, trees):
             "path": path,
             "parent": parent_path,
             "active": bool(game_object_tree.get("m_IsActive", 1)),
+            "layer": game_object_tree.get("m_Layer"),
+            "gameObjectPathId": str(game_object),
             "transformType": kinds.get(transform, "Transform"),
             "canvasRenderer": "CanvasRenderer" in components,
             "position": _vec(tree.get("m_LocalPosition", {}), "xyz"),
             "rotation": _vec(tree.get("m_LocalRotation", {}), "xyzw"),
             "scale": _vec(tree.get("m_LocalScale", {}), "xyz"),
+            "siblingIndex": sibling_index,
         })
         node_of[game_object] = path
+        order = [ref.get("m_PathID", 0) for ref in tree.get("m_Children", [])]
         for child in sorted(children.get(transform, [])):
             name = str(trees.get(owner[child], {}).get("m_Name", ""))
-            queue.append((child, path, name if path == "" else f"{path}/{name}"))
+            index = order.index(child) if order.count(child) == 1 else None
+            queue.append((child, path, name if path == "" else f"{path}/{name}", index))
     return nodes, node_of
 
 
@@ -240,8 +267,18 @@ def _omission(node, component, kind, kinds, trees, component_ids):
     return entry
 
 
+def _geometry_references(mesh, slot=0):
+    """Per-source mesh references; a reused content hash never steals provenance."""
+    return [{"file": mesh["file"], "node": item["node"],
+             "geometrySchemaVersion": 1, "meshSlot": slot,
+             "coordinates": "gltf-reflect-x-flip-v",
+             "sha256": mesh.get("sha256"), "bytes": mesh.get("bytes"),
+             "source": mesh.get("meshSource"), "bounds": mesh.get("sourceBounds")}
+            for item in mesh.get("meshes", [])]
+
+
 def decode_effect(root_id, kinds, trees, resolve_material, kind=None, site=None,
-                  script_of=None, resolve_mesh=None):
+                  script_of=None, resolve_mesh=None, resolve_animation=None):
     """One effect prefab: its node tree and the emitters sitting on those nodes.
 
     *resolve_material* maps a renderer typetree and a material slot to the
@@ -256,6 +293,8 @@ def decode_effect(root_id, kinds, trees, resolve_material, kind=None, site=None,
     unsupported = []
     omitted = []
     effectors = []
+    colliders = []
+    animation_components = []
     emitters = {}
     for game_object, path in sorted(node_of.items(), key=lambda item: item[1]):
         component_ids = list(_component_ids(trees.get(game_object, {})))
@@ -276,12 +315,12 @@ def decode_effect(root_id, kinds, trees, resolve_material, kind=None, site=None,
                     # to draw from, and the shape cannot be carried out at all.
                     mesh, gap = resolve_mesh(
                         (trees[component].get("ShapeModule") or {}).get("m_Mesh") or {})
-                    shape["meshes"] = ([{"file": mesh["file"], "node": item["node"]}
-                                        for item in mesh.get("meshes", [])]
-                                       if mesh is not None else [])
+                    shape["meshes"] = (_geometry_references(mesh) if mesh is not None else [])
                     if gap is not None:
                         unsupported.append(dict(gap, node=path))
-                emitters.setdefault(path, {"node": path})["system"] = system
+                entry = emitters.setdefault(path, {"node": path})
+                entry["system"] = system
+                entry["systemPathId"] = str(component)
                 for gap in gaps:
                     unsupported.append(dict(gap, node=path))
             elif component_kind == "ParticleSystemRenderer":
@@ -291,17 +330,55 @@ def decode_effect(root_id, kinds, trees, resolve_material, kind=None, site=None,
                 trail = (resolve_material(tree, TRAIL_MATERIAL_SLOT)
                          if slots > TRAIL_MATERIAL_SLOT else None)
                 entry["renderer"] = decode_renderer(tree, resolve_material(tree), trail)
+                entry["rendererPathId"] = str(component)
                 if entry["renderer"]["renderMode"] == MESH_RENDER_MODE:
-                    mesh, gap = ((None, None) if resolve_mesh is None
-                                 else resolve_mesh(tree.get("m_Mesh") or {}))
-                    entry["renderer"]["meshes"] = []
-                    if mesh is not None:
-                        entry["renderer"]["meshes"] = [
-                            {"file": mesh["file"], "node": item["node"]}
-                            for item in mesh.get("meshes", [])
-                        ]
-                    if gap is not None:
-                        unsupported.append(dict(gap, node=path))
+                    renderer = entry["renderer"]
+                    renderer["meshes"], renderer["meshSlots"] = [], []
+                    # Preserve all serialized slots and their positions. A null
+                    # secondary slot is not a missing-source error or mesh zero.
+                    for slot in range(4):
+                        suffix = str(slot) if slot else ""
+                        pointer = tree.get(f"m_Mesh{suffix}") or {}
+                        reference = {"fileId": int(pointer.get("m_FileID", 0)),
+                                     "pathId": str(pointer.get("m_PathID", 0))}
+                        descriptor = {"slot": slot, "reference": reference,
+                            "weight": tree.get(f"m_MeshWeighting{suffix}"), "meshes": []}
+                        renderer["meshSlots"].append(descriptor)
+                        if slot and not pointer.get("m_PathID"):
+                            continue
+                        mesh, gap = ((None, None) if resolve_mesh is None else resolve_mesh(pointer))
+                        if mesh is not None:
+                            descriptor["meshes"] = _geometry_references(mesh, slot=slot)
+                            renderer["meshes"].extend(descriptor["meshes"])
+                        if gap is not None:
+                            unsupported.append(dict(gap, node=path, meshSlot=slot))
+            elif component_kind in COLLIDER_COMPONENTS:
+                tree = trees[component]
+                entry = decode_collider(tree, trees.get(game_object, {}),
+                                        component_kind, path)
+                entry["componentPathId"] = str(component)
+                entry["meshes"] = []
+                if component_kind == "MeshCollider":
+                    pointer = tree.get("m_Mesh") or {}
+                    if resolve_mesh is None:
+                        unsupported.append({"node": path, "component": component_kind,
+                                            "reason": "collider mesh resolver not supplied"})
+                    else:
+                        mesh, gap = resolve_mesh(pointer)
+                        if mesh is not None:
+                            entry["meshes"] = _geometry_references(mesh)
+                        if gap is not None:
+                            unsupported.append(dict(gap, node=path,
+                                                    component=component_kind))
+                colliders.append(entry)
+            elif component_kind in ("Animator", "PlayableDirector") and resolve_animation is not None:
+                reference = resolve_animation(component)
+                if reference is not None:
+                    animation_components.append({"node": path, "component": component_kind,
+                                                 **reference})
+                else:
+                    unsupported.append({"node": path, "component": component_kind,
+                                        "reason": "animation component source record unresolved"})
             else:
                 omission = _omission(path, component, component_kind, kinds,
                                      trees, component_ids)
@@ -318,7 +395,12 @@ def decode_effect(root_id, kinds, trees, resolve_material, kind=None, site=None,
                                     "reason": UNMODELLED_COMPONENT})
     effect = {"kind": kind, "site": site, "nodes": nodes,
               "particles": [emitters[path] for path in sorted(emitters)],
+              "colliders": colliders,
+              "collisionSchemaVersion": 1,
+              "animationSchemaVersion": 1,
+              "animationComponents": animation_components,
               "effectors": effectors,
               "effectiveRotation": _effective_rotation(kind, effectors),
+              "lifecycle": effective_lifecycle(kind, effectors),
               "omitted": omitted}
     return effect, unsupported

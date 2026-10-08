@@ -9,8 +9,12 @@ PHENOMENA_BUNDLE = re.compile(
     r"(?P<phenomenon>[0-9]+_[a-z0-9]+)__"
     r"(?P<variant>common|global|unique__[a-z0-9_]+)$")
 
-# Every phenomenon icon lives in this one shared package.
+# Older players use an aggregate thumbnail package; current players also use
+# one package per master iconAssetbundleName. This is a package namespace, not
+# a list of weather types.
 PHENOMENA_THUMBNAIL = "mysekai__thumbnail__phenomena"
+PHENOMENA_THUMBNAIL_ITEM = re.compile(
+    r"^mysekai__thumbnail__phenomena__[A-Za-z0-9_]+$")
 
 # Every package of the site domain lives under one path prefix: the nine sites'
 # scenes, the indoor kit the room sites are assembled from, the room skins, the
@@ -55,6 +59,12 @@ FIXTURE_TIMELINE_PREFIX = "mysekai__fixture_timeline__"
 # exact name leaves such a neighbour visible as ``unsupported`` instead.
 CAMERA_PACKAGE = "mysekai__camera"
 
+# Native furniture details do not infer their character combinations from talk
+# scripts. FixtureReactionDescription loads this exact system package. Claim the
+# one proven package only; a broad ``mysekai__system__`` prefix would silently
+# swallow unrelated future system assets nobody has decoded.
+FIXTURE_REACTION_PACKAGE = "mysekai__system__fixture_reaction_data"
+
 # The talk scripts name their arguments through constant tables, and the tables
 # are in a package of their own rather than in the talk package.  The domain is
 # named after what is read out of it — the constant tables — and not after the
@@ -81,6 +91,66 @@ AVATAR_PART_CATEGORIES = ("skin", "decoration", "penlight")
 # domains are not claimed by this bounded reader.
 HARVEST_TOOL_BUNDLE = re.compile(r"^mysekai__tool__(?:ax|pickax)000[1-5]$")
 
+# The player's hand items (the avatar item view's models, one package per
+# item, each holding the prefab named after its leaf).  Claimed by the path
+# prefix: the item view builds the package path from the item's file name, so a
+# model added under it is extracted instead of reported as unregistered.
+PLAYER_TOOL_MODEL_PREFIX = "mysekai__player_tool_model__"
+PLAYER_TOOL_MODEL_BUNDLE = re.compile(r"^mysekai__player_tool_model__[a-z0-9_]+$")
+
+# The player and harvest effects a site move and a harvest action emit: one
+# package per effect prefab under this path (flying, landing, failed landing,
+# boarding/takeoff, the harvest boost).  Claimed by the path prefix so a new
+# effect under it is extracted instead of being reported as unregistered; the
+# prefix is exactly one level below the weather family's
+# ``mysekai__effect__site__environment__`` and does not overlap it.
+SITE_ACTION_EFFECT_PREFIX = "mysekai__effect__site__harvest__action__"
+SITE_ACTION_EFFECT_BUNDLE = re.compile(
+    r"^mysekai__effect__site__harvest__action__[a-z0-9_]+$")
+
+# The player's foot effects (the dash dust, the water splash): one package per
+# effect under this path, named after the action rather than the prefab
+# (``dash`` holds ``fx_act_user_walking``).  Claimed by the path prefix for the
+# same reason as the harvest-action family; a sibling of it, not overlapping it
+# or the weather family.
+SITE_COMMON_ACTION_EFFECT_PREFIX = "mysekai__effect__site__common__action__"
+SITE_COMMON_ACTION_EFFECT_BUNDLE = re.compile(
+    r"^mysekai__effect__site__common__action__[a-z0-9_]+$")
+
+# The effects a harvest object emits when it is hit, when it disappears, and
+# while it rests (the barrel): one package per effect prefab under
+# ``.../harvest/object/<hit|delete|stay>/<prefab>``, the prefab named exactly as
+# the last path segment.  Claimed by the whole prefix, like its two siblings, so
+# a package added under it later is extracted -- and one whose path does not have
+# that two-segment shape fails by name in the family reader instead of being
+# ignored.  A sibling of the harvest-action prefix; neither contains the other.
+SITE_HARVEST_OBJECT_EFFECT_PREFIX = "mysekai__effect__site__harvest__object__"
+SITE_HARVEST_OBJECT_EFFECT_BUNDLE = re.compile(
+    r"^mysekai__effect__site__harvest__object__[a-z0-9_]+$")
+
+# The home site's effects (the craft effect a workbench emits, the multiplayer
+# avatar appearance): one package per effect prefab under this path, the prefab
+# named after the package leaf.  Claimed by the path prefix like its siblings;
+# a sibling of the harvest prefixes and the weather family, overlapping none.
+SITE_HOME_EFFECT_PREFIX = "mysekai__effect__site__home__"
+SITE_HOME_EFFECT_BUNDLE = re.compile(r"^mysekai__effect__site__home__[a-z0-9_]+$")
+
+# The house door transition (the wipe drawn while the player enters or leaves a
+# house) is one package the door transitioner manager loads by this exact name.
+# Claimed by the exact name, not by a prefix: ``mysekai__mysekai_`` neighbours
+# are unrelated packages nobody has read.
+HOUSE_TRANSITION_PACKAGE = "mysekai__mysekai_house_transition"
+
+# The placement effect a decided furniture placement shows (the field put
+# effect loads this package once by this exact name and instantiates its prefab,
+# named after the leaf, at every put).  Claimed by the exact name, not by the
+# ``mysekai__effect__fixture__`` prefix: the other packages under that prefix are
+# the furniture particle packages' material and mesh companions, read by the
+# fixture particle pass as pointer targets, not effects of their own.
+FIXTURE_PUT_EFFECT_PREFIX = "mysekai__effect__fixture__"
+FIXTURE_PUT_EFFECT_PACKAGE = "mysekai__effect__fixture__fx_fixture_put_01"
+FIXTURE_PUT_EFFECT_BUNDLE = re.compile(r"^mysekai__effect__fixture__fx_fixture_put_01$")
+
 
 @dataclass(frozen=True)
 class Route:
@@ -91,6 +161,18 @@ class Route:
 def route(name):
     if HARVEST_TOOL_BUNDLE.fullmatch(name):
         return Route("harvest-tool", "harvest-tools")
+    if PLAYER_TOOL_MODEL_BUNDLE.fullmatch(name):
+        return Route("player-tool-model", "player-tool-models")
+    if SITE_ACTION_EFFECT_BUNDLE.fullmatch(name):
+        return Route("site-action-effect", "site-action-effects")
+    if SITE_COMMON_ACTION_EFFECT_BUNDLE.fullmatch(name):
+        return Route("site-common-action-effect", "site-common-action-effects")
+    if SITE_HARVEST_OBJECT_EFFECT_BUNDLE.fullmatch(name):
+        return Route("site-harvest-object-effect", "site-harvest-object-effects")
+    if SITE_HOME_EFFECT_BUNDLE.fullmatch(name):
+        return Route("site-home-effect", "site-home-effects")
+    if FIXTURE_PUT_EFFECT_BUNDLE.fullmatch(name):
+        return Route("fixture-put-effect", "fixture-put-effects")
     if "__character__mdl_sd_" in name:
         return Route("character", "characters")
     if name == "mysekai__character_motion":
@@ -107,11 +189,16 @@ def route(name):
         return Route("talk-constants", "fixture-talks")
     if name == CAMERA_PACKAGE:
         return Route("camera", "perf")
+    if name == HOUSE_TRANSITION_PACKAGE:
+        return Route("house-transition", "prefab-package")
+    if name == FIXTURE_REACTION_PACKAGE:
+        return Route("fixture-reaction", "fixture-reactions")
     if name.startswith(AVATAR_PART_PREFIX):
         rest = name[len(AVATAR_PART_PREFIX):]
         if any(rest.startswith(category + "__") for category in AVATAR_PART_CATEGORIES):
             return Route("avatar-part", "avatar-parts")
-    if PHENOMENA_BUNDLE.match(name) or name == PHENOMENA_THUMBNAIL:
+    if (PHENOMENA_BUNDLE.match(name) or name == PHENOMENA_THUMBNAIL
+            or PHENOMENA_THUMBNAIL_ITEM.fullmatch(name)):
         return Route("phenomena", "phenomena")
     if name.startswith(SITE_PREFIX):
         return Route("site", "sites")

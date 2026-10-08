@@ -39,17 +39,22 @@ TRANSFORM_ATTRIBUTES = {1: ("translation", 3), 2: ("rotation", 4),
 # fixed, and every id here is confirmed by the field its bindings address:
 # 224 bindings carry ``m_AnchoredPosition`` (RectTransform), 225 carries
 # ``m_Alpha`` (CanvasGroup), 1 carries ``m_IsActive`` (GameObject), 114 carries
-# ``m_Color`` (a UI Graphic behaviour).
-BINDING_TYPES = {1: "GameObject", 4: "Transform", 114: "MonoBehaviour",
+# ``m_Color`` (a UI Graphic behaviour), 198 carries ``EmissionModule.enabled``
+# (ParticleSystem) and 23 carries ``m_Enabled`` (MeshRenderer); the last two
+# are the class ids of the objects those bindings' paths lead to.
+BINDING_TYPES = {1: "GameObject", 4: "Transform", 23: "MeshRenderer",
+                 114: "MonoBehaviour", 198: "ParticleSystem",
                  224: "RectTransform", 225: "CanvasGroup"}
 
 # Serialized property names a non-transform binding can address, keyed by the
 # CRC-32 the binding carries in place of the name.  Every name is a real
 # serialized field of the class its type id names (the RectTransform set is the
 # typetree's own key list; ``m_Color`` is Graphic's; ``m_Alpha`` is
-# CanvasGroup's; ``m_IsActive`` is GameObject's), and the eight hashes observed
-# in the shipped clips all resolve through it.  A hash the table does not know
-# stays a hash, visibly, rather than being guessed at.
+# CanvasGroup's; ``m_IsActive`` is GameObject's; ``EmissionModule.enabled`` is
+# the ParticleSystem typetree's emission switch; ``m_Enabled`` is a Renderer's),
+# and the ten hashes observed in the shipped clips all resolve through it.  A
+# hash the table does not know stays a hash, visibly, rather than being guessed
+# at.
 ATTRIBUTE_NAMES = {zlib.crc32(name.encode("utf-8")) & 0xFFFFFFFF: name for name in (
     "m_AnchoredPosition.x", "m_AnchoredPosition.y", "m_AnchoredPosition.z",
     "m_SizeDelta.x", "m_SizeDelta.y",
@@ -61,6 +66,7 @@ ATTRIBUTE_NAMES = {zlib.crc32(name.encode("utf-8")) & 0xFFFFFFFF: name for name 
     "m_LocalRotation.w",
     "m_Color.r", "m_Color.g", "m_Color.b", "m_Color.a",
     "m_Alpha", "m_IsActive",
+    "EmissionModule.enabled", "m_Enabled",
 )}
 
 UNDECODABLE = "compiled animation clip could not be decoded"

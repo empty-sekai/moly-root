@@ -1,1 +1,3 @@
 * text=auto eol=lf
+# Unified patch context lines intentionally begin with one literal space.
+integration/*.patch whitespace=-blank-at-eol

@@ -30,6 +30,10 @@ release with `python -m pack.verify --out <package-directory>` and list unused
 blobs with `python -m pack.gc --out <package-directory> --json`. Source, overlay,
 and output roots must be separate. See the [integrity and distribution notes](docs/reliability.md).
 
+See [Asset Architecture v2](docs/asset-architecture-v2.md) for shared regional CAS,
+v2 publication, pinned releases, offline migration and GC. Region/version select
+content while existing `moly://` logical asset paths remain unchanged.
+
 You need Python ≥ 3.11 and a modern browser. Game data (the `AssetBundleInfoNew` package manifest, an asset endpoint, or already-decrypted bundles) is supplied by you; this repository bundles and distributes none of it.
 
 1. Install from the repository root (this provides the `moly` command): `python -m pip install .`

@@ -12,7 +12,10 @@ Every time value is a ``double`` in Unity and is exported as such: no
 ``float()``, no rounding.  Animation curves are exported with their keyframes,
 not as a bare "has a curve" flag, because the shape of the easing curve is the
 thing the timeline says.  Markers live on the track (``TrackAsset.m_Markers``),
-not on any clip, and are read out into a class histogram.
+not on any clip: each track record lists its markers in serialized order, and
+the class histogram counts them.  A ``SignalEmitter`` carries its time, its
+``retroactive`` and ``emitOnce`` flags and the ``SignalAsset`` it emits (its
+identity and name); any other marker class keeps its own serialized fields.
 
 Three fields must not be confused (this lane re-produces the distinction the F6
 contract fixed; it must not re-derive it):
@@ -44,7 +47,7 @@ import UnityPy
 from core.unity import configure_fallback_unity_version
 
 from core.assets.packages import PackageStore
-from core.assets.identity import json_pointers, reference
+from core.assets.identity import identity, json_pointers, reference
 from core.jsonio import write_json
 
 configure_fallback_unity_version()
@@ -85,7 +88,19 @@ CURVE_LEVEL_FIELDS = ("m_PreInfinity", "m_PostInfinity", "m_RotationOrder")
 
 KEYS = ("animationTracks", "animClipNonzero", "infiniteClipNonzero",
         "infiniteOnly", "clipOnly", "bothOrNeither", "clips", "parentBad",
-        "parentUnresolved", "droppedKeys")
+        "parentUnresolved", "droppedKeys", "infiniteClipsDecoded",
+        "infiniteClipsUnresolved")
+
+# The TrackAsset base fields a track row already carries (or that only link
+# the track into its timeline).  Every other serialized field is the track
+# class's own setting (an AnimationTrack's infinite-clip offsets and
+# extrapolation, its track offset mode, a ControlTrack's or SETrack's own
+# fields) and rides on the row under ``fields``, verbatim.
+TRACK_BASE_FIELDS = frozenset({
+    "m_Name", "m_Version", LEGACY_ANIMCLIP, INFINITE_CLIP, "m_Locked",
+    "m_Muted", "m_CustomPlayableFullTypename", "m_Curves", "m_Parent",
+    "m_Children", "m_Markers", "m_Clips",
+})
 
 
 def _is_track(tree):
@@ -130,6 +145,8 @@ class _Walker:
         self.asset_classes = {}
         self.assets_followed = 0
         self.assets_unresolved = 0
+        self.infinite_decoded = 0
+        self.infinite_unresolved = 0
 
     def _asset_ref(self, record, pointer):
         """Read the object a clip's ``m_Asset`` names; return its table index.
@@ -249,21 +266,104 @@ class _Walker:
             INFINITE_CLIP: tree.get(INFINITE_CLIP),
             "clips": clips,
         }
-        self._read_markers(record, tree.get("m_Markers"))
+        track["markers"] = self._read_markers(record, tree.get("m_Markers"))
+        track["fields"] = {key: value for key, value in tree.items()
+                           if key not in TRACK_BASE_FIELDS
+                           and key not in ASSET_ENGINE_FIELDS}
+        if (tree.get(INFINITE_CLIP) or {}).get("m_PathID"):
+            track["infiniteClip"] = self._read_infinite_clip(
+                record, tree.get(INFINITE_CLIP))
         return track
 
+    def _read_infinite_clip(self, record, pointer):
+        """The track-level recorded clip, its curves decoded verbatim.
+
+        The clip is an ``AnimationClip`` of this package that the track plays
+        on its bound Animator for the whole timeline; its generic bindings
+        name paths below that Animator (hash ``0`` is the Animator's own
+        object).  Each decoded curve slot is kept in its storage form:
+        ``cubic`` keys carry the four polynomial coefficients ``(a, b, c, d)``
+        of the segment starting at the key, evaluated as
+        ``((a·dt + b)·dt + c)·dt + d``; ``linear`` keys one sample; ``const``
+        one value.  Nothing is resampled or resolved against a hierarchy.
+        An unresolved pointer yields ``None`` and an ``unread`` entry.
+        """
+        from chara.mecanim.clip import curve_index_map, decode
+
+        target = _resolve(self.store, record, pointer)
+        if target is None:
+            self.infinite_unresolved += 1
+            self.document["unread"].append({"kind": "infiniteClip",
+                                            "pointer": pointer})
+            return None
+        clip_record, clip_id = target
+        tree = clip_record.tree(clip_id) or {}
+        muscle = tree.get("m_MuscleClip") or {}
+        bindings = (tree.get("m_ClipBindingConstant") or {}).get("genericBindings") or []
+        index, _ = curve_index_map(bindings)
+        curves = []
+        for slot, (kind, points) in sorted(decode(tree).items()):
+            info = index.get(slot)
+            typeid, attribute, path_hash, component = info if info else (None,) * 4
+            curves.append({
+                "slot": slot, "typeID": typeid, "attribute": attribute,
+                "path": path_hash, "component": component, "kind": kind,
+                "keys": [[float(time), *([float(x) for x in value]
+                                         if kind == "cubic" else [float(value)])]
+                         for time, value in points],
+            })
+        self.infinite_decoded += 1
+        return {
+            "asset": identity(clip_record, clip_id),
+            "name": tree.get("m_Name", ""),
+            "legacy": bool(tree.get("m_Legacy")),
+            "sampleRate": tree.get("m_SampleRate"),
+            "sourceStartTime": muscle.get("m_StartTime"),
+            "sourceStopTime": muscle.get("m_StopTime"),
+            "sourceLoopTime": bool(muscle.get("m_LoopTime")),
+            "bindings": [{"path": int(b["path"]), "attribute": b["attribute"],
+                          "typeID": b["typeID"], "customType": b.get("customType"),
+                          "isPPtrCurve": b.get("isPPtrCurve")}
+                         for b in bindings],
+            "curves": curves,
+        }
+
     def _read_markers(self, record, markers):
-        """Count markers by ``MonoScript.m_ClassName``; unresolved = unread."""
+        """The track's markers in serialized order, counted by class.
+
+        Classes are told apart by ``MonoScript.m_ClassName``; an unresolved
+        pointer is an ``unread`` entry, never a silent drop.
+        """
+        rows = []
         if not isinstance(markers, dict):
-            return
+            return rows
         for entry in markers.get("m_Objects") or []:
             pointer = entry.get("ptr_Value") or entry
             target = _resolve(self.store, record, pointer)
             if target is None:
                 self.document["unread"].append({"kind": "marker", "pointer": pointer})
                 continue
-            cls = target[0].script_of(target[1])
+            marker_record, marker_id = target
+            cls = marker_record.script_of(marker_id)
             self.marker_classes[cls] = self.marker_classes.get(cls, 0) + 1
+            tree = marker_record.tree(marker_id) or {}
+            row = {"class": cls, "asset": identity(marker_record, marker_id),
+                   "name": tree.get("m_Name", "")}
+            if cls == "SignalEmitter":
+                signal = reference(self.store, marker_record, tree.get("m_Asset"))
+                signal_name = None
+                resolved = _resolve(self.store, marker_record, tree.get("m_Asset"))
+                if resolved is not None:
+                    signal_name = (resolved[0].tree(resolved[1]) or {}).get("m_Name")
+                row.update({"time": tree.get("m_Time"),
+                            "retroactive": bool(tree.get("m_Retroactive")),
+                            "emitOnce": bool(tree.get("m_EmitOnce")),
+                            "signal": signal, "signalName": signal_name})
+            else:
+                row["fields"] = {key: value for key, value in tree.items()
+                                 if key not in ASSET_ENGINE_FIELDS and key != "m_Name"}
+            rows.append(row)
+        return rows
 
 
 def _walk_package(store, name, out):
@@ -318,6 +418,8 @@ def _counts(tracks, anim, walker, marker_classes):
     counts["parentBad"] = walker.parent_bad
     counts["parentUnresolved"] = walker.parent_unresolved
     counts["droppedKeys"] = walker.dropped
+    counts["infiniteClipsDecoded"] = walker.infinite_decoded
+    counts["infiniteClipsUnresolved"] = walker.infinite_unresolved
     counts["doubleExact"] = walker.double_ok
     counts["doubleChecked"] = walker.double_checked
     # Asset account: how many pointers were followed, how many distinct payloads

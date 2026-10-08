@@ -337,6 +337,8 @@ def parse_blob(blob, platform, stride=None):
     is how a truncated name gets mistaken for evidence.
     """
     entries, stride = entry_table(blob, stride)
+    if any(segment != 0 for _, _, segment in entries):
+        raise BlobError("segment-relative records require parse_segments; do not flatten first")
     header_size = 4 + len(entries) * stride
     balance = account(blob, entries, header_size)
     if not balance["balanced"]:
@@ -356,3 +358,56 @@ def uniform_names(parsed):
     for record in parsed["records"]:
         names |= record_names(record)
     return names
+
+
+def parse_segments(segments, platform, stride=None):
+    """Parse preserved LZ4 segments, respecting each index entry's segment id.
+
+    Offsets are relative to the referenced segment, NOT to their concatenation.
+    The table is in segment zero; records may start at offset zero in another
+    segment. Keep both source-local and flattened offsets for reproducible byte
+    accounting. The single-segment path retains the older 8/12-byte inference.
+    """
+    segments = tuple(bytes(part) for part in segments)
+    if not segments:
+        raise BlobError("a shader platform has no decompressed segments")
+    if len(segments) == 1:
+        return parse_blob(segments[0], platform, stride)
+    if stride not in (None, ENTRY_STRIDE_SEGMENTED):
+        raise BlobError("multiple segments require a segment id in each index entry")
+    table = segments[0]
+    if len(table) < 4:
+        raise BlobError("segment zero holds no index table")
+    count, = struct.unpack_from("<i", table, 0)
+    header_size = 4 + count * ENTRY_STRIDE_SEGMENTED
+    if count < 0 or header_size > len(table):
+        raise BlobError(f"index table of {count} entries exceeds segment zero")
+    bases, total = [], 0
+    for part in segments:
+        bases.append(total)
+        total += len(part)
+    entries, local_offsets = [], []
+    for index in range(count):
+        offset, length, segment = struct.unpack_from(
+            "<3i", table, 4 + index * ENTRY_STRIDE_SEGMENTED)
+        if segment < 0 or segment >= len(segments):
+            raise BlobError(f"record {index} references missing segment {segment}")
+        if offset < 0 or length < 0 or offset + length > len(segments[segment]):
+            raise BlobError(f"record {index} exceeds its source segment {segment}")
+        if segment == 0 and offset < header_size:
+            raise BlobError(f"record {index} overlaps the index table")
+        entries.append((bases[segment] + offset, length, segment))
+        local_offsets.append(offset)
+    joined = b"".join(segments)
+    balance = account(joined, entries, header_size)
+    if not balance["balanced"]:
+        raise BlobError(f"segmented index table does not balance: {balance}")
+    records = []
+    for index, (offset, length, segment) in enumerate(entries):
+        record = parse_record(joined, offset, length)
+        record.update(index=index, segment=segment,
+                      sourceOffset=local_offsets[index])
+        records.append(record)
+    return {"platform": int(platform), "stride": ENTRY_STRIDE_SEGMENTED,
+            "segmentSizes": [len(part) for part in segments],
+            "records": records, "account": balance}

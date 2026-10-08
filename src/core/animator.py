@@ -146,7 +146,9 @@ def _controller(store, record, path_id):
     version_types = {"AnimatorController", "ControllerConstant", "StateConstant",
                      "BlendTreeNodeConstant", "LeafInfoConstant"}
     versions = {}
-    for node in record.objects[path_id].serialized_type.node.traverse():
+    # The serialized layout: the file's embedded typetree when it has one (a
+    # bundle), the engine's class layout otherwise (player data).
+    for node in record.objects[path_id]._get_typetree_node().traverse():
         if node.m_Type in version_types:
             versions.setdefault(node.m_Type, set()).add(node.m_Version)
     versions = {kind: sorted(values) for kind, values in versions.items()}

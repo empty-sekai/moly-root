@@ -6,12 +6,14 @@ import hashlib
 import json
 import os
 import re
+import struct
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from .download import download_file
+from .atomic import PUBLIC_FILE_MODE, write_json as write_atomic_json
 from .master import record_master_inputs
 
 MAGIC = b"\x10\x00\x00\x00"
@@ -34,6 +36,21 @@ def decrypt_bundle(data: bytes) -> bytes:
     if not body.startswith(b"UnityFS"):
         raise DecryptError(f"decrypted payload is not UnityFS: {bytes(body[:7])!r}")
     return bytes(body)
+
+def unityfs_declared_size(data: bytes) -> int:
+    """Return the UnityFS container's own big-endian byte length."""
+    if not data.startswith(b"UnityFS\0"):
+        raise DecryptError("decoded payload has no UnityFS signature terminator")
+    try:
+        offset = len(b"UnityFS\0") + 4
+        offset = data.index(b"\0", offset) + 1
+        offset = data.index(b"\0", offset) + 1
+        declared = struct.unpack_from(">Q", data, offset)[0]
+    except (ValueError, struct.error) as exc:
+        raise DecryptError("truncated UnityFS header") from exc
+    if declared != len(data):
+        raise DecryptError(f"UnityFS header length {declared} does not match payload {len(data)}")
+    return declared
 
 
 @dataclass(frozen=True)
@@ -86,7 +103,7 @@ class Manifest:
         reserved = {}
         for entry in self.entries.values():
             key = flatten(entry.bundle_name)
-            for suffix in ("", ".part", ".part.json", ".lock"):
+            for suffix in ("", ".part", ".part.json", ".lock", ".verified.json"):
                 path = (key + suffix).casefold()
                 if path in reserved:
                     raise ValueError(f"bundle temporary-file collision: {entry.bundle_name!r}, {reserved[path]!r}")
@@ -257,13 +274,37 @@ def expected_hash(entry: BundleEntry) -> str | None:
     return None
 
 
-def download_one(entry: BundleEntry, asset_base_url: str, raw_dir: Path, retries: int = 4) -> dict:
+def download_one(entry: BundleEntry, asset_base_url: str, raw_dir: Path, retries: int = 4,
+                 headers: dict[str, str] | None = None, *, verify_bundle: bool = False) -> dict:
     url = build_download_url(asset_base_url, entry)
     target = Path(raw_dir) / _bundle_key(entry.bundle_name)
+    verified = target.with_name(target.name + ".verified.json")
+    try:
+        prior = json.loads(verified.read_text(encoding="utf-8"))
+        if (prior.get("version") == 1 and prior.get("url") == url
+                and isinstance(prior.get("unityfsBytes"), int) and prior["unityfsBytes"] > 0
+                and prior.get("identity") == entry.raw and prior.get("sha256") == sha256(target)
+                and prior.get("bytes") == target.stat().st_size
+                and prior.get("unityfsBytes") == prior.get("decodedBytes")):
+            return {"bundleName": entry.bundle_name, "url": url,
+                    "sha256": prior["sha256"], "bytes": prior["bytes"], "cached": True}
+    except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
     receipt = download_file(url, target, expected_hash=expected_hash(entry),
                             identity=entry.raw, retries=retries,
-                            headers={"User-Agent": "UnityPlayer/2022.3.62f3"})
-    return {"bundleName": entry.bundle_name, "url": url, **receipt}
+                            headers={"User-Agent": "UnityPlayer/2022.3.62f3", **(headers or {})})
+    # Transport callers may fetch arbitrary opaque payloads. Bundle validation
+    # is an explicit stage, required by the JP raw-cache pipeline below.
+    if not verify_bundle:
+        return {"bundleName": entry.bundle_name, "url": url, **receipt}
+    decoded = decrypt_bundle(target.read_bytes())
+    internal_size = unityfs_declared_size(decoded)
+    marker = {"version": 1, "url": url, "identity": entry.raw, "sha256": receipt["sha256"],
+              "bytes": receipt["bytes"], "decodedBytes": len(decoded),
+              "unityfsBytes": internal_size, "manifestFileSize": entry.file_size,
+              "manifestSizeMatches": not entry.file_size or entry.file_size == len(decoded)}
+    write_atomic_json(verified, marker, mode=PUBLIC_FILE_MODE)
+    return {"bundleName": entry.bundle_name, "url": url, **receipt, "cached": False}
 
 
 @record_master_inputs
@@ -271,7 +312,10 @@ def pull(manifest_path: str, out: str | os.PathLike[str] | None, asset_base_url:
          workers: int = 8, retries: int = 4, master: str | None = None,
          master_cache: str | None = None,
          extract_out: str | os.PathLike[str] | None = None,
-         vgmstream: str | None = None, ffmpeg: str | None = None) -> dict:
+         vgmstream: str | None = None, ffmpeg: str | None = None,
+         fixture_meshes: bool = False, fixture_particles: bool = False,
+         roots: Iterable[str] | None = None,
+         download_headers: dict[str, str] | None = None, *, verify_bundle: bool = False) -> dict:
     asset_base_url = asset_base(asset_base_url)
     manifest = Manifest.load(manifest_path)
     output = Path(out) if out else Path.cwd() / "moly-pull-output"
@@ -281,14 +325,16 @@ def pull(manifest_path: str, out: str | os.PathLike[str] | None, asset_base_url:
     # no master, none of them is a root and the report says why.
     audio_names, audio = sound_roots(master, master_cache)
     audio["roots"], audio["notInManifest"] = manifest.sound_entries(audio_names)
-    entries = manifest.required_bundles(manifest.roots(audio=audio_names))
+    selected_roots = list(roots) if roots is not None else manifest.roots(audio=audio_names)
+    required = manifest.required_bundles(selected_roots)
+    entries = [entry for entry in required if not entry.in_player_build]
     # Extraction artifacts default to local-data so the browser example opens
     # right after a pull; the download/decrypt workspace stays under `output`.
     raw_dir, decrypted_dir = output / "raw", output / "decrypted"
     extracted_dir = Path(extract_out) if extract_out else Path.cwd() / "local-data"
     raw_dir.mkdir(exist_ok=True); decrypted_dir.mkdir(exist_ok=True)
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futures = [pool.submit(download_one, entry, asset_base_url, raw_dir, retries) for entry in entries]
+        futures = [pool.submit(download_one, entry, asset_base_url, raw_dir, retries, download_headers) for entry in entries]
         downloads = [future.result() for future in as_completed(futures)]
     for entry in entries:
         source = raw_dir / flatten(entry.bundle_name)
@@ -298,9 +344,12 @@ def pull(manifest_path: str, out: str | os.PathLike[str] | None, asset_base_url:
     from .extract import extract_manifest
     report = extract_manifest(names, decrypted_dir, extracted_dir, master=master,
                               master_cache=master_cache, vgmstream=vgmstream,
-                              ffmpeg=ffmpeg)
+                              ffmpeg=ffmpeg,
+                              fixture_meshes=fixture_meshes,
+                              fixture_particles=fixture_particles)
     (output / "downloads.json").write_text(json.dumps(sorted(downloads, key=lambda item: item["bundleName"]), indent=2, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
     return {"requiredBundles": len(entries), "downloads": len(downloads),
+            "builtinRequirements": [entry.bundle_name for entry in required if entry.in_player_build],
             "audio": audio, "extraction": report}
 
 

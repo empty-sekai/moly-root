@@ -3,7 +3,7 @@ when the third-party ``jsonschema`` package is not installed.
 
 This is not a general-purpose schema engine -- it implements exactly the
 keywords manifest.schema.json actually uses: ``type``, ``const``, ``enum``,
-``pattern``, ``minLength``, ``minItems``, ``minimum``, ``required``,
+``pattern``, ``minLength``, ``minItems``, ``minimum``, ``maximum``, ``required``,
 ``properties``, ``additionalProperties`` (boolean form only), ``items``,
 ``allOf``, ``if``/``then``, and ``$ref`` resolved against a document-local
 ``$defs`` map. Anything outside that set is silently ignored rather than
@@ -68,6 +68,8 @@ def iter_errors(instance, schema: dict, root: dict, path: str = ""):
     if isinstance(instance, (int, float)) and not isinstance(instance, bool):
         if "minimum" in schema and instance < schema["minimum"]:
             yield f"{path or '<root>'}: {instance} < minimum {schema['minimum']}"
+        if "maximum" in schema and instance > schema["maximum"]:
+            yield f"{path or '<root>'}: {instance} > maximum {schema['maximum']}"
 
     if isinstance(instance, list):
         if "minItems" in schema and len(instance) < schema["minItems"]:

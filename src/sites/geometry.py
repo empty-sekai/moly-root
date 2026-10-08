@@ -7,7 +7,7 @@ one package becomes **one glTF binary with a scene per root**: mesh and material
 data are written once and shared between the scenes, the site prefab is the default
 scene, and nothing in the package is dropped for being a sibling of it.
 
-Two rules here are load-bearing and are not conveniences:
+Three rules here are load-bearing and are not conveniences:
 
 * **The geometry keeps the package's own origin.**  Every site prefab root ships at
   local position zero, and the world offset of a site is applied by the game at
@@ -24,6 +24,13 @@ Two rules here are load-bearing and are not conveniences:
   surface that is both drawn and collided with, which appears in both places and is
   flagged where it appears.
 
+* **Every texture coordinate set a drawn mesh authors is written.**  The room kit's
+  wall meshes carry four sets and its floor and entrance meshes three, and the room
+  shaders read the third and fourth (the wall's edge darkening, a skin texture's
+  set); a writer that stopped at two would drop what the source draws with.  They
+  are decoded from the mesh's own channel table, not from a mesh helper's view.
+  Collision surfaces are not drawn and keep the first two sets.
+
 Materials cannot be translated: every site material points at a shader in a package
 this domain does not own, so what is exported is the shader's family name, its
 subshader tags and the whole authored property block.  The glTF material beside it
@@ -34,8 +41,9 @@ import hashlib
 import struct
 
 from core.assets.packages import pairs
-from core.gltf import GLB, unity_to_gltf_pos, unity_to_gltf_quat
-from core.mesh import add_mesh, compose_mesh, mesh_accessors
+from core.colliders import decode_collider
+from core.gltf import COORDINATE_SPACE, SOURCE_SPACE, GLB, unity_to_gltf_pos, unity_to_gltf_quat
+from core.mesh import AUTHORED_UV_SETS, add_mesh, compose_mesh, mesh_accessors
 from core.shader_passes import declared_passes
 
 TRANSFORMS = ("Transform", "RectTransform")
@@ -436,7 +444,8 @@ class Builder:
         if mesh_key not in self._buffers:
             try:
                 self._buffers[mesh_key] = mesh_accessors(
-                    self.glb, owner.objects[path_id], tree)
+                    self.glb, owner.objects[path_id], tree,
+                    uv_sets=AUTHORED_UV_SETS)
             except Exception as exc:      # unreadable or non-triangle mesh
                 self._buffers[mesh_key] = None
                 return None, f"{MESH_UNREADABLE}: {type(exc).__name__}: {exc}"
@@ -527,9 +536,15 @@ def digest(blob):
 def collider_document(store, record, path_id, kind, node_path):
     """One collider: which surface it is and what it is shaped by."""
     tree = record.tree(path_id)
-    entry = {"node": node_path, "component": kind,
-             "enabled": bool(tree.get("m_Enabled", 1))}
+    game_object_id = (tree.get("m_GameObject") or {}).get("m_PathID", 0)
+    game_object = record.tree(game_object_id) if game_object_id in record.kinds else {}
+    entry = decode_collider(tree, game_object, kind, node_path)
+    entry.update(schemaVersion=2, coordinateUnits="source-unity-unit",
+                 fieldCoordinateSpace={})
     if kind == "MeshCollider":
+        # The separately written surface is reflected by single_mesh_blob;
+        # source pointer/name identities remain data, not spatial values.
+        entry["geometryCoordinateContract"] = COORDINATE_SPACE
         pointer = tree.get("m_Mesh") or {}
         entry["convex"] = bool(tree.get("m_Convex", 0))
         target = store.follow(record, pointer)
@@ -541,12 +556,15 @@ def collider_document(store, record, path_id, kind, node_path):
             entry["reason"] = MESH_NULL if not pointer.get("m_PathID", 0) \
                 else MESH_NOT_IN_PACKAGE
     elif kind == "BoxCollider":
+        entry["fieldCoordinateSpace"] = {"center": SOURCE_SPACE, "size": SOURCE_SPACE}
         entry["center"] = _vec(tree.get("m_Center"), "xyz")
         entry["size"] = _vec(tree.get("m_Size"), "xyz")
     elif kind == "SphereCollider":
+        entry["fieldCoordinateSpace"] = {"center": SOURCE_SPACE}
         entry["center"] = _vec(tree.get("m_Center"), "xyz")
         entry["radius"] = float(tree.get("m_Radius", 0.0))
     elif kind == "CapsuleCollider":
+        entry["fieldCoordinateSpace"] = {"center": SOURCE_SPACE, "direction": SOURCE_SPACE}
         entry["center"] = _vec(tree.get("m_Center"), "xyz")
         entry["radius"] = float(tree.get("m_Radius", 0.0))
         entry["height"] = float(tree.get("m_Height", 0.0))
