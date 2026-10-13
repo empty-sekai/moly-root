@@ -24,6 +24,9 @@ Three exports share the player-data reader in :mod:`core.player_resources`:
 * :func:`export_stencil_shadow` -- from the same configuration, the character
   stencil-shadow colour and the per-attribute material rendering settings (render
   queue and the pass state the material builder writes into a material).
+* :func:`export_npc_dither` and :func:`export_site_object_dither` -- from the
+  same configuration, the camera-dither distances of the NPC view and of the
+  site objects and tree fixtures.
 """
 import hashlib
 from pathlib import Path
@@ -511,8 +514,30 @@ NPC_DITHER_SEMANTICS = {
 }
 
 
-def export_npc_dither(player_data, types, out_path):
-    """Write the NPC camera-dither distances of the graphics configuration."""
+SITE_OBJECT_DITHER_FIELDS = (
+    "_siteObjectDitherMinDistance", "_siteObjectDitherDistanceLength",
+    "_siteObjectFarDitherAlpha",
+    "_treeFixtureViewDitherMinDistance", "_treeFixtureViewDitherDistanceLength",
+    "_treeFixtureViewFarDitherAlpha",
+)
+
+SITE_OBJECT_DITHER_SEMANTICS = {
+    "source": ("the ScriptableObject the graphics configuration loader loads with "
+               "Resources.Load at the load name above; `values` are six of its "
+               "serialized fields, verbatim, under their serialized names"),
+    "values": ("32-bit floats as serialized, written here widened to double; `bits` "
+               "holds each float's IEEE-754 word as eight hex digits"),
+    "use": ("the site objects' camera dither reads the `_siteObject` three: an object "
+            "whose position is nearer the camera than the player avatar, in view-space "
+            "depth, is dithered with alpha = far dither alpha * clamp((its depth - "
+            "(the camera's near clip plane + min distance)) / distance length, 0, 1); "
+            "the tree fixtures' camera dither reads the `_treeFixtureView` three in the "
+            "same formula"),
+}
+
+
+def _export_float_fields(player_data, types, out_path, fields, semantics):
+    """Write *fields* of the graphics configuration, each a serialized float."""
     import struct
     store, package, version = open_player_data(player_data, types)
     rows, record, path_id = _scriptable(store, package, GRAPHICS_CONFIG,
@@ -520,7 +545,7 @@ def export_npc_dither(player_data, types, out_path):
     obj = record.objects[path_id]
     tree = record.tree(path_id)           # the generated node must consume every byte
     values, bits = {}, {}
-    for field in NPC_DITHER_FIELDS:
+    for field in fields:
         if field not in tree:
             raise ValueError(f"{GRAPHICS_CONFIG}: no serialized {field}")
         value = tree[field]
@@ -529,11 +554,11 @@ def export_npc_dither(player_data, types, out_path):
         values[field] = float(value)
         bits[field] = struct.pack(">f", value).hex()
     document = {
-        "version": 1, "semantics": NPC_DITHER_SEMANTICS,
+        "version": 1, "semantics": semantics,
         "source": {"loadName": GRAPHICS_CONFIG,
                    "containerEntries": [row["loadName"] for row in rows],
                    "serializedFile": record.archive, "pathId": str(path_id),
-                   "class": GRAPHICS_CONFIG_CLASS, "fields": list(NPC_DITHER_FIELDS),
+                   "class": GRAPHICS_CONFIG_CLASS, "fields": list(fields),
                    "byteSize": int(obj.byte_size), "rawSha256": _sha(obj.get_raw_data()),
                    "unityVersion": version,
                    "decode": "typetree generated from the build's assembly stubs; "
@@ -544,6 +569,19 @@ def export_npc_dither(player_data, types, out_path):
     write_json(out_path, document)
     return {"path": str(out_path), "values": len(values),
             "byteSize": int(obj.byte_size)}
+
+
+def export_npc_dither(player_data, types, out_path):
+    """Write the NPC camera-dither distances of the graphics configuration."""
+    return _export_float_fields(player_data, types, out_path, NPC_DITHER_FIELDS,
+                                NPC_DITHER_SEMANTICS)
+
+
+def export_site_object_dither(player_data, types, out_path):
+    """Write the site-object and tree-fixture camera-dither distances of the
+    graphics configuration."""
+    return _export_float_fields(player_data, types, out_path, SITE_OBJECT_DITHER_FIELDS,
+                                SITE_OBJECT_DITHER_SEMANTICS)
 
 
 def export_stencil_shadow(player_data, types, out_path):

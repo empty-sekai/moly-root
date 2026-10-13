@@ -701,15 +701,17 @@ def _effect_resources_artifact(out, player_data, player_types, declarations, bun
 
 def _graphics_config_artifact(out, player_data, player_types):
     """Build ``graphics-config/drop-item-shade.json``,
-    ``graphics-config/stencil-shadow.json`` and
-    ``graphics-config/npc-dither.json`` from the player data.
+    ``graphics-config/stencil-shadow.json``, ``graphics-config/npc-dither.json``
+    and ``graphics-config/site-object-dither.json`` from the player data.
 
     The drop-item shading values are a field of the MySekai graphics
     configuration, a ScriptableObject in the player data's Resources; the
     document names the global shader property each value is written to. The
     stencil-shadow document carries the same object's character stencil-shadow
     colour and its per-attribute material rendering settings. The NPC dither
-    document carries the four distances of the NPC view's camera dither.
+    document carries the four distances of the NPC view's camera dither, the
+    site-object dither document the distances and far alpha of the site
+    objects' and tree fixtures' camera dither.
     """
     what = "the graphics configuration"
     entry = _resources_entry("graphics-config/", what, player_data, player_types)
@@ -719,18 +721,21 @@ def _graphics_config_artifact(out, player_data, player_types):
              "status": "failed", "counts": {}, "error": ""}
     try:
         from .resource_exports import (export_drop_item_shade, export_npc_dither,
-                                       export_stencil_shadow)
+                                       export_site_object_dither, export_stencil_shadow)
         path = out / "graphics-config" / "drop-item-shade.json"
         summary = export_drop_item_shade(player_data, str(player_types), path)
         stencil = export_stencil_shadow(player_data, str(player_types),
                                         out / "graphics-config" / "stencil-shadow.json")
         dither = export_npc_dither(player_data, str(player_types),
                                    out / "graphics-config" / "npc-dither.json")
+        site_dither = export_site_object_dither(
+            player_data, str(player_types), out / "graphics-config" / "site-object-dither.json")
         entry.update(status="succeeded", path=str(path),
                      counts={"values": summary["values"],
                              "byteSize": summary["byteSize"],
                              "stencilShadowAttributes": stencil["attributes"],
-                             "npcDitherValues": dither["values"]})
+                             "npcDitherValues": dither["values"],
+                             "siteObjectDitherValues": site_dither["values"]})
     except Exception as exc:
         entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
     return entry
