@@ -41,7 +41,8 @@ def master_paths(tree, prefix, *, all_tables=False):
 EXTRA_TABLES = {"gameCharacters.json", "gameCharacterUnits.json", "unitProfiles.json",
                 "characterProfiles.json", "wordings.json", "clientConfigs.json", "birthdayParties.json", "character2ds.json",
                 "birthdayPartyDeliveryRewards.json", "birthdayPartyDeliveryPointBonuses.json",
-                "birthdayPartyDeliveryTotalRewards.json", "resourceBoxDetails.json"}
+                "birthdayPartyDeliveryTotalRewards.json", "resourceBoxDetails.json",
+                "birthdayPartyScenarios.json"}
 
 
 def _read(url, limit=256 * 1024 * 1024):

@@ -709,6 +709,27 @@ def main(argv=None):
                            help="decrypted mysekai__system__fixture_reaction_data bundle")
     reactions.add_argument("--out", required=True,
                            help="output fixture-reactions.json path")
+    bem = sub.add_parser("birthday-end-motions",
+                         help="export the waving motion the birthday party "
+                              "plays as it closes (row per character unit)")
+    bem.add_argument("--bundle", required=True,
+                     help="decrypted mysekai__birthday__birthday_end_character_motion_data_list bundle")
+    bem.add_argument("--out", required=True,
+                     help="output birthday-end-character-motions.json path")
+    bpt = sub.add_parser("birthday-party-talks",
+                         help="attach the birthday-party scripts one master "
+                              "table names to an existing talks.json")
+    bpt.add_argument("--master", help="directory of caller-supplied master tables")
+    bpt.add_argument("--master-url", nargs="?", const="", default=None,
+                     help="base URL to append <table>.json to; no value uses the public default base")
+    bpt.add_argument("--master-cache", help="where fetched tables are cached")
+    bpt.add_argument("--bundle", required=True, help="talk scenario bundle")
+    bpt.add_argument("--lib", help="decrypted lib package carrying the constant "
+                                   "tables the scripts name")
+    bpt.add_argument("--talks", required=True,
+                     help="an existing talks.json whose birthdayParty block is "
+                          "computed from this master partition")
+    bpt.add_argument("--out", required=True)
     f = sub.add_parser("fixture-master-slice",
                        help="slice mysekaiFixtures down to the columns the "
                             "runtime reads (button gating and footprint)")
@@ -1253,6 +1274,24 @@ def main(argv=None):
     if args.cmd == "fixture-reactions":
         from fixtures.reactions import extract_fixture_reactions
         print(json.dumps(extract_fixture_reactions(args.bundle, args.out), ensure_ascii=False))
+        return 0
+
+    if args.cmd == "birthday-end-motions":
+        from sites.birthday_end_motions import extract_birthday_end_motions
+        print(json.dumps(extract_birthday_end_motions(args.bundle, args.out),
+                         ensure_ascii=False))
+        return 0
+
+    if args.cmd == "birthday-party-talks":
+        source, cache = _master_source(args)
+        if not source:
+            ap.error("birthday-party-talks needs master tables: "
+                     "pass --master <dir> or --master-url")
+        from chara.talks import attach_birthday_talks
+        print(json.dumps(attach_birthday_talks(source, args.bundle, args.talks,
+                                               args.out, master_cache=cache,
+                                               lib_bundle=args.lib),
+                         ensure_ascii=False))
         return 0
 
     if args.cmd == "fixture-master-slice":

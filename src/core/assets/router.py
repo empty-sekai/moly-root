@@ -65,6 +65,12 @@ CAMERA_PACKAGE = "mysekai__camera"
 # swallow unrelated future system assets nobody has decoded.
 FIXTURE_REACTION_PACKAGE = "mysekai__system__fixture_reaction_data"
 
+# The waving motion a birthday party plays as it closes lives in one package the
+# presenter loads by this exact name.  Claimed by the exact name for the same
+# reason as the fixture-reaction package: the family's other packages have not
+# been read.
+BIRTHDAY_END_MOTION_PACKAGE = "mysekai__birthday__birthday_end_character_motion_data_list"
+
 # The talk scripts name their arguments through constant tables, and the tables
 # are in a package of their own rather than in the talk package.  The domain is
 # named after what is read out of it — the constant tables — and not after the
@@ -193,6 +199,8 @@ def route(name):
         return Route("house-transition", "prefab-package")
     if name == FIXTURE_REACTION_PACKAGE:
         return Route("fixture-reaction", "fixture-reactions")
+    if name == BIRTHDAY_END_MOTION_PACKAGE:
+        return Route("birthday-end-motion", "birthday-end-character-motions")
     if name.startswith(AVATAR_PART_PREFIX):
         rest = name[len(AVATAR_PART_PREFIX):]
         if any(rest.startswith(category + "__") for category in AVATAR_PART_CATEGORIES):

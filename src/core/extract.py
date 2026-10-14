@@ -126,6 +126,9 @@ DOMAIN_OBJECT_TYPES = {
     "talk-constants": {"TextAsset"},
     "camera": {"MonoBehaviour", "PlayableDirector"},
     "fixture-reaction": {"MonoBehaviour"},
+    # The waving motion a party plays as it closes: the list is one
+    # ScriptableObject, so the domain declares that one behaviour type.
+    "birthday-end-motion": {"MonoBehaviour"},
     "fixture-interface": {"MonoBehaviour", "Mesh", "MeshFilter", "MeshRenderer",
                           "SkinnedMeshRenderer", "Material", "Texture2D"},
     "cutscene-timeline": {"MonoBehaviour", "PlayableDirector", "AnimationClip"},
@@ -324,6 +327,7 @@ FIXED_ARTIFACT_PATHS = (
     "fixture-interface/attach-points.json",
     "fixture-interface/areas.json",
     "fixture-reactions.json",
+    "birthday-end-character-motions.json",
     "fixture-models/",
     "fixture-particles/index.json",
     "fixture-gimmick/gimmicks.json",
@@ -1455,6 +1459,13 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
     fixture_talks_asked = False
     fixture_talks_result = None
     fixture_talks_error = None
+    # The party scripts ride in the same document as the ordinary corpus but
+    # are selected by a table of their own, which a master partition may lack.
+    # Their outcome is a row of its own for the same reason as the furniture
+    # family's: a partition without the table must read as an input gap, not
+    # as a talk document that happens to hold no party.
+    birthday_talks_asked = False
+    birthday_talks_result = None
     for name in names:
         entry = _entry(name)
         target = route(name)
@@ -1585,6 +1596,10 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             elif target.domain == "fixture-reaction":
                 from fixtures.reactions import extract_fixture_reactions
                 result = extract_fixture_reactions(str(bundle), out / "fixture-reactions.json")
+            elif target.domain == "birthday-end-motion":
+                from sites.birthday_end_motions import extract_birthday_end_motions
+                result = extract_birthday_end_motions(
+                    str(bundle), out / "birthday-end-character-motions.json")
             elif target.domain == "fixture-interface":
                 if name in fixture_errors:
                     raise FileNotFoundError(fixture_errors[name])
@@ -1640,6 +1655,8 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
                 result = extract_talks(master, str(bundle), str(out / "talks.json"),
                                        master_cache=master_cache,
                                        lib_bundle=lib_bundle)
+                birthday_talks_asked = True
+                birthday_talks_result = (result or {}).get("birthdayParty")
                 # One package, two families.  ``chara/talks`` reads the
                 # single-character talks that happen away from any fixture;
                 # ``perf/fixture_talks`` reads the beside-the-fixture ones.
@@ -1825,6 +1842,23 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             "unresolvedControllers": unresolved_controllers,
             "missingDependencies": sorted(fixture_errors),
             "error": gimmick_error})
+    if birthday_talks_asked:
+        party = birthday_talks_result or {}
+        if not party:
+            party_status = "failed"
+            party_error = ("the talk extraction returned no account of the "
+                           "birthday-party block")
+        elif party.get("status") == "absent":
+            party_status = "skipped"
+            party_error = ("the master tables carry no birthdayPartyScenarios; "
+                           "talks.json holds the block as absent")
+        else:
+            party_status, party_error = "succeeded", ""
+        report["derived"].append({
+            "artifact": "talks.json#birthdayParty",
+            "status": party_status,
+            "counts": {k: v for k, v in party.items() if isinstance(v, int)},
+            "error": party_error})
     if fixture_talks_asked:
         report["derived"].append({
             "artifact": "fixture-talks/talks.json",

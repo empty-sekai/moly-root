@@ -35,7 +35,10 @@ merge by name, and a family a run asked nothing about keeps its previous
 summary — so a consumer can tell "never asked" from "asked and missing" over
 everything on disk, not just the last run.  A talk corpus arrives in either of
 the two shapes the repo's talk extractors write, talks grouped under ``units``
-or a flat ``talks`` list, and both name voice cues the same way.
+or a flat ``talks`` list (the fixture corpus), and both name voice cues the same way.
+A talk document may also carry a ``birthdayParty`` block: the party scripts'
+cues are the same form, but they live in the birthday voice bank each script
+names, so they are asked of that package rather than of the plain one.
 """
 import json
 from pathlib import Path
@@ -140,6 +143,20 @@ def voice_requests(document):
                 stem = script if isinstance(script, str) and cue.startswith(
                     CUE_PREFIX + script + "_") else voice_stem(cue)
                 requests.setdefault(TALK_VOICE + stem, set()).add(cue)
+    # A party script's cues live in the bank the talk engine loads under the
+    # Birthday context, not in the plain one, and the talk document names that
+    # bank per script; it is read from there rather than assumed from a prefix.
+    party = (document.get("birthdayParty") or {}).get("talks") or {}
+    for script, talk in party.items():
+        bank = talk.get("voiceBank")
+        for cue in talk.get("voices") or []:
+            if not cue.startswith(CUE_PREFIX):
+                continue
+            if not isinstance(bank, str) or not bank:
+                raise ValueError(f"party script {script} names voice cues but "
+                                 f"no voice bank")
+            cues.add(cue)
+            requests.setdefault(bank, set()).add(cue)
     requests = {name: sorted(values) for name, values in requests.items()}
     return requests, sorted(cues)
 

@@ -49,7 +49,8 @@ REGION_UI_DOCUMENTS = {
 DONOR_TWIN_SUFFIXES = ("", ".gz")
 REQUIRED = ("characters.json", "manifest.json", "motion-library.glb", "talks.json",
             "fixture-talks/out/fixture-talks.json", "mysekai-fixtures.json",
-            "fixture-reactions.json", "fixture-models/index.json", "fixture-models/player-data.json",
+            "fixture-reactions.json", "birthday-end-character-motions.json",
+            "fixture-models/index.json", "fixture-models/player-data.json",
             "fixture-thumbnails/fixture-thumbnails.json", "client-config.json",
             "actor-animations/index.json", "avatar/motion/sd-switch-simple.glb", "site/sites.json", "site-groups.json", "tweet-tables.json", "tweets.json",
             f"{REGION_UI_DIRECTORY}/ui-manifest.json",
@@ -295,6 +296,33 @@ def prepare_runtime(descriptor_path, workspace, out, *, ui_from=None, ui_jp_from
             return extract_fixture_reactions(bundle, out / "fixture-reactions.json")
         step("source-fixture-reactions-v1", fixture_reactions)
 
+        def birthday_end_motions():
+            from sites.birthday_end_motions import PACKAGE, extract_birthday_end_motions
+            bundle = workspace / "decrypted" / PACKAGE
+            if not bundle.is_file():
+                raise JPError(f"birthday end-motion source is missing: {PACKAGE}")
+            return extract_birthday_end_motions(bundle, out / "birthday-end-character-motions.json")
+        step("source-birthday-end-motions-v1", birthday_end_motions)
+
+        def birthday_party_talks():
+            # The party scripts are selected by a master table, so the block is
+            # computed against this runtime's master rather than copied with
+            # the extraction, which may have been read from another partition.
+            # Only that block changes; the ordinary corpus stays as extracted.
+            from chara.talks import LIB_PACKAGE, attach_birthday_talks
+            talk_bundle = workspace / "decrypted" / "mysekai__talk__scenario__talk"
+            lib_bundle = workspace / "decrypted" / LIB_PACKAGE
+            for bundle in (talk_bundle, lib_bundle):
+                if not bundle.is_file():
+                    raise JPError(f"birthday-party talk source is missing: {bundle.name}")
+            report = attach_birthday_talks(str(master_dir), str(talk_bundle),
+                                           str(out / "talks.json"), str(out / "talks.json"),
+                                           lib_bundle=str(lib_bundle))
+            if report.get("status") != "present":
+                raise JPError("the runtime master carries no birthdayPartyScenarios")
+            return {key: value for key, value in report.items() if isinstance(value, int)}
+        step("birthday-party-talks-v1", birthday_party_talks)
+
         def thumbnail_outputs():
             from ui.fixture_thumbnail import export_fixture_thumbnail_packages
             packages = sorted((workspace / "decrypted").glob("mysekai__thumbnail__fixture__*"))
@@ -411,14 +439,16 @@ def prepare_runtime(descriptor_path, workspace, out, *, ui_from=None, ui_jp_from
                 from phenomena.audio_corpus import extract_audio_corpus
                 general = _json(out / "talks.json")
                 fixtures = _json(out / "fixture-talks/out/fixture-talks.json")
-                combined = {"units": general.get("units", {}), "talks": fixtures.get("talks", [])}
+                combined = {"units": general.get("units", {}),
+                            "talks": fixtures.get("talks", []),
+                            "birthdayParty": general.get("birthdayParty", {})}
                 request = workspace / "runtime-voice-requests.json"
                 write_json(request, combined, mode=PUBLIC_FILE_MODE)
                 result = extract_audio_corpus(request, descriptor_path, workspace / "decrypted", out / "phenomena",
                                               decoder=decoder, transcoder=transcoder,
                                               progress=(lambda row: progress("audio: " + json.dumps(row))) if progress else None)
                 return {"families": result["families"], "partVoiceCues": result["partVoiceCues"]}
-            step("runtime-sound-corpus-v2", sounds)
+            step("runtime-sound-corpus-v3", sounds)
         checkpoint("validation")
         missing = [name for name in REQUIRED if not (out / name).is_file()]
         if missing:

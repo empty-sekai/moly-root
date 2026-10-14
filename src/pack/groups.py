@@ -47,6 +47,7 @@ ROOT_DOCUMENTS = (
     "mysekai-site-footsteps.json", "mysekai-fixture-footsteps.json",
     "mysekai-site-harvest-unavailable-spots.json",
     "browser-base.json", "fixture-reactions.json",
+    "birthday-end-character-motions.json",
     "configs.json", "avatar-costumes.json", "avatar-accessories.json",
     "avatar-skin-colors.json", "avatar-coordinates.json",
     "time-manager.json", "materials.json", "mysekai-fixture-put-sounds.json",

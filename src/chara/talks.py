@@ -9,10 +9,11 @@ import json
 import os
 import re
 from collections import Counter, defaultdict
+from pathlib import Path
 
 import UnityPy
 
-from core.master import Master
+from core.master import Master, MissingTable
 
 
 ALL_CALL_OPS = (
@@ -36,6 +37,23 @@ SPEED_ZERO_MEANS = 1.0
 # call defaults and helper code rather than tables.
 LIB_PACKAGE = "mysekai__talk__scenario__lib"
 CONSTANT_ASSET = "defines.lua"
+
+# The birthday-party campaign's talk table and the package its scripts live in.
+# A party names one script per sequence through this table; the script bodies
+# ride in the same package as every other talk.  The table is not one of the
+# tables the ordinary talk corpus is read from, so it is read separately here
+# rather than widening that corpus: a party script has no site group, no term
+# and no condition group, and putting it under a unit would make it answerable
+# as that unit's ordinary talk.
+BIRTHDAY_SCENARIOS_TABLE = "birthdayPartyScenarios"
+TALK_PACKAGE = "mysekai/talk/scenario/talk"
+
+# The voice package the talk engine loads under the Birthday context, formatted
+# with the script name: the same bank the cut-scene's voices come from, and the
+# client's own bundle-name helper for it.  Outside that context the engine
+# formats the plain bank instead, and a party script has no package there.
+BIRTHDAY_VOICE_BANK = "mysekai/talk/birthday/voice/{0}"
+TALK_VOICE_BANK = "mysekai/talk/voice/{0}"
 
 # Tokens the constant source does not define, each with why, over both talk
 # batches -- the single-character one and the furniture-side one.  A residual
@@ -625,6 +643,134 @@ def _tweet(row):
     }
 
 
+def birthday_talks(master, assets, tables, scalars):
+    """The party scripts one master table names, parsed like any other talk.
+
+    *master* is a :class:`core.master.Master`; *assets* is
+    ``{TextAsset name: text}`` of the talk package.  Returns ``(block,
+    report)`` where *block* is the ``birthdayParty`` part of the talk
+    document and *report* is a flat count of what it carries.
+
+    Two things are read out of the source table rather than derived: the rows
+    themselves, in table order, and -- under ``index``, keyed by party then
+    sequence -- the script each (party, seq) resolves to.  The client looks a
+    script up with the first row whose party and sequence match, so when one
+    key is carried by more than one row the index keeps the first and the
+    report counts the shadowed rows: the choice is a number, not a silence.
+
+    Every script is parsed by the same :func:`parse_script` the ordinary corpus
+    uses, so a step means the same thing in both.  Its voice cues come with the
+    package the engine loads them from: under the Birthday context the client
+    formats the birthday bank with the script name, and that bank -- not the
+    plain one -- is where these cues live.  The block is ``absent`` with its
+    reason when the master has no such table, a state a reader has to be told:
+    a partition without the table is not an empty product, it is a partition
+    that was never read.
+    """
+    block = {
+        "status": "present",
+        "semantics": {
+            "table": (
+                f"{BIRTHDAY_SCENARIOS_TABLE} verbatim in master-table order; "
+                "each row is {id, birthdayPartyId, seq, lua} and the script "
+                f"body of a row is the asset <lua>.lua in {TALK_PACKAGE}"
+            ),
+            "index": (
+                "the script each (birthdayPartyId, seq) resolves to -- the key "
+                "the client's own lookup uses. When one key is carried by more "
+                "than one row the index keeps the first, the same choice the "
+                "client's FirstOrDefault makes; rows that were shadowed are "
+                "counted in summary.shadowedRows"
+            ),
+            "talks": (
+                "one entry per distinct script, parsed by the same parser as "
+                "the ordinary corpus, so a step means the same thing in both"
+            ),
+            "voiceBank": (
+                "the package the talk engine loads a script's voice cues from. "
+                "The client formats it with the script name under the Birthday "
+                "context, which is the only context a party script is played "
+                f"in, so it is the birthday bank ({BIRTHDAY_VOICE_BANK} with "
+                f"the script name) and not the plain one ({TALK_VOICE_BANK}). "
+                "The ordinary corpus's cues live in the plain bank; a consumer "
+                "that reads both documents must not assume one bank"
+            ),
+        },
+    }
+    try:
+        rows = master.table(BIRTHDAY_SCENARIOS_TABLE)
+    except MissingTable as exc:
+        block["status"] = "absent"
+        block["reason"] = (
+            f"{BIRTHDAY_SCENARIOS_TABLE} is not in the supplied master tables; "
+            "a party script is named only by that table, so no party script "
+            "can be selected from this partition")
+        block["error"] = str(exc)
+        block["scenarios"] = []
+        block["index"] = {}
+        block["talks"] = {}
+        block["summary"] = {"scenarios": 0, "parties": 0, "scripts": 0,
+                            "steps": 0, "voiceCues": 0, "shadowedRows": 0}
+        return block, dict(block["summary"], status="absent")
+    index, shadowed = {}, []
+    talks, scripts, steps_total, cues_total = {}, [], 0, 0
+    for row in rows:
+        for field in ("id", "birthdayPartyId", "seq", "lua"):
+            if row.get(field) is None:
+                raise ValueError(
+                    f"{BIRTHDAY_SCENARIOS_TABLE} row {row.get('id')}: "
+                    f"incomplete row: {field}={row.get(field)!r}")
+        lua = str(row["lua"])
+        party = str(row["birthdayPartyId"])
+        seq = index.setdefault(party, {})
+        if str(row["seq"]) in seq:
+            shadowed.append({"birthdayPartyId": row["birthdayPartyId"],
+                             "seq": row["seq"], "lua": lua,
+                             "first": seq[str(row["seq"])]})
+        else:
+            seq[str(row["seq"])] = lua
+        if lua in talks:
+            continue
+        asset_name = lua if lua.endswith(".lua") else lua + ".lua"
+        script = _asset_named(assets, asset_name)
+        if script is None:
+            raise LookupError(
+                f"{BIRTHDAY_SCENARIOS_TABLE} row {row.get('id')}: script asset "
+                f"not found in {TALK_PACKAGE}: {asset_name}")
+        scripts.append(script)
+        parsed = parse_script(script, tables, scalars, script_name=asset_name)
+        talks[lua] = {
+            "lua": lua,
+            "voiceBank": BIRTHDAY_VOICE_BANK.format(lua),
+            "voices": parsed["voices"],
+            "steps": parsed["steps"],
+        }
+        steps_total += len(parsed["steps"])
+        cues_total += len(parsed["voices"])
+    block["scenarios"] = rows
+    block["index"] = index
+    block["talks"] = talks
+    block["summary"] = {
+        "scenarios": len(rows),
+        "parties": len(index),
+        "scripts": len(talks),
+        "steps": steps_total,
+        "voiceCues": cues_total,
+        "shadowedRows": len(shadowed),
+    }
+    census = constant_census(scripts, tables)
+    block["summary"]["constants"] = {
+        "referenced": census["referenced"],
+        "resolved": census["resolved"],
+        "unresolved": census["unresolved"],
+    }
+    if shadowed:
+        block["shadowedRows"] = shadowed
+    report = {key: value for key, value in block["summary"].items()
+              if isinstance(value, int)}
+    return block, dict(report, status="present")
+
+
 def _semantics(source):
     return {
         "selection": (
@@ -760,6 +906,11 @@ def extract_talks(master_source, talk_bundle, out_path, master_cache=None,
         "units": units,
         "summary": summary,
     }
+    # The party block is appended after the ordinary corpus and holds its own
+    # semantics and summary, so every key the ordinary corpus already had keeps
+    # its exact serialized form.
+    birthday, birthday_report = birthday_talks(master, assets, tables, scalars)
+    doc["birthdayParty"] = birthday
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(doc, handle, ensure_ascii=False, indent=1, allow_nan=False)
@@ -769,4 +920,65 @@ def extract_talks(master_source, talk_bundle, out_path, master_cache=None,
         "filter": filter_report,
         "constantSource": constant_source,
         "constantTables": {key: len(value) for key, value in tables.items()},
+        "birthdayParty": birthday_report,
+    }
+
+
+def attach_birthday_talks(master_source, talk_bundle, talks_path, out_path,
+                          master_cache=None, lib_bundle=None):
+    """Write *talks_path* to *out_path* with the party block computed here.
+
+    The party scripts are selected by a master table, and the master a run is
+    pointed at decides which ones it has: a partition taken at one revision
+    carries a party the next one does not.  So the block is computed where the
+    writing partition is known rather than copied along with the rest of the
+    document.
+
+    Every other key keeps its value: the document is parsed, one key is set,
+    and the result is checked against the input before it is written, so the
+    ordinary corpus cannot move under this call.  Written in the shape
+    :func:`extract_talks` writes, a document that came from that function
+    keeps its other keys byte for byte.  That is the point of a separate entry
+    point -- re-running the corpus extraction would re-read the master and
+    could move the ordinary talks too, which is a different change from the
+    one the caller asked for.
+
+    The constant tables must be the ones the ordinary corpus was resolved
+    against: a party script read without them would carry source tokens where
+    the ordinary talks carry values, and one document would then say two
+    things about one step.
+    """
+    master = Master(master_source, cache_dir=master_cache)
+    assets = _text_assets(talk_bundle)
+    tables, scalars, constant_source = read_constants(lib_bundle)
+    document = json.loads(Path(talks_path).read_text(encoding="utf-8"))
+    if not isinstance(document.get("units"), dict):
+        raise ValueError(f"{talks_path}: no units object; this is not a talk "
+                         f"document")
+    ordinary = ((document.get("summary") or {}).get("constants") or {}).get("source")
+    mine = f"{LIB_PACKAGE}/{constant_source}" if constant_source else None
+    if ordinary != mine:
+        raise ValueError(f"{talks_path}: the ordinary corpus was resolved "
+                         f"against {ordinary!r} and this call against "
+                         f"{mine!r}; pass the same constant package")
+    before = {key: value for key, value in document.items()
+              if key != "birthdayParty"}
+    block, report = birthday_talks(master, assets, tables, scalars)
+    document["birthdayParty"] = block
+    text = json.dumps(document, ensure_ascii=False, indent=1, allow_nan=False)
+    after = {key: value for key, value in json.loads(text).items()
+             if key != "birthdayParty"}
+    if after != before:
+        raise ValueError("the party block is not the only thing this call "
+                         "would change; the document is not written")
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+        handle.write("\n")
+    return {
+        **report,
+        "constantSource": constant_source,
+        "preservedKeys": list(before),
+        "json": str(out),
     }

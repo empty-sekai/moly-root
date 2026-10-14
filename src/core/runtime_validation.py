@@ -75,6 +75,10 @@ def validate_runtime(asset_root, *, verify_actor_hashes=False):
     furniture = read("fixture-talks/out/fixture-talks.json")
     talks = furniture.get("talks", []) + [talk for unit in general.get("units", {}).values()
                                           for talk in unit.get("talks", [])]
+    # The party scripts ride in the same document but name their own voice bank,
+    # and their cues are asked of it; leaving them out here would report a
+    # runtime as ready over cues nothing checked.
+    talks += list((general.get("birthdayParty") or {}).get("talks", {}).values())
     requested_cues = {cue for talk in talks for cue in talk.get("voices", [])}
     absent_cues = sorted(requested_cues - available_cues)
     report = {"version": 1, "region": master.get("region"), "gameVersion": master.get("gameVersion"),
