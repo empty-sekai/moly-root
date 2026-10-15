@@ -1,9 +1,13 @@
 """Single command-line entry point for bundle extraction."""
 import argparse
+import os
 import warnings
 import json
 import sys
 from pathlib import Path
+
+# Extraction output root; MOLY_EXTRACT_OUT lets a workspace keep it outside the checkout.
+DEFAULT_DATA_ROOT = os.environ.get("MOLY_EXTRACT_OUT") or "local-data"
 
 
 PLAYER_DATA_HELP = ("the player data: the container file (assets/bin/Data/data.unity3d), "
@@ -114,7 +118,7 @@ def main(argv=None):
     p.add_argument("--manifest", required=True)
     p.add_argument("--out", help="download/decrypt workspace (default: moly-pull-output)")
     p.add_argument("--extract-out", default=None,
-                   help="where extraction artifacts go (default: local-data, which stays out of version control)")
+                   help="where extraction artifacts go (default: $MOLY_EXTRACT_OUT, else local-data, which stays out of version control)")
     p.add_argument("--json", action="store_true",
                    help="print the full JSON report to stdout instead of a summary")
     p.add_argument("--asset-base-url", required=True)
@@ -132,8 +136,8 @@ def main(argv=None):
                    help="optional bundle list; omitted = select every supported "
                         "asset-pack bundle found under --bundles")
     x.add_argument("--bundles", required=True)
-    x.add_argument("--out", default="local-data",
-                   help="output directory (default: local-data, which stays out of version control)")
+    x.add_argument("--out", default=DEFAULT_DATA_ROOT,
+                   help="output directory (default: $MOLY_EXTRACT_OUT, else local-data, which stays out of version control)")
     x.add_argument("--json", action="store_true",
                    help="print the full JSON report to stdout instead of a summary")
     x.add_argument("--master", help="directory of caller-supplied master tables")
@@ -839,7 +843,7 @@ def main(argv=None):
     stl.add_argument("--package", action="append", required=True,
                      help="site package to export, e.g. mysekai__site__field__festivalgarden; repeatable")
     fc = sub.add_parser("fixture-coverage", help="join every fixture master ID to extracted coverage")
-    fc.add_argument("--data-root", default="local-data"); fc.add_argument("--out")
+    fc.add_argument("--data-root", default=DEFAULT_DATA_ROOT); fc.add_argument("--out")
     fc.add_argument("--region"); fc.add_argument("--source-version"); fc.add_argument("--json", action="store_true")
     jp = sub.add_parser("jp", help="discover and download Japanese-server original bundles")
     jsub = jp.add_subparsers(dest="jp_command", required=True)
@@ -999,7 +1003,7 @@ def main(argv=None):
                 print(f"audio: {len(audio['notInManifest'])} named sound packages "
                       f"are not in this manifest: "
                       f"{', '.join(audio['notInManifest'])}")
-            _print_extract_summary(report["extraction"], args.extract_out or "local-data")
+            _print_extract_summary(report["extraction"], args.extract_out or DEFAULT_DATA_ROOT)
         return 1 if _extract_failed(report["extraction"]) else 0
     if args.cmd == "shader":
         import UnityPy

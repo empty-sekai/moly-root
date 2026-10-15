@@ -1222,7 +1222,7 @@ def load_clip_targets(targets_dir):
 def _repo_data_dir():
     # Generated data belongs to the caller's workspace, including after a
     # wheel install where this module lives under site-packages.
-    return os.path.join(os.getcwd(), "local-data")
+    return os.environ.get("MOLY_EXTRACT_OUT") or os.path.join(os.getcwd(), "local-data")
 
 
 def main(argv=None):

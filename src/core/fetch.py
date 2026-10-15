@@ -331,7 +331,7 @@ def pull(manifest_path: str, out: str | os.PathLike[str] | None, asset_base_url:
     # Extraction artifacts default to local-data so the browser example opens
     # right after a pull; the download/decrypt workspace stays under `output`.
     raw_dir, decrypted_dir = output / "raw", output / "decrypted"
-    extracted_dir = Path(extract_out) if extract_out else Path.cwd() / "local-data"
+    extracted_dir = Path(extract_out or os.environ.get("MOLY_EXTRACT_OUT") or Path.cwd() / "local-data")
     raw_dir.mkdir(exist_ok=True); decrypted_dir.mkdir(exist_ok=True)
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         futures = [pool.submit(download_one, entry, asset_base_url, raw_dir, retries, download_headers) for entry in entries]
