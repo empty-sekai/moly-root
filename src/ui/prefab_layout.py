@@ -102,7 +102,7 @@ SCREENS = {
              "CommonRewardSubWindowDialog", "UIPartsThumbnailWithBalloon",
              "UIPartsHonorImage"),
     "hud": ("ScreenLayerMysekaiHUD", "ScreenLayerMysekaiSiteMove",
-            "MysekaiWeatherDialog", "ScreenLayerMysekaiNotice",
+            "MysekaiWeatherDialog", "MysekaiWeatherCell", "ScreenLayerMysekaiNotice",
             "ScreenLayerMysekaiHarvestSummary"),
     "shell": ("ScreenLayerMysekaiHome", "ScreenLayerMysekaiMyRoom",
               "ScreenLayerMysekaiHarvest", "ScreenLayerMysekaiDelivery"),

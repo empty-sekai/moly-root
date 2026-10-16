@@ -14,6 +14,17 @@ def decode_dialog_base(r: talk.Reader) -> dict:
     return fields
 
 
+def decode_common1_button_dialog(r: talk.Reader) -> dict:
+    """Common1ButtonDialog : DialogBase: the dialog chain, then the one button
+    and the two message slots it shows the message in (one of the two carries
+    it depending on the layout)."""
+    fields = decode_dialog_base(r)
+    fields.update({name: r.pptr() for name in (
+        "positiveButton", "positiveButtonLabel", "positiveButtonLabelText",
+        "messageBodyText", "messageBodyTextMesh")})
+    return fields
+
+
 def decode_subwindow_dialog(r: talk.Reader) -> dict:
     fields = decode_dialog_base(r)
     fields.update({name: r.pptr() for name in ("messageBodyText", "subWindowComponent", "animation")})
@@ -119,6 +130,30 @@ def decode_refresh_birthday_plant_dialog(r: talk.Reader) -> dict:
     return fields
 
 
+def decode_mysekai_weather_dialog(r: talk.Reader) -> dict:
+    """MysekaiWeatherDialog : Common1ButtonDialog: the dialog chain, then the
+    two weather cell lists (today, tomorrow), the label the last row's date
+    goes into, the time period labels and the highlight node moved onto the
+    current one.  The schedules the cells are set up with and which period is
+    current are runtime state."""
+    fields = decode_common1_button_dialog(r)
+    fields.update({"_weatherCellList": talk.decode_pptr_list(r), "_tomorrowLabel": r.pptr(),
+                   "_timeLabel": talk.decode_pptr_list(r), "_timeHighlight": r.pptr()})
+    return fields
+
+
+def decode_mysekai_weather_cell_list(r: talk.Reader) -> dict:
+    """MysekaiWeatherCellList: the content transform its cells are
+    instantiated under and the cell prefab they are instantiated from."""
+    return {name: r.pptr() for name in ("_content", "_weatherCellPrefab")}
+
+
+def decode_mysekai_weather_cell(r: talk.Reader) -> dict:
+    """MysekaiWeatherCell: the phenomena thumbnail image, the cover its setup
+    opens for a period that has passed and the weather name label."""
+    return {name: r.pptr() for name in ("_weatherIcon", "_cover", "_weatherLabel")}
+
+
 def decode_subwindow_component(r: talk.Reader) -> dict:
     return dict(windowType=r.i32(), contentTransform=r.pptr(), backPanelTransform=r.pptr(),
                 closeButtons=talk.decode_pptr_list(r))
@@ -145,6 +180,9 @@ DECODERS = {
     "Sekai.Honor.UIPartsLiveMasterHonorLevel": decode_live_master_honor_level,
     "Sekai.RankLive.NumberView": decode_rank_live_number_view,
     "Sekai.Mysekai.MysekaiRefreshBirthdayPlantSubWindowDialog": decode_refresh_birthday_plant_dialog,
+    "Sekai.Mysekai.MysekaiWeatherDialog": decode_mysekai_weather_dialog,
+    "Sekai.Mysekai.MysekaiWeatherCellList": decode_mysekai_weather_cell_list,
+    "Sekai.Mysekai.MysekaiWeatherCell": decode_mysekai_weather_cell,
     "Sekai.SubWindowComponent": decode_subwindow_component,
     "Sekai.SubWindowSlideAnimation": decode_subwindow_slide_animation,
     "Sekai.SubWindowFadeAnimation": decode_subwindow_fade_animation,
