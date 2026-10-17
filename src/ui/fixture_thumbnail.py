@@ -158,3 +158,51 @@ def export_fixture_thumbnail_packages(bundles, masters, out_dir):
     }
     write_json(out / "fixture-thumbnails.json", result)
     return result
+
+
+def export_surface_thumbnail_routes(master_json, data_root, out_dir):
+    """Join surface appearances to their already exported room-skin texture.
+
+    A wall/floor appearance is not in the shared thumbnail bundle: its base
+    texture belongs to the room-skin family, which exports it as a PNG, and the
+    fixture presentation already links the row to the skin document, channel and
+    colour. This reads those two joins and the PNG header; it decodes nothing,
+    so the image is the exact file the store already serves under its skin path.
+    """
+    master_json, root, out = Path(master_json), Path(data_root), Path(out_dir)
+    document = json.loads((out / "fixture-thumbnails.json").read_text(encoding="utf-8"))
+    rows = json.loads(master_json.read_text(encoding="utf-8"))["fixtures"]
+    routes = []
+    for row in sorted(rows, key=lambda value: int(value["id"])):
+        preview = row.get("preview") or {}
+        if preview.get("kind") != "surface":
+            continue
+        channel = preview.get("channel")
+        source = preview.get("sourceFile")
+        color_id = preview.get("colorId")
+        if not channel or not source or type(color_id) is not int:
+            raise ValueError(f"fixture {row['id']}: incomplete surface preview")
+        skin = json.loads((root / source).read_text(encoding="utf-8"))
+        binding = next((item for item in skin.get("surfaceBindings", {}).get(channel, [])
+                        if item.get("colorId") == color_id), None)
+        if binding is None:
+            raise ValueError(f"fixture {row['id']}: no {channel} binding for colour {color_id}")
+        image = Path(source).parent / binding["texture"]
+        raw = (root / image).read_bytes()
+        header = raw[:24]
+        if header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+            raise ValueError(f"fixture {row['id']}: surface texture is not a PNG: {image}")
+        routes.append({
+            "fixtureId": int(row["id"]),
+            "assetbundleName": row["assetbundleName"],
+            "channel": channel,
+            "colorId": color_id,
+            "path": image.as_posix(),
+            "width": int.from_bytes(header[16:20], "big"),
+            "height": int.from_bytes(header[20:24], "big"),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        })
+    document["surfaceRoutes"] = routes
+    document.setdefault("coverage", {}).update(surfaceFixtures=len(routes), surfaceVariants=len(routes))
+    write_json(out / "fixture-thumbnails.json", document)
+    return {"surfaceFixtures": len(routes)}

@@ -16,6 +16,8 @@ def fixture_row(**overrides):
         "mysekaiFixturePlayerActionType": "one_shot",
         "mysekaiFixturePutType": "none",
         "mysekaiFixtureHandleType": "none",
+        "mysekaiFixtureMainGenreId": 26,
+        "mysekaiFixtureSubGenreId": 26,
         "gridSize": {"width": 2, "depth": 2, "height": 4},
         "mysekaiFixturePutSoundId": 4,
     }
@@ -45,7 +47,16 @@ def test_localized_name_and_description_preserve_source_text(tmp_path):
     assert row["playerActionTypeValue"] == 3
     assert (row["gridWidth"], row["gridDepth"], row["gridHeight"]) == (2, 2, 4)
     assert row["putSoundId"] == 4
+    assert (row["mainGenreId"], row["subGenreId"]) == (26, 26)
     assert report["summary"]["playerActionType"] == {"one_shot": 1}
+
+
+def test_absent_sub_genre_is_exported_as_null(tmp_path):
+    row = fixture_row()
+    row.pop("mysekaiFixtureSubGenreId")
+    document, _ = export(tmp_path, [row])
+    assert document["fixtures"][0]["mainGenreId"] == 26
+    assert document["fixtures"][0]["subGenreId"] is None
 
 
 @pytest.mark.parametrize("optional", [{}, {"name": None, "flavorText": None}])

@@ -419,10 +419,15 @@ def prepare_runtime(descriptor_path, workspace, out, *, ui_from=None, ui_jp_from
 
         def fixture_presentation():
             from fixtures.presentation import extract_custom_geometry, enrich_presentation
+            from ui.fixture_thumbnail import export_surface_thumbnail_routes
             geometry = extract_custom_geometry(workspace / "decrypted", out / "custom-fixture-models")
             if geometry.get("failed"):
                 raise JPError("custom fixture source geometry extraction failed")
-            return enrich_presentation(master, out)
+            report = enrich_presentation(master, out)
+            thumbnails = out / "fixture-thumbnails/fixture-thumbnails.json"
+            if thumbnails.is_file():
+                export_surface_thumbnail_routes(out / "mysekai-fixtures.json", out, thumbnails.parent)
+            return report
         step("fixture-presentation-v1", fixture_presentation)
         from fixtures.timeline_capabilities import build_capabilities
         step("fixture-timeline-capabilities-v1", lambda: {"prefabs": len(build_capabilities(out)["prefabs"])})

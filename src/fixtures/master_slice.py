@@ -19,6 +19,10 @@ to the placement effect; it is kept as the integer id and the small table is
 exported on its own (``mysekai-fixture-put-sounds.json``), so this slice holds no
 cue names of its own.
 
+``mysekaiFixtureMainGenreId`` and ``mysekaiFixtureSubGenreId`` are the catalog
+classification: they join the row to ``mysekaiFixtureMainGenres`` /
+``mysekaiFixtureSubGenres``. The sub genre is null on rows without one.
+
 ``assetbundleName`` is kept as the join key: the runtime addresses fixture
 models by package name, which is this value behind a fixed prefix.
 
@@ -47,6 +51,7 @@ _COLUMNS = (
     "mysekaiFixturePlayerActionType",
     "mysekaiFixturePutType",
     "mysekaiFixtureHandleType",
+    "mysekaiFixtureMainGenreId",
     "gridSize",
     "mysekaiFixturePutSoundId",
 )
@@ -97,6 +102,12 @@ def export_fixture_master_slice(
         put_sound = row["mysekaiFixturePutSoundId"]
         if type(put_sound) is not int:
             raise ValueError(f"row id={row['id']!r}: put sound id must be an integer")
+        main_genre = row["mysekaiFixtureMainGenreId"]
+        if type(main_genre) is not int:
+            raise ValueError(f"row id={row['id']!r}: main genre id must be an integer")
+        sub_genre = row.get("mysekaiFixtureSubGenreId")
+        if sub_genre is not None and type(sub_genre) is not int:
+            raise ValueError(f"row id={row['id']!r}: sub genre id must be an integer or null")
         grid = row["gridSize"]
         for axis in ("width", "depth", "height"):
             if axis not in grid:
@@ -113,6 +124,8 @@ def export_fixture_master_slice(
                 "playerActionTypeValue": _ACTION_TYPES[action],
                 "putType": row["mysekaiFixturePutType"],
                 "handleType": row["mysekaiFixtureHandleType"],
+                "mainGenreId": main_genre,
+                "subGenreId": sub_genre,
                 "gridWidth": int(grid["width"]),
                 "gridDepth": int(grid["depth"]),
                 "gridHeight": int(grid["height"]),
