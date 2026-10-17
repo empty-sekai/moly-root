@@ -32,6 +32,8 @@ ROOT_DOCUMENTS = (
     "alone-actions.json", "facial-tables.json", "client-config.json", "birthday-parties.json",
     "birthday-party-delivery.json",
     "mysekai-blueprints.json", "mysekai-fixtures.json", "mysekai-items.json",
+    "mysekai-fixture-main-genres.json", "mysekai-fixture-sub-genres.json",
+    "mysekai-fixture-tags.json", "mysekai-fixture-tag-groups.json",
     "mysekai-music-records.json", "site-groups.json", "talks.json", "tweets.json",
     "tweet-tables.json", "wordings.json",
     "mysekai-tools.json", "mysekai-staminas.json", "mysekai-stamina-recovery.json",

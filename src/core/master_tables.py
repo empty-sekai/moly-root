@@ -40,6 +40,12 @@ OPTIONAL_TABLES = {
     "mysekaiFixturePossessions": ("id", "mysekai-fixture-possessions.json"),
     "mysekaiMaterialPossessions": ("id", "mysekai-material-possessions.json"),
     "mysekaiSystemFixtures": ("id", "mysekai-system-fixtures.json"),
+    # A catalog row's classification: a fixture names a main and a sub genre,
+    # and its tag group names tag rows whose type separates series, character
+    # and unit tags. The master keeps all three as standalone tables.
+    "mysekaiFixtureMainGenres": ("id", "mysekai-fixture-main-genres.json"),
+    "mysekaiFixtureSubGenres": ("id", "mysekai-fixture-sub-genres.json"),
+    "mysekaiFixtureTags": ("id", "mysekai-fixture-tags.json"),
     "mysekaiBlueprintMysekaiMaterialCosts": ("id", "mysekai-blueprint-material-costs.json"),
     "mysekaiBlueprintTerms": ("id", "mysekai-blueprint-terms.json"),
     "mysekaiSiteFootsteps": ("id", "mysekai-site-footsteps.json"),
