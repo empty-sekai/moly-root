@@ -40,6 +40,7 @@ configure_fallback_unity_version()
 from core.jsonio import write_json
 import ui.talk as talk
 from ui.window_animation import DECODERS as WINDOW_ANIMATION_DECODERS
+from ui.window_animation import decode_common2_button_dialog
 from ui.notice_layout import DECODERS as NOTICE_LAYOUT_DECODERS
 from ui.field_hud_layout import CN_DECODERS as FIELD_HUD_CN_DECODERS
 from ui.harvest_summary_layout import DECODERS as HARVEST_SUMMARY_LAYOUT_DECODERS
@@ -100,7 +101,8 @@ SCREENS = {
              "UIPartsDialogFillCover", "LearnPhenomenaSubWindowDialog",
              "HonorRewardSubWindowDialog", "MysekaiRefreshBirthdayPlantSubWindowDialog",
              "CommonRewardSubWindowDialog", "UIPartsThumbnailWithBalloon",
-             "UIPartsHonorImage"),
+             "UIPartsHonorImage", "MysekaiRecoverBoostStaminaDialog",
+             "BoostStaminaRecoverConfirmDialog"),
     "hud": ("ScreenLayerMysekaiHUD", "ScreenLayerMysekaiSiteMove",
             "MysekaiWeatherDialog", "MysekaiWeatherCell", "ScreenLayerMysekaiNotice",
             "ScreenLayerMysekaiHarvestSummary"),
@@ -124,6 +126,130 @@ REFERENCED_FAMILIES = {
     "fieldhud": ("MysekaiTweetHeadUpDisplay", "ObjectAttentionHeadUpDisplay",
                  "FixtureAttentionHeadUpDisplay"),
 }
+
+# Screen layers and dialogs the JP UI census maps to but the product does not
+# load yet.  They are exported on request, into their own directories, so a
+# census run reaches every mapped prefab without changing what a product run
+# writes: the JP export is always targeted by name, and the CN export reads
+# SCREENS only.
+CENSUS_FAMILIES = {
+    "screens": (
+        "ScreenLayerMysekaiAvatarCostumeSetting",
+        "ScreenLayerMysekaiBlockList",
+        "ScreenLayerMysekaiCanvas",
+        "ScreenLayerMysekaiCommon",
+        "ScreenLayerMysekaiConvertFurniture",
+        "ScreenLayerMysekaiCustomFixtureEditor",
+        "ScreenLayerMysekaiCutScene",
+        "ScreenLayerMysekaiDeliveryInformation",
+        "ScreenLayerMysekaiEditTutorialNavigate",
+        "ScreenLayerMysekaiGate",
+        "ScreenLayerMysekaiGateInvitation",
+        "ScreenLayerMysekaiHousingCompetition",
+        "ScreenLayerMysekaiHousingCompetitionBackNumber",
+        "ScreenLayerMysekaiMission",
+        "ScreenLayerMysekaiMultiplayUI",
+        "ScreenLayerMysekaiOtherProfile",
+        "ScreenLayerMysekaiPhotoAlbum",
+        "ScreenLayerMysekaiPhotoAlbumPreview",
+        "ScreenLayerMysekaiPhotoSelect",
+        "ScreenLayerMysekaiPhotoShot",
+        "ScreenLayerMysekaiPreset",
+        "ScreenLayerMysekaiSecretShop",
+        "ScreenLayerMysekaiSketchUI",
+        "ScreenLayerMysekaiVisitTop",
+    ),
+    "dialogs": (
+        "AdditionalDownloadConfirmDialog",
+        "BulkHarvestTargetSettingDialog",
+        "CanvasMemberListFilterDialog",
+        "CardTotalPowerChangeSubWindowDialog",
+        "CharacterArchiveMysekaiFixtureTalkReleaseConditionDialog",
+        "CharacterArchiveMysekaiGeneralTalkReleaseConditionDialog",
+        "CharacterArchiveMysekaiTalkFilterDialog",
+        "Common2ButtonMediumDialog",
+        "CommonRewardVerticalListDialog",
+        "CommonWebviewDialog",
+        "ConnectingSubWindowDialog",
+        "DebugAddedFixtureListDialog",
+        "DebugFixtureListDialog",
+        "DebugModelRoomColorSelectDialog",
+        "DebugModelRoomFixtureListDialog",
+        "DebugModelRoomGateSelectDialog",
+        "FindPlayerIdDialog",
+        "FixtureDescriptionDialog",
+        "FixtureListDialog",
+        "FixtureShortageDialog",
+        "HonorGroupFilterDialog",
+        "HonorRaritySelectDialog",
+        "InValidLayoutFixtureListDialog",
+        "ItemDetailDialog",
+        "MaterialItemDetailDialog",
+        "MysekaiAlertSubWindowDialog",
+        "MysekaiBirthdayRewardListDialog",
+        "MysekaiBulkHarvestRewardDialog",
+        "MysekaiCanvasFurnitureEditModeDialog",
+        "MysekaiCharaRewardSubWindowDialog",
+        "MysekaiConvertBlueprintLotterySubWindowDialog",
+        "MysekaiConvertFurnitureShortenDialog",
+        "MysekaiConvertItemDetailDialog",
+        "MysekaiConvertRecordLotterySubWindowDialog",
+        "MysekaiConvertStartConfirmDialog",
+        "MysekaiExpireSiteHousingPresetExtendSlotConfirmDialog",
+        "MysekaiFixtureSearchDialog",
+        "MysekaiFixtureShopItemFilterDialog",
+        "MysekaiGateDetailDialog",
+        "MysekaiGateLevelUpConfirmDialog",
+        "MysekaiGateSendInvitationCompletedDialog",
+        "MysekaiGateSendInvitationSubWindowDialog",
+        "MysekaiGateSkinReleaseDialog",
+        "MysekaiHousingCommunityReportDialog",
+        "MysekaiHousingCompetitionCommunityReportDialog",
+        "MysekaiHousingCompetitionConfirmResubmitDialog",
+        "MysekaiHousingCompetitionConfirmVisitSubmitDialog",
+        "MysekaiHousingCompetitionEntryDetailDialog",
+        "MysekaiHousingCompetitionScreenshotConfirmDialog",
+        "MysekaiHousingCompetitionSearchSubmitDialog",
+        "MysekaiHousingCompetitionSiteSelectionForSubmissionDialog",
+        "MysekaiHousingCompetitionSubmissionDiscardDialog",
+        "MysekaiHousingCompetitionSubmitCompletedDialog",
+        "MysekaiHousingCompetitionSubmitConfirmDialog",
+        "MysekaiHousingCompetitionSubmitIdCopiedDialog",
+        "MysekaiHousingCompetitionSubmittedInfoDialog",
+        "MysekaiInventoryRecycleMaterialDialog",
+        "MysekaiInventoryScrapFixtureDialog",
+        "MysekaiKickConfirmDialog",
+        "MysekaiLeaveConfirmDialog",
+        "MysekaiMissionCompleteDialog",
+        "MysekaiMissionDetailDialog",
+        "MysekaiMissionInfoDialog",
+        "MysekaiMissionListDialog",
+        "MysekaiMissionStartDialog",
+        "MysekaiNotEnoughWhiteBluePrintDialog",
+        "MysekaiPhotoEffectSelectSubWindowDialog",
+        "MysekaiPresetConfirmationDialog",
+        "MysekaiRankListDialog",
+        "MysekaiSecretShopHasBlueprintConfirmDialog",
+        "MysekaiSecretShopNotHavePermissionToLogInDialog",
+        "MysekaiSecretShopPurchaseConfirmDialog",
+        "MysekaiSecretShopPurchaseLimitReachedDialog",
+        "MysekaiSecretShopResourcePurchaseConfirmDialog",
+        "MysekaiSketchDialog",
+        "MysekaiVisitListDialog",
+        "PresetSubWindowDialog",
+        "RankUpDialog",
+        "ScenarioAllSkipConfirmDialog",
+        "SelectMysekaiFixtureDialog",
+        "TakingScreenshotSubWindowDialog",
+        "UnitFilterDialog",
+        "ValueShopBuyConfirmDialog",
+        "VisitModelRoomSelectDialog",
+    ),
+}
+
+# The JP prefab registry: the product families, the referenced-only prefabs
+# and the census-only ones.
+JP_FAMILIES = {**SCREENS, **REFERENCED_FAMILIES, **CENSUS_FAMILIES}
 
 # Prefabs in no Resources folder at all: a screen instantiates each from one
 # serialized reference and nothing else names it, so the export follows that
@@ -153,6 +279,8 @@ LOADING = {
                  "_TweetHeadUpDisplay; the attention controllers' display prefabs)"),
     "inventory": INVENTORY_LAYOUT_LOADING,
     "craft": CRAFT_LAYOUT_LOADING,
+    "screens": 'Resources.Load("Screen/Prefabs/" + layerData.name)',
+    "dialogs": 'Resources.Load("Dialog/" + dialogType.ToString())',
 }
 
 SEMANTICS = {
@@ -214,6 +342,12 @@ RUNTIME_VALUES = {
     "bgmselect": BGM_SELECT_LAYOUT_RUNTIME_VALUES,
     "inventory": INVENTORY_LAYOUT_RUNTIME_VALUES,
     "craft": CRAFT_LAYOUT_RUNTIME_VALUES,
+    "screens": ["server-decided slots are named per family in ui/prefab_layout.py; "
+                "a layer outside the product families carries the slots its own "
+                "family's product entries name"],
+    "dialogs": ["server-decided slots are named per family in ui/prefab_layout.py; "
+                "a dialog outside the product families holds placeholders for the "
+                "runtime state its caller passes"],
 }
 
 
@@ -285,6 +419,88 @@ def decode_custom_index_toggle_group(r: talk.Reader) -> dict:
         "allText": r.pptr(),
         "otherText": r.pptr(),
     }
+
+
+def decode_boost_stamina_recovery_method_item_content(r: talk.Reader) -> dict:
+    """BoostStaminaRecoveryMethodItemContent: the number changer, the list view
+    the item cells are instantiated in, the empty text, the balloon, the
+    warning message, the before and after boost texts and the two stamina
+    views.  The cell rows and the selected counts are runtime state."""
+    return {name: r.pptr() for name in (
+        "_numberChangers", "_listView", "_nothing", "_balloon", "_warningMessage",
+        "_currentBoostText", "_afterBoostText", "_beforeBoostStaminaView",
+        "_afterBoostStaminaView")}
+
+
+def decode_boost_stamina_recovery_method_jewel_content(r: talk.Reader) -> dict:
+    """BoostStaminaRecoveryMethodJewelContent: the crystal count selector, the
+    specified-commercial-transaction-law button, the paid-jewel text, the
+    number changer, the three quantity texts, the max text, the limit balloon,
+    the attention and confirm texts and the two stamina views.  The cached
+    master row and the used-crystal count are runtime state."""
+    return {name: r.pptr() for name in (
+        "slider", "specifiedCommercialTransactionLawArticleButton", "paidJewelText",
+        "numberChanger", "quantity", "useQuantity", "maxText", "limitMessageBalloon",
+        "jewelAttentionText", "confirmText", "_beforeBoostStaminaView",
+        "_afterBoostStaminaView")}
+
+
+def decode_convert_live_bonus_to_boost_stamina_view(r: talk.Reader) -> dict:
+    """ConvertLiveBonusToBoostStaminaView: the select-cost slider, the
+    before/after live-bonus number view, the setting description, the two
+    stamina views, the limit balloon, the insufficient-live-bonus label, the
+    warning message and the two live-bonus texts.  The before count is runtime
+    state."""
+    return {name: r.pptr() for name in (
+        "_slider", "_liveBonusChange", "_liveBonusSettingDescription",
+        "_beforeBoostStaminaView", "_afterBoostStaminaView", "limitMessageBalloon",
+        "_liveBnousNotEnoughLabel", "_warningMessage", "_beforeLiveBonusText",
+        "_afterLiveBonusText")}
+
+
+def decode_ui_parts_select_cost(r: talk.Reader) -> dict:
+    """UIPartsSelectCost : MonoBehaviour, then its serialized chain: the slider,
+    its number text, the decrement and increment buttons, the numeric input
+    field and whether the field is used.  The view data, the SE interval and
+    the played flag are runtime state."""
+    return {name: r.pptr() for name in (
+        "slider", "numText", "decrementButton", "incrementButton", "inputField")} | {
+        "useInputField": r.bool4()}
+
+
+def decode_ui_parts_number_changer(r: talk.Reader) -> dict:
+    """UIPartsNumberChanger: the before and after number texts, the colour
+    override and its code, the before and after texts (a second pair of the
+    same two numbers), the arrow object, the auto-hide flag, the item name
+    text, and the item name (a UGUI Text)."""
+    fields = {name: r.pptr() for name in (
+        "numberBeforeTextMesh", "numberAfterTextMesh")}
+    fields.update(overrideNumberAfterColor=r.bool4(), numberAfterColorCode=r.string())
+    fields.update({name: r.pptr() for name in (
+        "numberBeforeText", "numberAfterText", "arrow")})
+    fields.update(autoHideAfterDisplay=r.bool4())
+    fields.update({name: r.pptr() for name in ("itemNameTextMesh", "itemName")})
+    return fields
+
+
+def decode_ui_parts_cost_before_after_number(r: talk.Reader) -> dict:
+    """UIPartsCostBeforeAfterNumber: the two number texts, the item name text
+    and the item image."""
+    return {name: r.pptr() for name in (
+        "_numberBeforeTextMesh", "_numberAfterTextMesh", "_itemNameTextMesh",
+        "_itemImage")}
+
+
+def decode_ui_parts_selector_cell(r: talk.Reader) -> dict:
+    """UIPartsSelectorCell : UIPartsSelectorCellBase, whose serialized chain is
+    the number text, the button, the tap effect, the icon, the selected, line
+    and badge objects, the banner canvas, the select-banner object and its
+    text, and the banner cover (a Canvas object).  The view data, the view
+    number and the callbacks are runtime state."""
+    return {name: r.pptr() for name in (
+        "numberText", "button", "_tapEffect", "_icon", "selectedObj", "lineObj",
+        "badgeObj", "bannerCanvas", "selectBannerObj", "selectBannerText",
+        "selectBannerCover")}
 
 
 def decode_menu_dialog_cell(r: talk.Reader) -> dict:
@@ -468,6 +684,14 @@ EXTRA_DECODERS = {
     "Sekai.Mysekai.MysekaiInfoOption1Page": decode_mysekai_info_option_page,
     "Sekai.Mysekai.ScreenLayerMysekaiInfoTab": decode_mysekai_info_tab,
     "Sekai.Mysekai.ScreenLayerMysekaiInfo": decode_mysekai_info,
+    "Sekai.Mysekai.BoostStaminaRecoveryMethodItemContent": decode_boost_stamina_recovery_method_item_content,
+    "Sekai.Mysekai.BoostStaminaRecoveryMethodJewelContent": decode_boost_stamina_recovery_method_jewel_content,
+    "Sekai.Mysekai.ConvertLiveBonusToBoostStaminaView": decode_convert_live_bonus_to_boost_stamina_view,
+    "Sekai.UI.UIPartsSelectCost": decode_ui_parts_select_cost,
+    "Sekai.UI.UIPartsNumberChanger": decode_ui_parts_number_changer,
+    "Sekai.UI.UIPartsCostBeforeAfterNumber": decode_ui_parts_cost_before_after_number,
+    "Sekai.UIPartsCostBeforeAfterNumber": decode_ui_parts_cost_before_after_number,
+    "Sekai.UIPartsSelectorCell": decode_ui_parts_selector_cell,
     "Sekai.Mysekai.MysekaiMenuUIContent": decode_mysekai_menu_ui_content,
     "Sekai.Mysekai.MysekaiCustomButton": decode_mysekai_custom_button,
     "Coffee.UISoftMask.SoftMask": decode_soft_mask,
@@ -2393,8 +2617,9 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
     """Write layout documents for *prefabs* from APK player data.
 
     *apks* are the base APK and the install-time asset pack; *client_version*
-    selects the decoder chains (only the versions ``ui.jp_decoders`` names are
-    accepted).  Each prefab is found through the Resources index and read from
+    selects one table of ``ui.jp_decoders.DECODERS_BY_VERSION`` (an unsupported
+    version is an error that names the supported ones).  Each prefab is found
+    through the Resources index and read from
     its own serialized file with that file's externals closure loaded.  Next
     to the documents the run writes the screen-layer data of every selected
     screen layer, the merged wording dictionary (built-in CSV + master
@@ -2416,10 +2641,13 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
     from ui import ui_settings
     from core.master import Master
 
-    if client_version != jp_decoders.VERSION:
-        raise ValueError(f"no decoder chains registered for JP {client_version}")
+    if client_version not in jp_decoders.DECODERS_BY_VERSION:
+        raise ValueError(f"no decoder chains registered for JP {client_version}; "
+                         f"supported versions: "
+                         f"{', '.join(sorted(jp_decoders.DECODERS_BY_VERSION))}")
+    chains = jp_decoders.decoders_for(client_version)
     selected = list(dict.fromkeys(prefabs or ()))
-    family_of = {name: family for family, names in {**SCREENS, **REFERENCED_FAMILIES}.items()
+    family_of = {name: family for family, names in JP_FAMILIES.items()
                  for name in names}
     unknown = [name for name in selected if name not in family_of]
     if not selected or unknown:
@@ -2486,7 +2714,7 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
                 and key.rsplit("/", 1)[-1] == prefab.lower()]
         if prefab in REFERENCED_PREFAB_KEYS:
             keys = [key for key in container if key == REFERENCED_PREFAB_KEYS[prefab]]
-        if not keys and family_of[prefab] == "menu":
+        if not keys and family_of[prefab] in ("menu", "dialogs"):
             # A cell a menu dialog instantiates from a serialized prefab field
             # (CommonRewardSubWindowDialog's thumbnail with balloon) is indexed
             # under the referenced-prefab roots, not under Dialog/.
@@ -2555,7 +2783,7 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
         raise FileNotFoundError(f"externals no APK member supplies: {player.missing}")
 
     mono_index = talk.build_monoscript_index(env)
-    decoders = {**talk._DECODERS, **EXTRA_DECODERS, **jp_decoders.DECODERS, **ui_settings.DECODERS}
+    decoders = {**talk._DECODERS, **EXTRA_DECODERS, **chains, **ui_settings.DECODERS}
     for item in plan:
         if item.get("via") is None:
             continue
@@ -2575,6 +2803,10 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
         item["reference"] = {"holderPrefab": holder["prefab"], "holderResourceKey": holder["resourceKey"],
                              "holderResourceEntry": holder["resourceEntry"],
                              "holderRootGameObjectPathId": holder_go, **reference}
+    orphans = [item["prefab"] for item in plan if item["target"] is None]
+    if orphans:
+        raise ValueError(f"prefabs without a Resources target and no reference reach "
+                         f"them: {sorted(orphans)}")
     unity = unity_version(env)
     identity = {"region": jp_decoders.REGION, "clientVersion": client_version,
                 "unityVersion": unity}
@@ -2779,7 +3011,11 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
             "wordingKeys": _wording_key_counts(document, wording_doc["entries"]),
         }
         # The screen-layer data that routes a MenuScreenType to this prefab.
-        if item["key"] is not None and item["key"].startswith("screen/prefabs/"):
+        # The registry routes screen layers, not every prefab a Resources
+        # index lists under "screen/prefabs": a referenced prefab (a dialog's
+        # cell) has no row and none is expected.
+        if item["key"] is not None and item["key"].startswith("screen/prefabs/") \
+                and prefab in registry:
             entry = registry.get(prefab)
             if entry is None:
                 raise ValueError(f"{prefab}: no screen layer registry entry names it")
@@ -2875,8 +3111,8 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
                    "globalgamemanagersExternals": len(manager.assets_file.externals),
                    "loadedFiles": len(player.loaded), "shallowFiles": list(player.shallow),
                    "missingExternals": list(player.missing)},
-        "decoderChains": {"region": jp_decoders.REGION, "version": jp_decoders.VERSION,
-                          "overridden": sorted(jp_decoders.DECODERS)},
+        "decoderChains": {"region": jp_decoders.REGION, "version": client_version,
+                          "overridden": sorted(chains)},
         "documents": rows,
         "failures": failures,
     }

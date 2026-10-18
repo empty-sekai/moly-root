@@ -675,7 +675,8 @@ def main(argv=None):
                      help="jp: an APK whose assets/bin/Data members are player "
                           "files; give the base APK and the asset pack")
     lay.add_argument("--client-version", default=None,
-                     help="jp: the client version the decoder chains are for; cn: "
+                     help="jp: the client version whose decoder chains to use "
+                          "(ui/jp_decoders.py names the supported ones); cn: "
                           "the client version the palette and tween defaults name")
     lay.add_argument("--master", default=None,
                      help="jp: directory of master tables holding wordings.json")

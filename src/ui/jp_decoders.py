@@ -1,4 +1,4 @@
-"""Serialized field chains of the JP 6.8.1 client, where they differ from the CN 6.0.0 chains.
+"""Serialized field chains of the JP clients, one table per supported version.
 
 The decoders in ``ui.talk``, ``ui.editor_layout`` and ``ui.prefab_layout`` were
 derived from the CN 6.0.0 declarations and consume those bytes exactly.  The
@@ -97,6 +97,27 @@ reads the same objects to their last byte and agrees value for value.
 Base-class chains (Selectable, Button, Scrollbar, ToggleGroup, Text,
 TMP_Dropdown, TextMeshProUGUI) are the stock engine ones and are reused
 unchanged.
+
+JP 7.0.0 keeps every 6.8.1 chain and changes five classes.  Each change is a
+serialized field the 7.0.0 declarations insert; the added bytes show as a
+uniform residual on the 6.8.1 chain, and the 6.8.1 objects show an over-read
+on the 7.0.0 chain, so the client version selects the table:
+
+* ``Sekai.UI.CustomScrollRect`` adds ``normalizedPositionTolerance`` (float)
+  after ``mask``, before the runtime-only ``hasRebuiltLayout`` flag.
+* ``Sekai.Mysekai.Inventory.CraftPreview`` adds
+  ``_purchaseLimitTextRoot``, ``_noLimitObject``, ``_remainCountObject`` and
+  ``_remainCountText`` between ``_craftTermText`` and ``_layoutCostRoot``.
+* ``Sekai.Mysekai.MysekaiInfoOption1Page`` adds
+  ``_bulkHarvestTargetSettingRoot`` and ``_bulkHarvestTargetSettingButton``
+  between ``_voiceDLText`` and the visit-setting toggle group.
+* ``Sekai.Mysekai.ContentList.ContentListSelectorCell`` adds
+  ``_contentSizeFitter`` after ``_missionIcon``.
+* ``Sekai.UIPartsHonorImage`` adds ``wordImage`` after ``coreImage`` and
+  ``_medalView`` after ``levelView``.
+
+Field order is the declaration order in the 7.0.0 managed types; each added
+field is a reference (12 bytes) except the tolerance, a float (4 bytes).
 """
 from __future__ import annotations
 
@@ -111,7 +132,6 @@ from ui import bgm_select_layout
 
 
 REGION = "jp"
-VERSION = "6.8.1"
 
 
 def decode_custom_button(r: talk.Reader) -> dict:
@@ -215,12 +235,27 @@ def decode_mysekai_info(r: talk.Reader) -> dict:
 
 
 def decode_mysekai_info_option_page(r: talk.Reader) -> dict:
-    """MysekaiInfoOption1Page: six serialized references."""
+    """MysekaiInfoOption1Page (6.8.1): six serialized references."""
     return editor_layout.refs(r, (
         "_voiceDLButton", "_voiceDLText", "_mysekaiVisitSettingToggleGroup",
         "_mysekaiImageQualityToggleGroup", "_mysekaiFPSSettingToggleGroup",
         "_mysekaiConvertFixtureNotificationSettingToggleGroup",
     ))
+
+
+MYSEKAI_INFO_OPTION_PAGE_700 = (
+    "_voiceDLButton", "_voiceDLText", "_bulkHarvestTargetSettingRoot",
+    "_bulkHarvestTargetSettingButton", "_mysekaiVisitSettingToggleGroup",
+    "_mysekaiImageQualityToggleGroup", "_mysekaiFPSSettingToggleGroup",
+    "_mysekaiConvertFixtureNotificationSettingToggleGroup",
+)
+
+
+def decode_mysekai_info_option_page_700(r: talk.Reader) -> dict:
+    """MysekaiInfoOption1Page (7.0.0): the bulk-harvest target setting row
+    (its root object and button) between the voice download pair and the
+    visit-setting toggle group."""
+    return editor_layout.refs(r, MYSEKAI_INFO_OPTION_PAGE_700)
 
 
 def decode_site_edit_mode(r: talk.Reader) -> dict:
@@ -396,3 +431,82 @@ DECODERS = {
     **craft_layout.JP_DECODERS,
     **bgm_select_layout.JP_DECODERS,
 }
+
+
+# ---------------------------------------------------------------------------
+# JP 7.0.0: the 6.8.1 table with the five classes whose serialized layout
+# changed.  Every other class reads the same bytes in both clients.
+# ---------------------------------------------------------------------------
+
+def decode_custom_scroll_rect_700(r: talk.Reader) -> dict:
+    """CustomScrollRect (7.0.0): the 6.8.1 fields, then
+    ``normalizedPositionTolerance``; ``hasRebuiltLayout`` is runtime state."""
+    d = editor_layout.decode_custom_scroll_rect(r)
+    d["normalizedPositionTolerance"] = r.f32()
+    return d
+
+
+CRAFT_PREVIEW_700 = (
+    "_previewContent", "_materialCostList", "_blueprint3DPreview", "_colorSelector",
+    "_nameText", "_systemFixtureIcon", "_craftCountInputSelector", "_nameObject",
+    "_applyButton", "_cantCraftBalloon", "_screenButton", "_screenCanvasGroup",
+    "_quantityObject", "_quantityText", "_sizeObject", "_sizeText", "_reactionCountView",
+    "_fixtureBonusView", "_craftTermTextRoot", "_craftTermText",
+    "_purchaseLimitTextRoot", "_noLimitObject", "_remainCountObject", "_remainCountText",
+    "_layoutCostRoot", "_layoutCostText",
+)
+
+
+def decode_craft_preview_700(r: talk.Reader) -> dict:
+    """CraftPreview (7.0.0): the purchase-limit row (its root, the no-limit
+    object, the remaining-count object and text) before the layout cost."""
+    return editor_layout.refs(r, CRAFT_PREVIEW_700)
+
+
+def decode_content_list_selector_cell_700(r: talk.Reader) -> dict:
+    """ContentListSelectorCell (7.0.0): the selector cell fields, then
+    ``_contentSizeFitter``."""
+    d = editor_layout.decode_selector_cell(r)
+    d["_contentSizeFitter"] = r.pptr()
+    return d
+
+
+HONOR_IMAGE_700 = (
+    "coreImage", "wordImage", "frameSprite", "rankImage", "levelView", "_medalView",
+    "_uniqueLevelView", "_liveMasterLevel", "_liveMasterLevelMainPosition",
+    "_liveMasterLevelSubPosition",
+)
+
+
+def decode_honor_image_700(r: talk.Reader) -> dict:
+    """UIPartsHonorImage (7.0.0): the word image after the core image and the
+    medal view after the level view."""
+    return editor_layout.refs(r, HONOR_IMAGE_700)
+
+
+DECODERS_700 = {
+    **DECODERS,
+    "Sekai.UI.CustomScrollRect": decode_custom_scroll_rect_700,
+    "Sekai.Mysekai.Inventory.CraftPreview": decode_craft_preview_700,
+    "Sekai.Mysekai.MysekaiInfoOption1Page": decode_mysekai_info_option_page_700,
+    "Sekai.Mysekai.ContentList.ContentListSelectorCell":
+        decode_content_list_selector_cell_700,
+    "Sekai.UIPartsHonorImage": decode_honor_image_700,
+}
+
+
+DECODERS_BY_VERSION = {
+    "6.8.1": DECODERS,
+    "7.0.0": DECODERS_700,
+}
+# The client versions a JP layout export accepts, oldest first.
+VERSIONS = tuple(DECODERS_BY_VERSION)
+
+
+def decoders_for(version: str) -> dict:
+    """The decoder table of one supported JP client version."""
+    try:
+        return DECODERS_BY_VERSION[version]
+    except KeyError:
+        raise ValueError(f"no decoder chains registered for JP {version}; "
+                         f"supported versions: {', '.join(sorted(DECODERS_BY_VERSION))}") from None
