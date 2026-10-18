@@ -29,6 +29,11 @@ REGION_UI_DIRECTORY = "ui-jp"
 DONOR_LAYOUT_DIRECTORY = "ui-layout-v2"
 # JP UI documents the runtime must carry: every layout document the runtime
 # loads.  Each replaces the donor copy at the same path under the donor tree.
+#
+# The weather forecast dialog is not one of the shared root's requested
+# documents; the runtime reads it from the region root on purpose, so it is
+# required there with no donor copy to replace.
+REGION_UI_ONLY_DOCUMENTS = ("hud/MysekaiWeatherDialog.json",)
 REGION_UI_DOCUMENTS = {
     name: f"{DONOR_LAYOUT_DIRECTORY}/{name}" for name in (
         "menu/MysekaiMenuDialog.json", "info/OptionDialog.json",
@@ -45,6 +50,10 @@ REGION_UI_DOCUMENTS = {
         "editor/ScreenLayerHeader.json",
     )
 }
+# Every document the runtime requires of the region root, with the donor copy
+# (if any) it replaces.
+REGION_UI_REQUIRED = {**REGION_UI_DOCUMENTS,
+                      **{name: None for name in REGION_UI_ONLY_DOCUMENTS}}
 # A donor document may also ship as a gzip twin of the same bytes.
 DONOR_TWIN_SUFFIXES = ("", ".gz")
 REQUIRED = ("characters.json", "manifest.json", "motion-library.glb", "talks.json",
@@ -54,7 +63,7 @@ REQUIRED = ("characters.json", "manifest.json", "motion-library.glb", "talks.jso
             "fixture-thumbnails/fixture-thumbnails.json", "client-config.json",
             "actor-animations/index.json", "avatar/motion/sd-switch-simple.glb", "site/sites.json", "site-groups.json", "tweet-tables.json", "tweets.json",
             f"{REGION_UI_DIRECTORY}/ui-manifest.json",
-            *(f"{REGION_UI_DIRECTORY}/{name}" for name in REGION_UI_DOCUMENTS))
+            *(f"{REGION_UI_DIRECTORY}/{name}" for name in REGION_UI_REQUIRED))
 
 
 def _json(path):
@@ -88,7 +97,7 @@ def _region_ui_source(ui_jp_from):
     if manifest.get("version") != 1 or manifest.get("region") != "jp" or manifest.get("failures"):
         raise JPError("JP UI manifest is not a clean version-1 jp manifest")
     rows = {row.get("document"): row for row in manifest.get("documents", [])}
-    for name in REGION_UI_DOCUMENTS:
+    for name in REGION_UI_REQUIRED:
         row = rows.get(name)
         if row is None or row.get("region") != "jp" or row.get("kind") != "prefab":
             raise JPError(f"JP UI manifest has no jp prefab row for {name}")
@@ -104,9 +113,11 @@ def _region_ui_source(ui_jp_from):
 
 
 def _replaced_donor_copies(manifest):
-    """Donor paths every JP layout document of *manifest* replaces."""
+    """Donor paths every JP layout document of *manifest* replaces (a document
+    the donor root does not carry is the region root's alone)."""
     return {row["document"]: f"{DONOR_LAYOUT_DIRECTORY}/{row['document']}"
-            for row in manifest["documents"] if row.get("kind") == "prefab"}
+            for row in manifest["documents"]
+            if row.get("kind") == "prefab" and row["document"] not in REGION_UI_ONLY_DOCUMENTS}
 
 
 def assemble_shared_ui(out, ui_from, region_ui):

@@ -25,6 +25,56 @@ def decode_common1_button_dialog(r: talk.Reader) -> dict:
     return fields
 
 
+def decode_common2_button_dialog(r: talk.Reader) -> dict:
+    """Common2ButtonDialog : DialogBase: the dialog chain, then the positive
+    button and its label (a CustomTextMesh slot and a CustomText slot, whichever
+    of the two the layout uses), the negative button and its two label slots,
+    and the message body's two slots.  The click callbacks and the message
+    interface are runtime state, serialized after the references."""
+    fields = decode_dialog_base(r)
+    fields.update({name: r.pptr() for name in (
+        "positiveButton", "positiveButtonLabelMesh", "positiveButtonLabel",
+        "negativeButton", "negativeButtonLabelMesh", "negativeButtonLabel",
+        "messageBodyTextMesh", "messageBodyText")})
+    return fields
+
+
+def decode_ui_parts_dialog_tab(r: talk.Reader) -> dict:
+    """UIPartsDialogTab: the background image, the text, the badge object and
+    the line object, then whether the tab is on.  The toggle and the
+    value-changed callback the tab binds at runtime are not serialized."""
+    fields = {name: r.pptr() for name in ("backgroundImage", "text", "badge", "lineObj")}
+    fields["isOn"] = r.bool4()
+    return fields
+
+
+def decode_mysekai_recover_boost_stamina_dialog(r: talk.Reader) -> dict:
+    """MysekaiRecoverBoostStaminaDialog : Common2ButtonDialog: the dialog
+    chain, then the use-or-recover tab group, the recovery-method tab group,
+    the item and crystal recovery contents, the live-bonus conversion view and
+    the object the method contents hang under.  The player HUD, the finish
+    callback and the last chosen tab (local settings) are runtime state."""
+    fields = decode_common2_button_dialog(r)
+    fields.update({name: r.pptr() for name in (
+        "_liveBoostConsumptionOrRecoverTabGroup", "_recoverContentSelectTabGroup",
+        "_boostRecoveryMethodItemContent", "_boostRecoveryMethodJewelContent",
+        "convertLiveBonusToBoostStaminaView", "_boostRecoveryContentParentObject")})
+    return fields
+
+
+def decode_boost_stamina_recover_confirm_dialog(r: talk.Reader) -> dict:
+    """BoostStaminaRecoverConfirmDialog : Common2ButtonDialog: the dialog
+    chain, then the live-boost number changer, the four stamina views (the
+    normal and boost pools before and after), and the warning messages of the
+    same two."""
+    fields = decode_common2_button_dialog(r)
+    fields.update({name: r.pptr() for name in (
+        "liveBoostNumberChanger", "_beforeNormalStaminaView", "_beforeBoostStaminaView",
+        "_afterNormalStaminaView", "_afterBoostStaminaView", "_beforeWarningMessage",
+        "_afterWarningMessage")})
+    return fields
+
+
 def decode_subwindow_dialog(r: talk.Reader) -> dict:
     fields = decode_dialog_base(r)
     fields.update({name: r.pptr() for name in ("messageBodyText", "subWindowComponent", "animation")})
@@ -183,6 +233,10 @@ DECODERS = {
     "Sekai.Mysekai.MysekaiWeatherDialog": decode_mysekai_weather_dialog,
     "Sekai.Mysekai.MysekaiWeatherCellList": decode_mysekai_weather_cell_list,
     "Sekai.Mysekai.MysekaiWeatherCell": decode_mysekai_weather_cell,
+    "Sekai.Common2ButtonDialog": decode_common2_button_dialog,
+    "Sekai.UI.UIPartsDialogTab": decode_ui_parts_dialog_tab,
+    "Sekai.Mysekai.MysekaiRecoverBoostStaminaDialog": decode_mysekai_recover_boost_stamina_dialog,
+    "Sekai.Mysekai.BoostStaminaRecoverConfirmDialog": decode_boost_stamina_recover_confirm_dialog,
     "Sekai.SubWindowComponent": decode_subwindow_component,
     "Sekai.SubWindowSlideAnimation": decode_subwindow_slide_animation,
     "Sekai.SubWindowFadeAnimation": decode_subwindow_fade_animation,
