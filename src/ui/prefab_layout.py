@@ -77,6 +77,18 @@ from ui.craft_layout import (
     LOADING as CRAFT_LAYOUT_LOADING,
     RUNTIME_VALUES as CRAFT_LAYOUT_RUNTIME_VALUES,
 )
+from ui.mission_layout import (
+    PAGE_PREFABS as MISSION_PAGE_PREFABS,
+    POINTER_PAGE_PREFABS as MISSION_PAGE_POINTER_PREFABS,
+    POINTER_PREFABS as MISSION_POINTER_PREFABS,
+    PLACEHOLDER_PREFABS as MISSION_PLACEHOLDER_PREFABS,
+    PREFABS as MISSION_LAYOUT_PREFABS,
+    MISSION_PREFAB_ROOT,
+)
+from ui.convert_layout import (
+    ATOMIC_OBJECTS_681 as CONVERT_ATOMIC_OBJECTS_681,
+    PREFABS as CONVERT_LAYOUT_PREFABS,
+)
 from ui.pointer_fields import collect_pointer_fields
 from ui.clip_material import component_clip_material
 from ui.player_source import external_file_name
@@ -114,6 +126,8 @@ SCREENS = {
     "bgmselect": BGM_SELECT_LAYOUT_PREFABS,
     "inventory": INVENTORY_LAYOUT_PREFABS,
     "craft": CRAFT_LAYOUT_PREFABS,
+    "mission": MISSION_LAYOUT_PREFABS,
+    "convert": CONVERT_LAYOUT_PREFABS,
 }
 
 # Prefabs no screen or dialog loads by a Resources path: the field HUD layer
@@ -125,6 +139,9 @@ SCREENS = {
 REFERENCED_FAMILIES = {
     "fieldhud": ("MysekaiTweetHeadUpDisplay", "ObjectAttentionHeadUpDisplay",
                  "FixtureAttentionHeadUpDisplay"),
+    # The mission cells sit in Resources folders and are instantiated from
+    # their lists' serialized cell prefab reference (see POINTER_PREFABS).
+    "missioncell": ("MysekaiMissionScreenCell", "MysekaiMissionRewardCell"),
 }
 
 # Screen layers and dialogs the JP UI census maps to but the product does not
@@ -247,22 +264,77 @@ CENSUS_FAMILIES = {
     ),
 }
 
+# The product families' prefab names.  A census-only family may list the same
+# name (a screen layer or dialog that is also exported by name), and the
+# product family owns it.
+_PRODUCT_PREFABS = frozenset(
+    name for family, names in SCREENS.items() if family not in ("screens", "dialogs")
+    for name in names
+)
+
 # The JP prefab registry: the product families, the referenced-only prefabs
 # and the census-only ones.
-JP_FAMILIES = {**SCREENS, **REFERENCED_FAMILIES, **CENSUS_FAMILIES}
+JP_FAMILIES = {
+    **SCREENS,
+    **REFERENCED_FAMILIES,
+    **{family: tuple(n for n in names if n not in _PRODUCT_PREFABS)
+       for family, names in CENSUS_FAMILIES.items()},
+}
 
 # Prefabs in no Resources folder at all: a screen instantiates each from one
 # serialized reference and nothing else names it, so the export follows that
 # reference.  Prefab -> (the prefab holding the reference, the holding
-# component's class, the field).
-POINTER_PREFABS = {**CRAFT_POINTER_PREFABS}
+# component's class, the field).  The field names a prefab root.  A holder that
+# repeats its page, whose pages each hold a copy of the content beside the list's
+# cell instance, adds a fourth item, the node's path under the page, and builds
+# the prefab from the page's own nodes (see follow_page_prefab_reference).
+POINTER_PREFABS = {**CRAFT_POINTER_PREFABS, **MISSION_POINTER_PREFABS}
+POINTER_PAGE_PREFABS = {**MISSION_PAGE_POINTER_PREFABS}
+
+# Prefabs -> (holder, the holder's list field, the cell's name): the field names
+# a placeholder cell a page fills, and the cell prefab is the Resources prefab of
+# that cell's name (see follow_placeholder_reference).
+PAGE_PREFABS = {**MISSION_PAGE_PREFABS}
+
+# Prefabs -> their Resources key: the cell a list fills is that Resources prefab.
+PLACEHOLDER_PREFABS = {**MISSION_PLACEHOLDER_PREFABS}
 
 
-def pointer_loading(prefab):
-    """How a prefab of :data:`POINTER_PREFABS` is fetched at runtime."""
-    holder, holder_class, field = POINTER_PREFABS[prefab]
-    return (f"Object.Instantiate of the serialized reference {holder_class}.{field} "
-            f"in {holder}; no Resources path names it")
+def pointer_holder_page(objects, holder_transform_pid, records):
+    """The node path of the page a repeated holder's exporter builds next.
+
+    *records* are the holder's components of one class with their references:
+    ``(GameObject path id, reference)``.  A component holds a page when it is
+    the only one of the class on its GameObject.  The holder builds its next
+    page from the first page its page list names: pages whose components hold
+    the same reference are the copies the prefab keeps of one page, and of
+    them the one with the lowest GameObject path id is that page.
+    """
+    paths = _prefab_node_paths(objects, holder_transform_pid)
+    on_node = {}
+    for go_pid, _ in records:
+        on_node[go_pid] = on_node.get(go_pid, 0) + 1
+    holding = sorted((paths.get(go_pid), pointer, go_pid) for go_pid, pointer in records
+                     if pointer[1])
+    if not holding or holding[0][0] is None:
+        raise ValueError(f"{len(holding)} components hold the reference in the prefab")
+    outermost = [(path, pointer, go_pid) for path, pointer, go_pid in holding
+                 if not any(other[0] != path and other[0].startswith(path + "/")
+                            for other in holding)]
+    pages = [(path, pointer, go_pid) for path, pointer, go_pid in outermost
+             if on_node[go_pid] == 1]
+    if len(pages) != len(outermost):
+        raise ValueError(f"the components holding the reference are not pages "
+                         f"({', '.join(path for path, _, _ in outermost)})")
+    if len(pages) > 1:
+        prefixes = {path.rsplit("/", 2)[0] for path, _, _ in pages if path.count("/") >= 2}
+        depths = {path.count("/") for path, _, _ in pages}
+        if len(prefixes) != 1 or len(depths) != 1:
+            raise ValueError(f"the components holding the reference are not pages "
+                             f"({', '.join(path for path, _, _ in pages)})")
+    first = min(pages, key=lambda page: page[1])
+    return min(path for path, pointer, _ in pages if pointer == first[1])
+
 
 # How each family is fetched at runtime; stated per name because it is the
 # reason the layout is in the player data and not in a bundle.
@@ -279,9 +351,42 @@ LOADING = {
                  "_TweetHeadUpDisplay; the attention controllers' display prefabs)"),
     "inventory": INVENTORY_LAYOUT_LOADING,
     "craft": CRAFT_LAYOUT_LOADING,
+    "mission": ('Resources.Load("Screen/Prefabs/ScreenLayerMysekaiMission") / '
+                '"Dialog/MysekaiMission*", "Dialog/MysekaiCharaRewardSubWindowDialog"'),
+    "convert": ('Resources.Load("Screen/Prefabs/ScreenLayerMysekaiConvertFurniture") / '
+                '"Dialog/MysekaiConvert*" per name'),
     "screens": 'Resources.Load("Screen/Prefabs/" + layerData.name)',
     "dialogs": 'Resources.Load("Dialog/" + dialogType.ToString())',
 }
+
+
+def pointer_loading(prefab):
+    """How a prefab of :data:`POINTER_PREFABS` is fetched at runtime."""
+    holder, holder_class, field = POINTER_PREFABS[prefab]
+    return (f"Object.Instantiate of the serialized reference {holder_class}.{field} "
+            f"in {holder}; no Resources path names it")
+
+
+def placeholder_loading(prefab):
+    """How a prefab of :data:`PLACEHOLDER_PREFABS` is loaded at runtime."""
+    holder, field = PAGE_PREFABS[prefab][:2]
+    return (f'Resources.Load("{PLACEHOLDER_PREFABS[prefab]}"); {holder}.{field} names '
+            f"the placeholder instance the list fills with cells from it")
+
+
+def cell_pointer_loading(prefab):
+    """How a prefab of :data:`PAGE_PREFABS` is fetched at runtime."""
+    holder, field, cell_name = PAGE_PREFABS[prefab]
+    return (f'the cells {holder}.{field} instantiates are the Resources prefab '
+            f'"{cell_name}" (the list names a placeholder it fills)')
+
+
+def page_pointer_loading(prefab):
+    """How a prefab of :data:`POINTER_PAGE_PREFABS` is built at runtime."""
+    holder, holder_class, field, candidate_path = POINTER_PAGE_PREFABS[prefab]
+    return (f"the cells {holder_class}.{field} of {holder} lists are instantiated from "
+            f"that list's cell instance on the page; the page's own cell is the "
+            f"{candidate_path} node of the page it builds next; no Resources path names it")
 
 SEMANTICS = {
     "rect": ("RectTransform is engine-typed and read from its typetree; "
@@ -342,6 +447,19 @@ RUNTIME_VALUES = {
     "bgmselect": BGM_SELECT_LAYOUT_RUNTIME_VALUES,
     "inventory": INVENTORY_LAYOUT_RUNTIME_VALUES,
     "craft": CRAFT_LAYOUT_RUNTIME_VALUES,
+    "missioncell": ["UserMysekaiNormalMissionSheet (the current sheet)",
+                    "UserMysekaiNormalMissions (each mission's progress and status)",
+                    "the rewards MysekaiMissionUtility converts for a mission"],
+    "mission": ["UserMysekaiNormalMissionSheet (the current sheet)",
+                "UserMysekaiNormalMissions (each mission's progress and status)",
+                "the rewards MysekaiMissionUtility converts for a mission (their "
+                "master rows and box contents)",
+                "the receive reply's obtained resources and updated gamedata"],
+    "convert": ["UserMysekaiConvertSlots (each slot's item, state and times)",
+                "the user's convert items and their remaining counts",
+                "the user's blueprints and music records (the obtainable choices)",
+                "the possession levels the slots unlock with",
+                "the crystal wallet the shorten dialog shows"],
     "screens": ["server-decided slots are named per family in ui/prefab_layout.py; "
                 "a layer outside the product families carries the slots its own "
                 "family's product entries name"],
@@ -1742,6 +1860,9 @@ def _f32(value):
     return value
 
 
+_json_dbg = None
+
+
 def extract_prefab(env, objects, root_go_pid, root_transform_pid, resolver,
                    prefab_name, family, source=None):
     """Walk one prefab's RectTransform tree and build its layout document.
@@ -1794,6 +1915,23 @@ def extract_prefab(env, objects, root_go_pid, root_transform_pid, resolver,
             obj = objects.get(cpid)
             if obj is None or obj.type.name in ("RectTransform", "Transform"):
                 continue
+            # A scene saved beside its prefab lists both copies of a node; the
+            # copy the list names may belong to the other copy's GameObject, in
+            # which case the component whose bytes place it on this node is
+            # this node's component.
+            if obj.type.name == "MonoBehaviour" \
+                    and talk.unpack_mb_prefix(talk.Reader(obj.get_raw_data()))["m_GameObject"][1] != go_pid:
+                # A class the decoder table can place on this node is looked for
+                # among the node's own components first; a class it cannot place
+                # (a raw graph for another layout) is dropped with its own file.
+                cls = talk.resolve_script_class(obj, resolver.mono_index)
+                if cls and not cls.startswith("UnityEngine") and cls != "?":
+                    obj = next((candidate for candidate in _components_of_go(objects, go_pid)
+                                if talk.unpack_mb_prefix(talk.Reader(candidate.get_raw_data())
+                                                         )["m_GameObject"][1] == go_pid
+                                and candidate.type.name == "MonoBehaviour"), None)
+                    if obj is None:
+                        continue
             components.append(_component_record(env, obj, resolver))
         if "m_AnchorMin" in frame:
             place_key, place = "rect", {
@@ -1857,7 +1995,7 @@ def extract_prefab(env, objects, root_go_pid, root_transform_pid, resolver,
             "note": ("the serialized text and image slots these name are "
                      "placeholders; the values are server state and enter the "
                      "product as a named mock, never as these bytes"),
-            "named": RUNTIME_VALUES[family],
+            "named": RUNTIME_VALUES.get(family, ()),
         },
         "nodes": nodes,
         "summary": {
@@ -1883,51 +2021,81 @@ SPATIAL_SEMANTICS = ("a 3D prefab: its root is a plain Transform, and each node 
 
 def _prefab_components(objects, root_transform_pid):
     """Every component object of the prefab hierarchy under *root_transform_pid*."""
+    return [obj for _, obj in _prefab_components_with_owners(objects, root_transform_pid)]
+
+
+def _prefab_components_with_owners(objects, root_transform_pid):
+    """Each component of the hierarchy with its owner: (GameObject path id, object)."""
     out, pending = [], [root_transform_pid]
     while pending:
         frame = objects[pending.pop()].read_typetree()
-        game_object = objects[frame["m_GameObject"]["m_PathID"]].read_typetree()
+        go_pid = frame["m_GameObject"]["m_PathID"]
+        game_object = objects[go_pid].read_typetree()
         for pid in _component_ids(game_object):
             obj = objects.get(pid)
             if obj is not None:
-                out.append(obj)
+                out.append((go_pid, obj))
         pending.extend(kid["m_PathID"] for kid in frame["m_Children"]
                        if kid["m_PathID"] in objects)
     return out
 
 
-def follow_prefab_reference(env, objects, holder_transform_pid, holder_class, field,
-                            resolver, file_objects):
-    """The prefab one component field of a holder prefab references.
+def _prefab_node_paths(objects, root_transform_pid):
+    """GameObject path id -> its node path under the root ("Root/Child/Leaf")."""
+    paths, pending = {}, [(root_transform_pid, None)]
+    while pending:
+        rect_pid, parent = pending.pop()
+        frame = objects[rect_pid].read_typetree()
+        go_pid = frame["m_GameObject"]["m_PathID"]
+        name = objects[go_pid].read_typetree().get("m_Name", "")
+        paths[go_pid] = name if parent is None else f"{parent}/{name}"
+        pending.extend((kid["m_PathID"], paths[go_pid]) for kid in frame["m_Children"]
+                       if kid["m_PathID"] in objects)
+    return paths
 
-    The holder prefab is the hierarchy under *holder_transform_pid* in
-    *objects*; exactly one component of *holder_class* in it must hold the
-    reference, read by its hand decode with nothing left over.  The reference
-    is resolved the way the layout resolves every pointer (*resolver*); it may
-    name the prefab's root GameObject or a component on it (a field typed as a
-    component class), and either must be the root of its prefab: its
-    transform has no father.  *file_objects* maps a serialized file name to its
-    objects (not consulted in single-file mode).  Returns the reference record
-    and ``(root GameObject path id, root transform path id, objects)``.
+
+def prefab_reference_holders(env, objects, holder_transform_pid, holder_class, field,
+                             resolver):
+    """The component of a holder prefab that holds a POINTER_PREFABS field.
+
+    A prefab that repeats its page holds one component of *holder_class* per
+    page, each with its own content reference: the holder is then the page's
+    component (see :func:`pointer_holder_page`).  Otherwise exactly one
+    component of the class holds the field.  Every component of the class is
+    read by its hand decode and must end exactly.  Returns ``(component, node
+    path, reference)``.
     """
-    holders = [obj for obj in _prefab_components(objects, holder_transform_pid)
-               if obj.type.name == "MonoBehaviour"
-               and talk.resolve_script_class(obj, resolver.mono_index) == holder_class]
-    if len(holders) != 1:
-        raise ValueError(f"{holder_class}: {len(holders)} components in the holder prefab")
-    holder = holders[0]
-    record = talk.decode_object(env, holder, resolver.mono_index, decoders=resolver.decoders)
-    if not record.get("hand_decoded") or record["residual"]:
-        raise ValueError(f"{holder_class} is not read exactly (hand decoded "
-                         f"{record.get('hand_decoded')}, residual {record['residual']})")
-    pointer = record["fields"].get(field)
-    if not isinstance(pointer, tuple):
-        raise ValueError(f"{holder_class} has no reference field {field}")
-    resolver.holder(holder)
-    target, state, file_name = resolver.locate(pointer)
-    if state is not None:
-        raise ValueError(f"{holder_class}.{field} {list(pointer)} is {state}")
-    target_objects = objects if file_name is None else file_objects(file_name)
+    records = []
+    for go_pid, obj in _prefab_components_with_owners(objects, holder_transform_pid):
+        if obj.type.name != "MonoBehaviour" \
+                or talk.resolve_script_class(obj, resolver.mono_index) != holder_class:
+            continue
+        record = talk.decode_object(env, obj, resolver.mono_index, decoders=resolver.decoders)
+        if not record.get("hand_decoded") or record["residual"]:
+            raise ValueError(f"{holder_class} is not read exactly (hand decoded "
+                             f"{record.get('hand_decoded')}, residual {record['residual']})")
+        pointer = record["fields"].get(field)
+        if not isinstance(pointer, tuple):
+            raise ValueError(f"{holder_class} has no reference field {field}")
+        records.append((go_pid, obj, pointer))
+    if not records:
+        raise ValueError(f"{holder_class}: no component in the holder prefab")
+    paths = _prefab_node_paths(objects, holder_transform_pid)
+    if len(records) == 1:
+        go_pid, obj, pointer = records[0]
+        if not pointer[1]:
+            raise ValueError(f"{holder_class}.{field} is null")
+        return obj, paths.get(go_pid), pointer
+    page = pointer_holder_page(objects, holder_transform_pid,
+                               [(go_pid, pointer) for go_pid, _, pointer in records])
+    for go_pid, obj, pointer in records:
+        if paths.get(go_pid) == page:
+            return obj, page, pointer
+    raise ValueError(f"{holder_class}: page {page} has no component")
+
+
+def _referenced_root(env, target, resolver, pointer, reference):
+    """The root GameObject and class of a reference target, refusing a nested one."""
     if target.type.name == "GameObject":
         go_pid, target_class = target.path_id, "UnityEngine.GameObject"
     else:
@@ -1936,9 +2104,37 @@ def follow_prefab_reference(env, objects, holder_transform_pid, holder_class, fi
         owner = (target_record["meta"]["m_GameObject"] if target_record["type"] == "MonoBehaviour"
                  else _pointer_tuple(target_record["fields"].get("m_GameObject")))
         if owner is None or owner[0] != 0:
-            raise ValueError(f"{holder_class}.{field}: the referenced {target_record['class']} "
-                             "has no GameObject in its own file")
+            raise ValueError(f"{reference['holderClass']}.{reference['field']}: the referenced "
+                             f"{target_record['class']} has no GameObject in its own file")
         go_pid, target_class = owner[1], target_record["class"]
+    return go_pid, target_class
+
+
+def follow_prefab_reference(env, objects, holder_transform_pid, holder_class, field,
+                            resolver, file_objects, allow_nested=False):
+    """The prefab one component field of a holder prefab references.
+
+    The holder prefab is the hierarchy under *holder_transform_pid* in
+    *objects*; one component of *holder_class* in it holds the field (the
+    repeated page's, when the prefab holds one component per page), read by its
+    hand decode with nothing left over.  The reference is resolved the way the
+    layout resolves every pointer (*resolver*); it may name the prefab's root
+    GameObject or a component on it (a field typed as a component class), and
+    either must be the root of its prefab: its transform has no father, unless
+    *allow_nested* keeps a page's reference to its own content.  *file_objects*
+    maps a serialized file name to its objects (not consulted in single-file
+    mode).  Returns the reference record and ``(root GameObject path id, root
+    transform path id, objects)``.
+    """
+    holder, holder_path, pointer = prefab_reference_holders(
+        env, objects, holder_transform_pid, holder_class, field, resolver)
+    resolver.holder(holder)
+    target, state, file_name = resolver.locate(pointer)
+    if state is not None:
+        raise ValueError(f"{holder_class}.{field} {list(pointer)} is {state}")
+    target_objects = objects if file_name is None else file_objects(file_name)
+    reference = {"holderClass": holder_class, "field": field}
+    go_pid, target_class = _referenced_root(env, target, resolver, pointer, reference)
     game_object = target_objects.get(go_pid)
     if game_object is None or game_object.type.name != "GameObject":
         raise ValueError(f"{holder_class}.{field}: GameObject {go_pid} is not in its file")
@@ -1948,17 +2144,179 @@ def follow_prefab_reference(env, objects, holder_transform_pid, holder_class, fi
     if len(transforms) != 1:
         raise ValueError(f"{holder_class}.{field}: GameObject {go_pid} has "
                          f"{len(transforms)} transforms")
-    if target_objects[transforms[0]].read_typetree()["m_Father"]["m_PathID"]:
-        raise ValueError(f"{holder_class}.{field}: GameObject {go_pid} is not a prefab root")
     reference = {
         "holderClass": holder_class, "field": field,
         "holderSerializedFile": holder.assets_file.name, "holderComponentPathId": holder.path_id,
+        "holderPath": holder_path,
         "pointer": [pointer[0], pointer[1]],
         **({"targetSerializedFile": file_name} if file_name is not None else {}),
         "targetClass": target_class, "targetPathId": target.path_id,
         "rootTransformType": target_objects[transforms[0]].type.name,
     }
-    return reference, (go_pid, transforms[0], target_objects)
+    if allow_nested or not target_objects[transforms[0]].read_typetree()["m_Father"]["m_PathID"]:
+        return reference, (go_pid, transforms[0], target_objects)
+    raise ValueError(f"{holder_class}.{field}: GameObject {go_pid} is not a prefab root")
+
+
+def follow_page_prefab_reference(env, objects, holder_transform_pid, holder_class, field,
+                                 resolver, file_objects, candidate_path):
+    """The prefab a repeated holder's page content holds, for a per-page field.
+
+    The page is the first page the holder's exporter builds (see
+    :func:`pointer_holder_page`); its field names a component under the page
+    (its list's cell instance).  The prefab is the node at *candidate_path*
+    under the first page the holder builds: its own cell, beside the cell the
+    list names.  Returns the reference record and ``(root GameObject path id,
+    root transform path id, objects)`` of that node.
+    """
+    records = _holder_records(env, objects, holder_transform_pid, holder_class, field, resolver)
+    page = pointer_holder_page(objects, holder_transform_pid,
+                               [(go_pid, pointer) for go_pid, _, pointer in records])
+    reference, _ = follow_prefab_reference(env, objects, holder_transform_pid, holder_class,
+                                           field, resolver, file_objects, allow_nested=True)
+    reference["pageInstancesPathIds"] = sorted(go_pid for go_pid, _, pointer in records
+                                               if pointer[1])
+    page_go = next(go_pid for go_pid, path in
+                   _prefab_node_paths(objects, holder_transform_pid).items() if path == page)
+    target_objects = (file_objects(reference["targetSerializedFile"])
+                      if "targetSerializedFile" in reference else objects)
+    target_record = talk.decode_object(env, target_objects[reference["targetPathId"]],
+                                       resolver.mono_index, decoders=resolver.decoders)
+    target_go = target_record["meta"]["m_GameObject"][1]
+    go_pid, transform_pid = page_content_node(objects, holder_transform_pid, page_go,
+                                              candidate_path)
+    reference.update(page=page_go, candidatePath=candidate_path,
+                     targetNestedPathId=reference["targetPathId"],
+                     pageListGameObjectPathId=target_go,
+                     pageContentRootPathId=go_pid,
+                     pageContentRootGameObjectPathId=go_pid)
+    return reference, (go_pid, transform_pid, objects)
+
+
+def page_content_node(objects, root_transform_pid, page_go_pid, candidate_path):
+    """The (GameObject, RectTransform) path ids of *candidate_path* under a page."""
+    paths = _prefab_node_paths(objects, root_transform_pid)
+    if page_go_pid not in paths:
+        raise ValueError(f"page {page_go_pid} is not in the prefab")
+    path = f"{paths[page_go_pid]}/{candidate_path}"
+    for go_pid, node_path in paths.items():
+        if node_path == path:
+            game_object = objects[go_pid].read_typetree()
+            rect = next(pid for pid in _component_ids(game_object) if pid in objects
+                        and objects[pid].type.name in ("RectTransform", "Transform"))
+            return go_pid, rect
+    raise ValueError(f"the page {paths[page_go_pid]} has no node {candidate_path}")
+
+
+def _holder_records(env, objects, holder_transform_pid, holder_class, field, resolver):
+    """The read (GameObject path id, component, reference) of every component of
+    a class in the holder prefab; each must end exactly."""
+    records = []
+    for go_pid, obj in _prefab_components_with_owners(objects, holder_transform_pid):
+        if obj.type.name != "MonoBehaviour" \
+                or talk.resolve_script_class(obj, resolver.mono_index) != holder_class:
+            continue
+        record = talk.decode_object(env, obj, resolver.mono_index, decoders=resolver.decoders)
+        if not record.get("hand_decoded") or record["residual"]:
+            raise ValueError(f"{holder_class} is not read exactly (hand decoded "
+                             f"{record.get('hand_decoded')}, residual {record['residual']})")
+        pointer = record["fields"].get(field)
+        if not isinstance(pointer, tuple):
+            raise ValueError(f"{holder_class} has no reference field {field}")
+        records.append((go_pid, obj, pointer))
+    return records
+
+
+def placeholder_root(objects, name):
+    """The (GameObject, transform) path ids of a placeholder prefab's root: the
+    only root of *name* whose hierarchy has nodes."""
+    roots = [pid for pid, obj in objects.items()
+             if obj.type.name in ("RectTransform", "Transform")
+             and not obj.read_typetree()["m_Father"]["m_PathID"]
+             and len(_prefab_node_paths(objects, pid)) > 1
+             and objects[obj.read_typetree()["m_GameObject"]["m_PathID"]]
+             .read_typetree().get("m_Name") == name]
+    if len(roots) != 1:
+        raise ValueError(f"{len(roots)} placeholder roots named {name}")
+    go_pid = objects[roots[0]].read_typetree()["m_GameObject"]["m_PathID"]
+    return go_pid, roots[0]
+
+
+def _carries_field(obj, resolver, field):
+    """Whether a component reads exactly and its own fields include *field*; a
+    class whose chain does not read is no holder, whatever its name."""
+    try:
+        record = talk.decode_object(None, obj, resolver.mono_index,
+                                    decoders=resolver.decoders)
+    except (ValueError, struct.error):
+        return False
+    return bool(record.get("hand_decoded")) and not record["residual"] \
+        and field in record["fields"]
+
+
+def follow_placeholder_reference(env, objects, holder_transform_pid, resolver, field):
+    """The reference record of the holder component whose field names a placeholder
+    a list fills."""
+    holder_class = _holder_class_of(objects, holder_transform_pid, field, resolver)
+    holder = _reference_holder(env, objects, holder_transform_pid, holder_class, field, resolver)
+    record = talk.decode_object(env, holder, resolver.mono_index, decoders=resolver.decoders)
+    resolver.holder(holder)
+    reference = {
+        "holderClass": record["class"], "field": field,
+        "holderSerializedFile": holder.assets_file.name,
+        "holderComponentPathId": holder.path_id,
+        "holderPath": _prefab_node_paths(objects, holder_transform_pid).get(
+            owner_path_id(holder)),
+        "pointer": list(record["fields"][field]),
+    }
+    return reference, objects
+
+
+def _holder_class_of(objects, holder_transform_pid, field, resolver):
+    """The class of the holder prefab's one component that carries *field*."""
+    classes = [talk.resolve_script_class(obj, resolver.mono_index)
+               for obj in _prefab_components(objects, holder_transform_pid)
+               if obj.type.name == "MonoBehaviour"
+               and _carries_field(obj, resolver, field)]
+    if len(classes) != 1:
+        raise ValueError(f"{len(classes)} components hold {field}")
+    return classes[0]
+
+
+def _components_of_go(objects, game_object_pid):
+    """The components the GameObject lists, as objects."""
+    out = []
+    for entry in objects[game_object_pid].read_typetree().get("m_Component", []):
+        candidate = objects.get(entry["component"]["m_PathID"])
+        if candidate is not None:
+            out.append(candidate)
+    return out
+
+
+def owner_path_id(obj):
+    """The GameObject path id a MonoBehaviour reports in its serialized prefix."""
+    fid, pid = talk.Reader(obj.get_raw_data()).pptr()
+    return pid if fid == 0 else None
+
+
+def _reference_holder(env, objects, holder_transform_pid, holder_class, field, resolver):
+    """The single component of the holder that carries *field*.
+
+    Only the holder's own class is read here: a component of another class in
+    the same prefab that its chain does not read exactly fails the prefab's
+    accounting on its own and is none of this reference's business.
+    """
+    holders = []
+    for _, obj in _prefab_components_with_owners(objects, holder_transform_pid):
+        if obj.type.name != "MonoBehaviour" \
+                or talk.resolve_script_class(obj, resolver.mono_index) != holder_class:
+            continue
+        record = talk.decode_object(env, obj, resolver.mono_index, decoders=resolver.decoders)
+        if record.get("hand_decoded") and not record["residual"] and field in record["fields"]:
+            holders.append(obj)
+    if len(holders) != 1:
+        raise ValueError(f"{holder_class}: {len(holders)} components hold {field}")
+    return holders[0]
 
 
 def _pointer_tuple(value):
@@ -2405,6 +2763,7 @@ REFERENCED_FAMILY_ROOTS = {
     "inventory": REFERENCED_PREFAB_ROOTS,
     "craft": REFERENCED_PREFAB_ROOTS,
     "fieldhud": ("mysekai/prefabs/",),
+    "missioncell": REFERENCED_PREFAB_ROOTS,
 }
 # Referenced prefabs whose file name another Resources folder repeats: the
 # exact Resources key of each, by the prefab name the family exports.
@@ -2434,17 +2793,25 @@ def _file_objects(env, name):
     return dict(env.files[name].objects)
 
 
-def _mono_accounting(env, objects, mono_index, decoders):
+def _mono_accounting(env, objects, mono_index, decoders, excluded=None):
     """Every MonoBehaviour of one serialized file against the registry.
 
     Returns per-class counts: hand-decoded with zero residual, hand-decoded
     with a residual (by residual size), over-read (the chain ran past the
-    object), and raw (no decoder; raw length kept).  Nothing is dropped.
+    object), and raw (no decoder; raw length kept).  Nothing is dropped, except
+    the objects *excluded* (path id -> class) — a prefab built from part of a
+    file leaves out the copies of its nodes the file also holds; each excluded
+    object is reported by class and path id under ``excluded``.
     """
     ok, residual, overread, raw, unresolved = {}, {}, {}, {}, 0
+    skipped = {}
     total = 0
+    excluded = excluded or {}
     for obj in objects.values():
         if obj.type.name != "MonoBehaviour":
+            continue
+        if obj.path_id in excluded:
+            skipped.setdefault(excluded[obj.path_id], []).append(obj.path_id)
             continue
         total += 1
         cls = talk.resolve_script_class(obj, mono_index)
@@ -2471,6 +2838,7 @@ def _mono_accounting(env, objects, mono_index, decoders):
         "handDecodedResidual": dict(sorted(residual.items())),
         "overRead": dict(sorted(overread.items())),
         "raw": dict(sorted(raw.items())),
+        "excluded": {cls: sorted(ids) for cls, ids in sorted(skipped.items())},
         "counts": {
             "handDecodedExact": sum(ok.values()),
             "handDecodedResidual": sum(sum(v.values()) for v in residual.values()),
@@ -2616,10 +2984,14 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
                       bundles_root=None, font_bundles_root=None) -> dict:
     """Write layout documents for *prefabs* from APK player data.
 
-    *apks* are the base APK and the install-time asset pack; *client_version*
-    selects one table of ``ui.jp_decoders.DECODERS_BY_VERSION`` (an unsupported
-    version is an error that names the supported ones).  Each prefab is found
-    through the Resources index and read from
+    *apks* are the base APK and the install-time asset pack.  *client_version*
+    names the client the manifest and every document record (a version whose
+    layouts this module does not know is an error that names the supported
+    ones); it does not choose a decoder chain.  Each object's chain comes from
+    its serialized type's hash (``ui.jp_decoders.TYPE_LAYOUTS``), so one file
+    may mix the 6.8.1 and the 7.0.0 layout of different classes, and an object
+    of an unrecorded layout is refused by class, hash and file.  Each prefab is
+    found through the Resources index and read from
     its own serialized file with that file's externals closure loaded.  Next
     to the documents the run writes the screen-layer data of every selected
     screen layer, the merged wording dictionary (built-in CSV + master
@@ -2641,11 +3013,7 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
     from ui import ui_settings
     from core.master import Master
 
-    if client_version not in jp_decoders.DECODERS_BY_VERSION:
-        raise ValueError(f"no decoder chains registered for JP {client_version}; "
-                         f"supported versions: "
-                         f"{', '.join(sorted(jp_decoders.DECODERS_BY_VERSION))}")
-    chains = jp_decoders.decoders_for(client_version)
+    jp_decoders.check_version(client_version)
     selected = list(dict.fromkeys(prefabs or ()))
     family_of = {name: family for family, names in JP_FAMILIES.items()
                  for name in names}
@@ -2697,6 +3065,8 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
     player = store.environment()
     player.add(["globalgamemanagers"], follow=False)
     env = player.env
+    # An object's chain is chosen by its own serialized type hash, never by the
+    # run's client version: one player data mixes both layouts of a class.
     manager, container = resource_container(env)
 
     def resource(key):
@@ -2714,11 +3084,15 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
                 and key.rsplit("/", 1)[-1] == prefab.lower()]
         if prefab in REFERENCED_PREFAB_KEYS:
             keys = [key for key in container if key == REFERENCED_PREFAB_KEYS[prefab]]
-        if not keys and family_of[prefab] in ("menu", "dialogs"):
+        if not keys and family_of[prefab] in ("menu", "dialogs", "mission", "convert",
+                                              "missioncell"):
             # A cell a menu dialog instantiates from a serialized prefab field
             # (CommonRewardSubWindowDialog's thumbnail with balloon) is indexed
-            # under the referenced-prefab roots, not under Dialog/.
-            keys = [key for key in container if key.startswith(REFERENCED_PREFAB_ROOTS)
+            # under the referenced-prefab roots, not under Dialog/, and a
+            # mission cell under mysekai/prefabs/mission/.
+            roots = REFERENCED_PREFAB_ROOTS + REFERENCED_FAMILY_ROOTS.get(family_of[prefab], ()) \
+                + MISSION_PREFAB_ROOT
+            keys = [key for key in container if key.startswith(roots)
                     and key.rsplit("/", 1)[-1] == prefab.lower()]
         if len(keys) != 1:
             raise ValueError(f"{prefab}: {len(keys)} Resources keys match")
@@ -2726,14 +3100,32 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
 
     plan = []
     for prefab in selected:
-        if prefab in POINTER_PREFABS:
+        if prefab in PLACEHOLDER_PREFABS:
+            # The cell a list fills is the Resources prefab of the cell's name.
+            key = PLACEHOLDER_PREFABS[prefab]
+            entry, target = resource(key)
+            plan.append({"prefab": prefab, "family": family_of[prefab], "key": key,
+                         "entry": entry, "target": target,
+                         "reference": {"placeholder": key,
+                                       "filledBy": PAGE_PREFABS[prefab][0] + "." + PAGE_PREFABS[prefab][1]}})
+            continue
+        if prefab in POINTER_PREFABS or prefab in POINTER_PAGE_PREFABS \
+                or prefab in PAGE_PREFABS:
             # No Resources key names it: its holder's key does, and the holder's
             # reference is followed once the files are loaded (below).
-            holder = POINTER_PREFABS[prefab][0]
+            pointer = (POINTER_PREFABS.get(prefab) or POINTER_PAGE_PREFABS.get(prefab)
+                       or PAGE_PREFABS[prefab])
+            holder = pointer[0]
             holder_key = resource_key(holder)
             holder_entry, holder_target = resource(holder_key)
+            # The holder's class, by name: a handler registered for the reading
+            # module may resolve a prefab id to that prefab's name instead.
+            holder_class = None
             plan.append({"prefab": prefab, "family": family_of[prefab], "key": None,
-                         "entry": None, "target": None, "via": POINTER_PREFABS[prefab],
+                         "entry": None, "target": None, "via": pointer,
+                         "via_page": prefab in POINTER_PAGE_PREFABS,
+                         "via_cell": prefab in PAGE_PREFABS,
+                         "holder_class": holder_class,
                          "holder": {"prefab": holder, "resourceKey": holder_key,
                                     "resourceEntry": {"fileId": holder_entry[0],
                                                       "pathId": holder_entry[1]},
@@ -2783,7 +3175,12 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
         raise FileNotFoundError(f"externals no APK member supplies: {player.missing}")
 
     mono_index = talk.build_monoscript_index(env)
-    decoders = {**talk._DECODERS, **EXTRA_DECODERS, **chains, **ui_settings.DECODERS}
+    # The layout of each JP object comes from its serialized type hash
+    # (ui.jp_decoders.TYPE_LAYOUTS); the base table holds the other chains.
+    chains = jp_decoders.TypeHashChains({**talk._DECODERS, **EXTRA_DECODERS,
+                                         **ui_settings.DECODERS})
+    decoders = chains
+    player_add = []
     for item in plan:
         if item.get("via") is None:
             continue
@@ -2793,16 +3190,48 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
         if len(holder_roots) != 1 or holder_roots[0][0] != holder_go:
             raise ValueError(f"{item['prefab']}: the holder's Resources target is not its "
                              f"file's unique root of that name: {holder_roots}")
-        reference, (go_pid, transform_pid, _) = follow_prefab_reference(
-            env, holder_objects, holder_roots[0][1], item["via"][1], item["via"][2],
-            Resolver({}, mono_index, None, env=env, decoders=decoders),
-            lambda name: _file_objects(env, name))
+        if item.get("via_page"):
+            reference, (go_pid, transform_pid, _) = follow_page_prefab_reference(
+                env, holder_objects, holder_roots[0][1], item["via"][1], item["via"][2],
+                Resolver({}, mono_index, None, env=env, decoders=decoders),
+                lambda name: _file_objects(env, name), item["via"][3])
+        elif item.get("via_cell"):
+            # The list names a placeholder cell instance; the cell prefab is the
+            # Resources prefab named for that placeholder.
+            reference, _ = follow_placeholder_reference(
+                env, holder_objects, holder_roots[0][1],
+                Resolver({}, mono_index, None, env=env, decoders=decoders), item["via"][1])
+            loaded = resource(PLACEHOLDER_PREFABS[item["prefab"]])
+            player.add([loaded[1][0]])
+            go_pid, transform_pid = placeholder_root(
+                _file_objects(env, loaded[1][0]), item["prefab"])
+            reference["targetSerializedFile"] = loaded[1][0]
+            reference["placeholder"] = PLACEHOLDER_PREFABS[item["prefab"]]
+        else:
+            reference, (go_pid, transform_pid, _) = follow_prefab_reference(
+                env, holder_objects, holder_roots[0][1], item["via"][1], item["via"][2],
+                Resolver({}, mono_index, None, env=env, decoders=decoders),
+                lambda name: _file_objects(env, name))
+        if "targetSerializedFile" not in reference:
+            reference["targetSerializedFile"] = holder_file
         item["target"] = (reference["targetSerializedFile"], go_pid)
         item["root"] = (go_pid, transform_pid)
+        # The referenced prefab's own file joins the loaded set before the
+        # accounting below, or its components read outside the registry.
+        if reference["targetSerializedFile"] not in player.loaded:
+            player_add.append(reference["targetSerializedFile"])
+        item["holder_reference"] = (holder_go, reference)
+    if player.missing:
+        raise FileNotFoundError(f"externals no APK member supplies: {player.missing}")
+    player.add(player_add)
+    for item in plan:
+        if item.get("via") is None:
+            continue
         holder = item["holder"]
         item["reference"] = {"holderPrefab": holder["prefab"], "holderResourceKey": holder["resourceKey"],
                              "holderResourceEntry": holder["resourceEntry"],
-                             "holderRootGameObjectPathId": holder_go, **reference}
+                             "holderRootGameObjectPathId": item["holder_reference"][0],
+                             **item["holder_reference"][1]}
     orphans = [item["prefab"] for item in plan if item["target"] is None]
     if orphans:
         raise ValueError(f"prefabs without a Resources target and no reference reach "
@@ -2937,7 +3366,53 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
         prefab, family = item["prefab"], item["family"]
         file_name, root_pid = item["target"]
         objects = _file_objects(env, file_name)
-        accounting = _mono_accounting(env, objects, mono_index, decoders)
+        leftovers = None
+        if item.get("via_page"):
+            # The page-built prefab is the page's own cell, which shares the
+            # holder's class.  Its own accounting covers the file up to the node
+            # that ends the prefab at the next page copy, in the file's object
+            # order (the file is laid out with its sub-scenes' objects in path
+            # id order); the holder's dialog, which also sits after it, is left
+            # to the report below instead of failing the prefab, and the report
+            # names it.  Copies laid out after the last page copy stay out.
+            reference = item["reference"]
+            later_copies = sorted(pid for pid, obj in objects.items()
+                                  if pid > reference["pageContentRootGameObjectPathId"]
+                                  and obj.type.name == "MonoBehaviour"
+                                  and talk.resolve_script_class(obj, mono_index)
+                                  == reference["targetClass"])
+            end = later_copies[0] if later_copies else max(objects) + 1
+            in_scope = {pid: obj for pid, obj in objects.items() if pid < end}
+            out_of_scope = {pid: talk.resolve_script_class(objects[pid], mono_index)
+                            for pid in objects if pid >= end
+                            and objects[pid].type.name == "MonoBehaviour"}
+            objects = in_scope
+            if out_of_scope:
+                leftovers = out_of_scope
+                reference["excludedFromOwnAccounting"] = {
+                    "pathIds": sorted(out_of_scope),
+                    "reason": "objects laid out after the last page copy of the cell: "
+                              "the holder's own dialog object",
+                }
+        if prefab in CONVERT_ATOMIC_OBJECTS_681:
+            # The file keeps atomic scene objects with four-byte entries its
+            # typetree does not describe; the prefab document leaves them out
+            # and names them in its source block.
+            classes = CONVERT_ATOMIC_OBJECTS_681[prefab]
+            atomic = {pid: talk.resolve_script_class(obj, mono_index)
+                      for pid, obj in objects.items()
+                      if obj.type.name == "MonoBehaviour"
+                      and talk.resolve_script_class(obj, mono_index) in classes
+                      and not talk.decode_object(env, obj, mono_index,
+                                                 decoders=decoders)["hand_decoded"]}
+            if atomic:
+                leftovers = atomic
+                item["reference"]["atomicObjects"] = {
+                    "byClass": {cls: sorted(pid for pid, c in atomic.items() if c == cls)
+                                for cls in sorted(set(atomic.values()))},
+                    "reason": "scene objects the file keeps beside the prefab",
+                }
+        accounting = _mono_accounting(env, objects, mono_index, decoders, leftovers)
         counts = accounting["counts"]
         if counts["handDecodedResidual"] or counts["overRead"]:
             failures.append({"prefab": prefab, "family": family,
@@ -2947,7 +3422,9 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
         root = objects.get(root_pid)
         if root is None or root.type.name != "GameObject":
             raise ValueError(f"{prefab}: Resources target is not a GameObject")
-        if item.get("via") is not None:
+        if item.get("via_page") or item.get("via_cell"):
+            go_pid, transform_pid = item["root"]
+        elif item.get("via") is not None:
             # Reached through a reference: the root follow_prefab_reference proved.
             name = root.read_typetree().get("m_Name")
             if name != prefab:
@@ -2968,7 +3445,11 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
                if item["entry"] is not None else {"reference": item["reference"]}),
             "rootGameObjectPathId": go_pid,
             "rootTransformPathId": transform_pid,
-            "loading": pointer_loading(prefab) if item.get("via") is not None else LOADING[family],
+            "loading": (placeholder_loading(prefab) if prefab in PLACEHOLDER_PREFABS
+                        else page_pointer_loading(prefab) if item.get("via_page")
+                        else cell_pointer_loading(prefab) if item.get("via_cell")
+                        else pointer_loading(prefab) if item.get("via") is not None
+                        else LOADING[family]),
             "sha256": store.sha256(player.member(file_name)),
             "members": store.members_of(player.member(file_name)),
         }
@@ -3112,7 +3593,9 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
                    "loadedFiles": len(player.loaded), "shallowFiles": list(player.shallow),
                    "missingExternals": list(player.missing)},
         "decoderChains": {"region": jp_decoders.REGION, "version": client_version,
-                          "overridden": sorted(chains)},
+                          "layouts": sorted(jp_decoders.VERSIONS),
+                          "layoutClasses": len(jp_decoders.LAYOUT_CLASSES),
+                          "typeLayouts": len(jp_decoders.TYPE_LAYOUTS)},
         "documents": rows,
         "failures": failures,
     }

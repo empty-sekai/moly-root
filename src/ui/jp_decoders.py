@@ -101,7 +101,9 @@ unchanged.
 JP 7.0.0 keeps every 6.8.1 chain and changes five classes.  Each change is a
 serialized field the 7.0.0 declarations insert; the added bytes show as a
 uniform residual on the 6.8.1 chain, and the 6.8.1 objects show an over-read
-on the 7.0.0 chain, so the client version selects the table:
+on the 7.0.0 chain.  Which chain an object takes is decided per object, by the
+serialized type hash its file records (``TYPE_LAYOUTS``), because one client's
+data mixes both layouts of a class:
 
 * ``Sekai.UI.CustomScrollRect`` adds ``normalizedPositionTolerance`` (float)
   after ``mask``, before the runtime-only ``hasRebuiltLayout`` flag.
@@ -118,6 +120,14 @@ on the 7.0.0 chain, so the client version selects the table:
 
 Field order is the declaration order in the 7.0.0 managed types; each added
 field is a reference (12 bytes) except the tolerance, a float (4 bytes).
+
+The mission screen, its dialogs and the sub-window base components are decoded
+in ``ui.mission_layout``; the convert-furniture screen and its dialogs in
+``ui.convert_layout``.  The sub-window dialogs, the shorten dialog and
+``Sekai.UI.ListView`` have one layout in both clients; the layout tables carry
+the chain of the layout the probe read to zero residual.  ``Sekai.Mysekai.
+UIWaveGaugeAnimation`` stays undecoded: it declares two references but its
+objects carry one.
 """
 from __future__ import annotations
 
@@ -129,6 +139,8 @@ from ui import inventory_layout
 from ui import field_hud_layout
 from ui import craft_layout
 from ui import bgm_select_layout
+from ui import mission_layout
+from ui import convert_layout
 
 
 REGION = "jp"
@@ -430,17 +442,23 @@ DECODERS = {
     **field_hud_layout.DECODERS,
     **craft_layout.JP_DECODERS,
     **bgm_select_layout.JP_DECODERS,
+    **mission_layout.DECODERS,
+    **convert_layout.DECODERS,
 }
 
-
 # ---------------------------------------------------------------------------
-# JP 7.0.0: the 6.8.1 table with the five classes whose serialized layout
-# changed.  Every other class reads the same bytes in both clients.
+# JP 7.0.0: the classes whose serialized layout the 7.0.0 client changed.
+# Every other class reads the same bytes in both clients.
 # ---------------------------------------------------------------------------
 
 def decode_custom_scroll_rect_700(r: talk.Reader) -> dict:
-    """CustomScrollRect (7.0.0): the 6.8.1 fields, then
-    ``normalizedPositionTolerance``; ``hasRebuiltLayout`` is runtime state."""
+    """CustomScrollRect : ScrollRect (7.0.0).
+
+    The 7.0.0 declaration adds one field after the inherited ScrollRect chain:
+    ``private float normalizedPositionTolerance;`` ([SerializeField], [Min],
+    header about the inertia scroll tolerance in px).  ``hasRebuiltLayout`` and
+    the drag callbacks after it are runtime state and are not serialized.
+    """
     d = editor_layout.decode_custom_scroll_rect(r)
     d["normalizedPositionTolerance"] = r.f32()
     return d
@@ -484,29 +502,213 @@ def decode_honor_image_700(r: talk.Reader) -> dict:
     return editor_layout.refs(r, HONOR_IMAGE_700)
 
 
-DECODERS_700 = {
-    **DECODERS,
+def decode_list_view_700(r: talk.Reader) -> dict:
+    """Sekai.UI.ListView: the fields it serializes, then the cell a page fills
+    after ``listViewItemPrefab`` (both clients' list objects carry it)."""
+    d = editor_layout.decode_list_view(r)
+    d["filledCell"] = r.pptr()
+    return d
+
+# The chains that read the 6.8.1 and the 7.0.0 serialized layouts.  The
+# object's own serialized type hash chooses one of the two (see
+# :data:`TYPE_LAYOUTS` below), never the client version of the run.
+SHARED = dict(DECODERS)
+# The 6.8.1 layout of the classes whose 7.0.0 declaration changed: the convert
+# family has no click events after its chains, the start and complete dialogs
+# end at their two trailing references, and the shorten dialog stops after its
+# own references.
+ONLY_681 = {
+    "Sekai.Mysekai.MysekaiMissionStartDialog":
+        mission_layout.decode_mission_animation_dialog_681,
+    "Sekai.Mysekai.MysekaiMissionCompleteDialog":
+        mission_layout.decode_mission_animation_dialog_681,
+    "Sekai.Mysekai.MysekaiConvertFurnitureShortenDialog":
+        convert_layout.decode_shorten_dialog_681,
+    "Sekai.CrystalShop.ShopConfirmDialogPriceParts": convert_layout.decode_price_parts,
+    "Sekai.Mysekai.MysekaiConvertItemDetailDialog": convert_layout.decode_convert_item_detail_dialog,
+    "Sekai.Mysekai.MysekaiConvertStartConfirmDialog": convert_layout.decode_convert_start_confirm_dialog,
+    "Sekai.Mysekai.MysekaiConvertBlueprintLotterySubWindowDialog": convert_layout.decode_lottery_dialog,
+    "Sekai.Mysekai.MysekaiConvertRecordLotterySubWindowDialog": convert_layout.decode_lottery_dialog,
+}
+DECODERS_681 = {**SHARED, **ONLY_681}
+# The 7.0.0 layout: the four dialogs end at their click event, and the five
+# classes the 7.0.0 declaration changed read their added fields.
+ONLY_700 = {
     "Sekai.UI.CustomScrollRect": decode_custom_scroll_rect_700,
+    "Sekai.Mysekai.MysekaiMissionStartDialog": mission_layout.decode_mission_start_dialog,
+    "Sekai.Mysekai.MysekaiMissionCompleteDialog": mission_layout.decode_mission_complete_dialog,
+    "Sekai.Mysekai.MysekaiConvertFurnitureShortenDialog":
+        convert_layout.decode_convert_shorten_dialog,
+    "Sekai.CrystalShop.ShopConfirmDialogPriceParts": convert_layout.decode_price_parts,
+    "Sekai.Mysekai.MysekaiConvertItemDetailDialog": convert_layout.decode_convert_item_detail_dialog,
+    "Sekai.Mysekai.MysekaiConvertStartConfirmDialog": convert_layout.decode_convert_start_confirm_dialog,
+    "Sekai.Mysekai.MysekaiConvertBlueprintLotterySubWindowDialog": convert_layout.decode_lottery_dialog,
+    "Sekai.Mysekai.MysekaiConvertRecordLotterySubWindowDialog": convert_layout.decode_lottery_dialog,
     "Sekai.Mysekai.Inventory.CraftPreview": decode_craft_preview_700,
     "Sekai.Mysekai.MysekaiInfoOption1Page": decode_mysekai_info_option_page_700,
     "Sekai.Mysekai.ContentList.ContentListSelectorCell":
         decode_content_list_selector_cell_700,
     "Sekai.UIPartsHonorImage": decode_honor_image_700,
 }
-
-
-DECODERS_BY_VERSION = {
-    "6.8.1": DECODERS,
+DECODERS_700 = {**SHARED, **ONLY_700}
+LAYOUT_CHAINS = {
+    "6.8.1": DECODERS_681,
     "7.0.0": DECODERS_700,
 }
-# The client versions a JP layout export accepts, oldest first.
-VERSIONS = tuple(DECODERS_BY_VERSION)
+# The layout versions an export knows, oldest first.
+VERSIONS = tuple(LAYOUT_CHAINS)
+
+# (class name, serialized type hash hex) -> the layout the bytes carry.
+TYPE_LAYOUTS = {
+    ("Sekai.ColorFader", "2a6b976ee5ac7d8120ec45875b46424f"): "6.8.1",
+    ("Sekai.CrystalShop.ShopConfirmDialogPriceParts", "2a424898f46b3aeb4201e3430b854139"): "6.8.1",
+    ("Sekai.EventBreakTimeController", "273defc7d306842f06a7362af5082289"): "6.8.1",
+    ("Sekai.FreeWordFilterContent", "ec8ac42a1ac35e0fff58bbf777bd1913"): "6.8.1",
+    ("Sekai.MissionCellView", "4528ff5bf7a4ad0f3ff6234e505a3390"): "6.8.1",
+    ("Sekai.MusicSelect", "5eb6db0de11175cd078d521f3dbbe837"): "6.8.1",
+    ("Sekai.MusicSelectListView", "acdd2264ac9ad37ba8e797d013f49289"): "6.8.1",
+    ("Sekai.Mysekai.ContentList.ContentListSelectorCell", "a2c862aac38ddb0d86677af405a5b440"): "7.0.0",
+    ("Sekai.Mysekai.ContentList.ContentListSelectorCell", "c1cd8e01aa2d79ed7d2a3454cc7e5627"): "6.8.1",
+    ("Sekai.Mysekai.DeliveryActionButton", "2a79f1aa6a1d01a3c5a4463d78148ca1"): "6.8.1",
+    ("Sekai.Mysekai.FixtureAttentionHeadUpDisplay", "f5f144cfc3a127fe8433020d8691597f"): "6.8.1",
+    ("Sekai.Mysekai.HarvestCollectItemNoticeCell", "fc749ec245a4a5b1b509fd722f86bab5"): "6.8.1",
+    ("Sekai.Mysekai.Inventory.CraftPreview", "7d2a01edecbaccc53499cd089c7cc645"): "6.8.1",
+    ("Sekai.Mysekai.Inventory.CraftPreview", "dc8a5d454296fd711231cf2553f6322a"): "7.0.0",
+    ("Sekai.Mysekai.MySekaiCommonNoticeCell", "0ec9ac35681fcf0dff95650d2e867e70"): "6.8.1",
+    ("Sekai.Mysekai.MySekaiMissionNoticeCell", "df46f71d0a692ab152ac7cd070ead138"): "6.8.1",
+    ("Sekai.Mysekai.MysekaFixtureHeadUpDisplayController", "30eca0d31977a42bf3a5b3ee1fb8fb60"): "6.8.1",
+    ("Sekai.Mysekai.MysekaObjectHeadUpDisplayController", "4de0e3bd2bae199b07c4078c8da59c18"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiBlueprintRandomBoxCategoryGroup", "688fe826487e6ef9ffec251b7bd62c10"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiCharaRewardSubWindowDialog", "102b9be015b61f1dfcde35d12063bf3e"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertBlueprintLotterySubWindowDialog", "64268edf9e6dcac8da20d9354e609f5b"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertFixtureSlotCellButtonView", "1e670b5ed5812cd4f73c1ce6dd65ccd1"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertFixtureSlotCellGaugeView", "55a7c09d1b02db7290639c307f14c6fa"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertFixtureSlotCellTimerView", "3b38c3437f71963e047cd4924bb0858b"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertFixtureSlotView", "e41d2d48e753121ef27962b3bd4abd25"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertFurnitureItemSelectDetailView", "4d1b497813a46e578922aeea115ec4e9"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertFurnitureItemSelectListView", "19ee8fadba780da115d8a4ce83fa4b57"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertFurnitureItemSelectView", "a9af89ccb9824a8612aef787a24ea91f"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertFurniturePresenter", "ebd90cac65eaf9c31d9f8e4cd6923709"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertFurnitureShortenDialog", "039dab4c3e4a76389d2181077d337081"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertFurnitureSlotCellView", "d104b39416c155118e1491590533f647"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertFurnitureSlotView", "6ae7fa1f21be895cf6352ea4c9797c6c"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertItemDetailDialog", "d37a053e352c857bd73513c1bf90a861"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertRecordLotterySubWindowDialog", "eb2e3ee399c923846ee095b9096f2a5d"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiConvertStartConfirmDialog", "5fe7a0e916a65f662aec7a683cf9ad39"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiInfoOption1Page", "07953da62e9d4b0fa7626199c506edd3"): "7.0.0",
+    ("Sekai.Mysekai.MysekaiInfoOption1Page", "4ba0531b6d14da8607273f8b5830fb5a"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiInfoRankPage", "53025f4dc36a601625da7de5075d5831"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiMenuUIContent", "ff6762695583aac4822ff3c2462e8af3"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiMissionCell", "8d02604548a409d6a757d31f8b2ad723"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiMissionCompleteDialog", "91fb0c20331bf3cf80373d6cb2300317"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiMissionDetailDialog", "3c47f55901f7177b5e7c2c0451f69096"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiMissionInfoDialog", "adc213e009f3821dfc1fc3d180cde13b"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiMissionListDialog", "94413a501e37aa2770cb3ab9df08ac62"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiMissionRewardCell", "9826b83cb3b1676a3d94e28c82bab9b8"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiMissionSheetCell", "74e6cf4de10e6b07d6003bd1300409b3"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiMissionStartDialog", "e5238fd557f1bd48f01ff9f1c3487a11"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiMissionView", "9fc656a8638e90190d7fb884bac3c96f"): "6.8.1",
+    ("Sekai.Mysekai.MysekaiRecordRandomBoxCategoryGroup", "67262baf1ebbe9a10743815b0ca594b7"): "6.8.1",
+    ("Sekai.Mysekai.ObjectAttentionHeadUpDisplay", "82568351f2cc147d927f9a85c5627acb"): "6.8.1",
+    ("Sekai.Mysekai.ScreenLayerMysekaiBGMSelect", "751580a12d737aef7e0495dc694df994"): "6.8.1",
+    ("Sekai.Mysekai.ScreenLayerMysekaiCraft", "45ce5fb56f25251fe43e8190e33a1005"): "6.8.1",
+    ("Sekai.Mysekai.ScreenLayerMysekaiHUD", "47e09b1c3e1a9f6870ab475159ff3e7b"): "6.8.1",
+    ("Sekai.Mysekai.ScreenLayerMysekaiInfo", "614bb1d0094edb9b0d37d02558966595"): "6.8.1",
+    ("Sekai.Mysekai.ScreenLayerMysekaiInventory", "4d98231acd6ce820d33175ccb5a5cb1e"): "6.8.1",
+    ("Sekai.Mysekai.ScreenLayerMysekaiNotice", "2e803bdb13290549256936e8888ce9f0"): "6.8.1",
+    ("Sekai.Mysekai.ScreenLayerSiteEditMode", "9b4d415dabeecd2dc7c32171490c4cad"): "6.8.1",
+    ("Sekai.Mysekai.SiteEdit.SiteEditView", "1775757ebba02683070c597055d3904f"): "6.8.1",
+    ("Sekai.Mysekai.UIPartsMysekaiConvertItem", "926f7eab39c137349ae5ee50a62db445"): "6.8.1",
+    ("Sekai.Mysekai.UIPartsMysekaiRankGauge", "57fef83fb4ad355297def0c3ad105fa8"): "6.8.1",
+    ("Sekai.OptionCommunicationSetting", "b966bbb51dd635c30f04faa8dbe8a2c9"): "6.8.1",
+    ("Sekai.OptionLiveSetting", "fbadfe4e7ddfbb71887833f9cc0dace9"): "6.8.1",
+    ("Sekai.OptionNoteSetting", "042b1858d7061803a29a4d3666af64b2"): "6.8.1",
+    ("Sekai.OptionSystemSetting", "8eb091635909eeed632af78d7eba6c5b"): "6.8.1",
+    ("Sekai.ScreenLayerMysekaiConvertFurniture", "11faa9b650f7533e23c7c2444068c8a9"): "6.8.1",
+    ("Sekai.ScreenLayerMysekaiHarvestSummary", "cb07a4d24583623367da0e2cadf66a6a"): "6.8.1",
+    ("Sekai.ScreenLayerMysekaiMission", "8c7b84d4b5dd711b82972d124f4be26a"): "6.8.1",
+    ("Sekai.SubWindowComponent", "5a3c0aa51e533e6e8a8ccb8bb64f6a45"): "6.8.1",
+    ("Sekai.SubWindowFadeAnimation", "0498b1dbe382c4cf590214f215e272f5"): "6.8.1",
+    ("Sekai.UI.CustomButton", "3dea6fd66e2c86118ef6ca034453ef43"): "6.8.1",
+    ("Sekai.UI.CustomDropdown", "657ccb128e92c6c4c858bbacf275f9a7"): "6.8.1",
+    ("Sekai.UI.CustomIndexToggleGroup", "8b8d72bd4cb01cf08fbfcd0121d2dccf"): "6.8.1",
+    ("Sekai.UI.CustomInputFieldTextMesh", "2e2620e5c8ef4eda79e04f8eb3c2b02b"): "6.8.1",
+    ("Sekai.UI.CustomScrollRect", "9b7a704c00b99a994bc10fafb1778380"): "6.8.1",
+    ("Sekai.UI.CustomScrollRect", "a60a7b83f16be5ac8a89d787d1cb36dc"): "7.0.0",
+    ("Sekai.UI.CustomScrollbar", "630a1a5fe101e645301770df23eca0d4"): "6.8.1",
+    ("Sekai.UI.CustomText", "b9945521985eca7173865bd35ece19eb"): "6.8.1",
+    ("Sekai.UI.CustomTextMesh", "ec7822e3edc04e34d9218f31544b0c51"): "6.8.1",
+    ("Sekai.UI.ListView", "76d116f59060ca8b9741bfb9c377d703"): "6.8.1",
+    ("Sekai.UI.MusicSelectGridView", "92a04c949b2da6f3db4dd362a17d8927"): "6.8.1",
+    ("Sekai.UI.MusicSelectListCellHighLightContents", "309ae776e86689840b08156070540f76"): "6.8.1",
+    ("Sekai.UI.MusicSelectListCellNeutralContents", "a39e8b6fe463e51089c72577617305bc"): "6.8.1",
+    ("Sekai.UI.UIPartsCommonButton", "4bc0848cc6bb920374f0708604166894"): "6.8.1",
+    ("Sekai.UI.UIPartsLeftTabList", "ee3d93fb3211e02734cbd458ec4dc35e"): "6.8.1",
+    ("Sekai.UI.UIPartsLeftTabSubList", "51b6bd3314080742f47c1a285b03d534"): "6.8.1",
+    ("Sekai.UI.UIPartsNumericInputField", "febf02b46ce5c847600b483925635ef2"): "6.8.1",
+    ("Sekai.UIPartsGauge", "45cf43fce33b71a481cba8f2042dcd5f"): "6.8.1",
+    ("Sekai.UIPartsGaugeExp", "616474623b2462935926d7b636e7f8f2"): "6.8.1",
+    ("Sekai.UIPartsHonorImage", "3dbf1be936144360c486a68d14a13d8b"): "7.0.0",
+    ("Sekai.UIPartsHonorImage", "6a8b9a5026f60c1066daa17aaed40864"): "6.8.1",
+    ("Sekai.UIPartsNumericSelector", "3ddd014e82984d92a9de00ff728f121b"): "6.8.1",
+}
+
+
+LAYOUT_CLASSES = frozenset(cls for cls, _ in TYPE_LAYOUTS)
+
+
+class UnknownLayout(ValueError):
+    """A serialized type hash that names no registered JP layout."""
+
+
+def check_version(version: str) -> None:
+    """Refuse a client version whose runs this module has no layouts for."""
+    if version not in LAYOUT_CHAINS:
+        raise ValueError(f"no decoder chains registered for JP {version}; "
+                         f"supported versions: {', '.join(sorted(LAYOUT_CHAINS))}")
 
 
 def decoders_for(version: str) -> dict:
-    """The decoder table of one supported JP client version."""
-    try:
-        return DECODERS_BY_VERSION[version]
-    except KeyError:
-        raise ValueError(f"no decoder chains registered for JP {version}; "
-                         f"supported versions: {', '.join(sorted(DECODERS_BY_VERSION))}") from None
+    """One layout's chain table, the layout versions are named after.
+
+    The export itself picks a chain per object (see :func:`chain_for`); this is
+    the table of one layout version, for callers that read one layout's bytes.
+    """
+    check_version(version)
+    return LAYOUT_CHAINS[version]
+
+
+def chain_for(cls: str, type_hash, file_name: str, base):
+    """The chain that reads one object, by its class and serialized type hash.
+
+    *base* holds the chains every layout shares.  A class outside
+    :data:`LAYOUT_CLASSES` has no JP chain and is read from *base*.  A class
+    the JP tables know must name a registered (class, hash) row: an object of
+    another layout is refused with its class, hash and file, never read with a
+    fallback chain.
+    """
+    layout = TYPE_LAYOUTS.get((cls, type_hash))
+    if layout is None:
+        if cls in LAYOUT_CLASSES:
+            raise UnknownLayout(
+                f"{cls}: serialized type hash {type_hash or 'absent'} in {file_name} "
+                f"names no registered JP layout")
+        return base.get(cls)
+    # A class with one layout in both clients lists that one row, and one
+    # layout table may not carry its chain: the shared table does.
+    return LAYOUT_CHAINS[layout].get(cls) or base.get(cls)
+
+
+class TypeHashChains:
+    """The decoder table of one run, with each JP object's chain chosen by its
+    serialized type hash rather than by the run's client version."""
+
+    def __init__(self, base):
+        self.base = base
+
+    def get(self, cls):
+        return self.base.get(cls)
+
+    def chain_for(self, cls, obj):
+        return chain_for(cls, talk.serialized_type_hash(obj),
+                         obj.assets_file.name, self.base)

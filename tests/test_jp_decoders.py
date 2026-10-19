@@ -1,4 +1,4 @@
-# tests/test_jp_decoders.py -- synthetic tests of the per-version JP decoder tables
+# tests/test_jp_decoders.py -- synthetic tests of the per-layout JP decoder tables
 """Synthetic bytes only: each class gains the documented 7.0.0 field, and the
 6.8.1 chain must leave exactly those bytes unread while the 7.0.0 chain
 over-reads the 6.8.1 bytes.  Every test asserts the value of the added field,
@@ -23,7 +23,7 @@ BASE = {**editor_layout.DECODERS, **window_animation.DECODERS}
 
 
 def table(version):
-    return {**BASE, **jd.DECODERS_BY_VERSION[version]}
+    return {**BASE, **jd.LAYOUT_CHAINS[version]}
 
 
 def i32(v):
@@ -117,11 +117,11 @@ CASES = {
 }
 
 
-def test_supported_versions_are_the_two_tables():
+def test_supported_versions_are_the_two_layout_tables():
     assert jd.VERSIONS == ("6.8.1", "7.0.0")
-    assert set(jd.DECODERS_BY_VERSION) == set(jd.VERSIONS)
+    assert set(jd.LAYOUT_CHAINS) == set(jd.VERSIONS)
     with pytest.raises(ValueError, match="6.8.1, 7.0.0"):
-        jd.decoders_for("0.0.0")
+        jd.check_version("0.0.0")
 
 
 @pytest.mark.parametrize("name", sorted(CASES))
@@ -147,19 +147,40 @@ def test_700_chain_over_reads_681_bytes(name):
         table("7.0.0")[name](talk.Reader(old(1000)))
 
 
-def test_700_table_overrides_exactly_the_five_classes():
-    """The 7.0.0 table differs from the 6.8.1 one in the five classes only.
-    Three of them are 6.8.1-table keys; CraftPreview and the option page live
-    in the base registry, so the 7.0.0 table adds rather than replaces them."""
-    assert set(jd.DECODERS_700) - set(jd.DECODERS) == {
-        "Sekai.UI.CustomScrollRect",
-        "Sekai.Mysekai.ContentList.ContentListSelectorCell",
-        "Sekai.UIPartsHonorImage",
-    }
-    assert (set(jd.DECODERS_700) ^ set(jd.DECODERS)) | {
-        "Sekai.Mysekai.Inventory.CraftPreview",
-        "Sekai.Mysekai.MysekaiInfoOption1Page",
-    } == set(CASES)
-    for name in set(jd.DECODERS_700) - set(CASES):
-        assert jd.DECODERS_700[name] is jd.DECODERS[name]
+_VERSIONED_BODIES = {
+    "Sekai.Mysekai.MysekaiInfoOption1Page": "decode_mysekai_info_option_page_700",
+    "Sekai.Mysekai.Inventory.CraftPreview": "decode_craft_preview_700",
+    "Sekai.Mysekai.ContentList.ContentListSelectorCell":
+        "decode_content_list_selector_cell_700",
+    "Sekai.UIPartsHonorImage": "decode_honor_image_700",
+    "Sekai.UI.CustomScrollRect": "decode_custom_scroll_rect_700",
+}
 
+
+def test_700_table_holds_the_changed_classes_only():
+    """The 7.0.0 table differs from the 6.8.1 one in the classes the client
+    changed; every other class is the same chain in both tables."""
+    table_681 = jd.decoders_for("6.8.1")
+    table_700 = jd.decoders_for("7.0.0")
+    assert set(table_700) - set(table_681) == set(_VERSIONED_BODIES) - {
+        "Sekai.Mysekai.MysekaiInfoOption1Page",
+        "Sekai.Mysekai.Inventory.CraftPreview",
+    }
+    for name, body in _VERSIONED_BODIES.items():
+        assert table_700[name].__name__ == body
+    for name in set(table_681) & set(table_700):
+        if name in _VERSIONED_BODIES or "Dialog" in name or "PriceParts" in name:
+            continue
+        assert table_700[name] is table_681[name]
+
+
+def test_scroll_rect_tolerance_reads_after_the_681_chain():
+    """7.0.0 appends the tolerance after the 6.8.1 chain; the 6.8.1 chain stops
+    at ``mask``."""
+    raw = scroll_rect(1000, 1.0)
+    fields, remaining = decode("7.0.0", "Sekai.UI.CustomScrollRect", raw)
+    assert remaining == 0
+    assert fields["normalizedPositionTolerance"] == 1.0
+    fields, remaining = decode("6.8.1", "Sekai.UI.CustomScrollRect", raw)
+    assert remaining == 4
+    assert "normalizedPositionTolerance" not in fields

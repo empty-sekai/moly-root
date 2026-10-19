@@ -156,6 +156,19 @@ def objects_by_file(env, fname: str):
     return {o.path_id: o for o in env.objects if o.assets_file.name == fname}
 
 
+def serialized_type_hash(obj) -> str | None:
+    """The object's serialized type's ``old_type_hash`` as lower-case hex.
+
+    A serialized file records one hash per serialized type, the Hash128 of that
+    type's serialized layout, and every object of the type names it.  The bytes
+    are reported in the order the file stores them.  ``None`` means the file
+    predates the field (a serialized version below 13).
+    """
+    stype = getattr(obj, "serialized_type", None)
+    digest = getattr(stype, "old_type_hash", None)
+    return None if digest is None else bytes(digest).hex()
+
+
 # ---------------------------------------------------------------------------
 # 手解骨架：声明「当前类」的序列化字段链（按顺序、只列序列化字段）。
 # 每个描述符是 (字段名, reader, 值提取器)。
@@ -1007,8 +1020,9 @@ def a64_float_constants(blob: bytes, entry_off: int, max_words: int):
 def decode_object(env, obj, mono_index, allow_partial=False, decoders=None):
     """解一个对象：返回 dict + 语义信息 + 自证判据。
 
-    decoders 为空时用本模块注册表；给出时整张表替换它（按客户端版本选链，
-    不按字节数猜链）。
+    decoders 为空时用本模块注册表。给出时它替换整张表：一个普通映射按类名取链；
+    带 ``chain_for`` 的表还拿到对象本身，按对象自己的序列化类型哈希取链
+    （同一类在不同序列化文件里可能有不同布局，不按字节数猜）。
     """
     otype = obj.type.name
     raw = obj.get_raw_data()
@@ -1063,7 +1077,12 @@ def decode_object(env, obj, mono_index, allow_partial=False, decoders=None):
         }
 
     cls = resolve_script_class(obj, mono_index)
-    dec = (_DECODERS if decoders is None else decoders).get(cls)
+    if decoders is None:
+        dec = _DECODERS.get(cls)
+    elif hasattr(decoders, "chain_for"):
+        dec = decoders.chain_for(cls, obj)
+    else:
+        dec = decoders.get(cls)
     if dec is None:
         # 未知类形：报告未解（partial），不假装解了。前缀按 m_Name 长度可变。
         r = Reader(raw)

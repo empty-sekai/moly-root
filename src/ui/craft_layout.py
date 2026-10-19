@@ -155,6 +155,21 @@ def decode_custom_input_field_jp(r):
     return d
 
 
+def decode_numeric_input_field_jp(r):
+    """UIPartsNumericInputField : TMP_InputField (JP).
+
+    The JP 7.0.0 declaration names two references of its own after the input
+    chain: the field's root object and its guard button.  The objects in the
+    player data also carry two more references after them, whose declaration
+    was not found; they are read to the object's end and marked unverified.
+    """
+    d = decode_tmp_input_field(r)
+    d.update(refs(r, ("_inputFieldRoot", "_guardButton")))
+    if r.remaining() == 24:
+        d["_trailingReferencesUnverified"] = [list(r.pptr()), list(r.pptr())]
+    return d
+
+
 def decode_scroller(r):
     """FancyScrollView.Scroller."""
     d = {"viewport": r.pptr(), "scrollDirection": r.i32(), "movementType": r.i32(),
@@ -277,4 +292,5 @@ JP_DECODERS = {
     "Sekai.Mysekai.ScreenLayerMysekaiCraft": decode_screen_layer_craft_jp,
     "Sekai.Mysekai.Inventory.CraftPreview": decode_craft_preview_jp,
     "Sekai.UI.CustomInputFieldTextMesh": decode_custom_input_field_jp,
+    "Sekai.UI.UIPartsNumericInputField": decode_numeric_input_field_jp,
 }
