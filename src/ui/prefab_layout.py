@@ -3378,6 +3378,8 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
         runtime_textures.update(textures)
         runtime_sprites.update(sprites)
         texture_sources.append(source)
+        for effect in photo_layout.package_effects(photo_package, bundles_root, out):
+            rows.append({**effect, **identity})
     for item in plan:
         prefab, family = item["prefab"], item["family"]
         file_name, root_pid = item["target"]

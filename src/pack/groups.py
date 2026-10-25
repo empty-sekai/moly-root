@@ -66,7 +66,7 @@ ASSET_DIRECTORIES = (
     "effect-resources", "graphics-config", "layout-grid",
     "site-action-effects", "site-common-action-effects", "site-harvest-object-effects",
     "site-home-effects", "fixture-put-effects", "site-sound-wave", "site-timeline",
-    "honor", "honor_frame", "material-thumbnails", "text",
+    "honor", "honor_frame", "material-thumbnails", "text", "tutorial",
 )
 FORMATS = {".json", ".glb", ".gltf", ".png", ".jpg", ".jpeg", ".webp", ".ktx2", ".rgba8", ".ogg", ".wav", ".mp3", ".bin"}
 BUILD_EVIDENCE_FILES = {"export-report.json", "export-plan.json", "export-progress.json",

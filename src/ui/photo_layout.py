@@ -69,6 +69,51 @@ def package_images(data, out):
                              'images': len(paths), 'sprites': len(metadata)}
 
 
+def package_effects(bundle, bundle_root, out):
+    """Export each dynamically loaded effect with only its reachable objects.
+
+    These prefabs share node names inside one package. Exporting all roots
+    together makes a UI particle's node binding ambiguous and includes unrelated
+    atlas aliases. The existing prefab view follows the selected root's actual
+    component, material and texture references before the normal scene export.
+    """
+    from core.assets.packages import PackageStore
+    from core.jsonio import write_json
+    from core.player_resources import prefab_view
+    from sites.scenes import PackageExtract
+
+    store = PackageStore([bundle], bundle_root)
+    store.load_dependencies([Path(bundle).name])
+    package = store.package(Path(bundle).name)
+    records = []
+    for role, prefab in (
+        ('call-button', 'fx_mysekai_photo_shot_call_character_pt'),
+        ('call-wave', 'fx_mysekai_photo_shot_call_character_wave'),
+    ):
+        targets = [(record, path_id) for name, record, path_id in package.contents
+                   if name == prefab + '.prefab']
+        if len(targets) != 1:
+            raise ValueError(f'photo effect {prefab} needs exactly one prefab root')
+        view, report = prefab_view(store, targets, f'photo-shot:{role}')
+        if report['unreadable'] or report.get('unfollowedArchives'):
+            raise ValueError(f'photo effect {prefab} has an incomplete object closure: {report}')
+        store.adopt(view)
+        directory = Path(out) / 'photo-shot' / role
+        document = PackageExtract(store, view.name, directory, role,
+                                  classification=('prefab-package', role)).run()
+        primary = [root for root in document['roots'] if root['primary']]
+        if len(primary) != 1 or primary[0]['name'] != prefab or document['unsupported']:
+            raise ValueError(f'photo effect {prefab} is incomplete: {document["unsupported"]}')
+        document['source'] = {'package': store.source_receipt(Path(bundle).name),
+                              'prefab': prefab, 'view': report}
+        relative = f'photo-shot/{role}/{role}.json'
+        write_json(Path(out) / relative, document)
+        records.append({'document': relative, 'kind': 'photo-particle',
+                        'documentSha256': hashlib.sha256((Path(out) / relative).read_bytes()).hexdigest(),
+                        'source': document['source'], 'particles': len(document['particles'])})
+    return records
+
+
 VIEW_FIELDS = (
     "_canvasGroup", "_overlayImage", "_frameImage", "_lineCornerImageList",
     "_playerHeadUpDisplay", "_switchEditModeToggle", "_avatarMotionSelector",

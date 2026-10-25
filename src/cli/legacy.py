@@ -671,6 +671,11 @@ def main(argv=None):
     fixture_animations.add_argument("--plan", action="store_true")
     capabilities = sub.add_parser("timeline-capabilities", help="index source payload requirements per fixture prefab")
     capabilities.add_argument("--asset-root", required=True)
+    tutorial = sub.add_parser("tutorial-placements", help="export source NPC tutorial placement poses")
+    tutorial.add_argument("--apk", action="append", required=True)
+    tutorial.add_argument("--client-version", required=True)
+    tutorial.add_argument("--out-dir", required=True)
+    tutorial.add_argument("--processor-input", help="optional source-qualified canonical intro pose configuration")
     lay = sub.add_parser("ui-layout",
                          help="extract the RectTransform hierarchy of the UI "
                               "prefabs (screen layers, dialogs) the player data "
@@ -1252,6 +1257,14 @@ def main(argv=None):
         from fixtures.timeline_capabilities import build_capabilities
         report = build_capabilities(args.asset_root)
         print(json.dumps({"prefabs": len(report["prefabs"]), "packages": len(report["sources"])}))
+        return 0
+
+    if args.cmd == "tutorial-placements":
+        from chara.tutorial import export_placements
+        result = export_placements(args.apk, args.out_dir, client_version=args.client_version,
+                                   processor_input=args.processor_input)
+        print(json.dumps({"placements": len(result['placements']),
+                          "participants": sum(len(rows) for rows in result['placements'].values())}))
         return 0
 
     if args.cmd == "ui-layout" and args.region == "jp":
