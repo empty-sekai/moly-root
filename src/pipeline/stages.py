@@ -52,7 +52,7 @@ def talk_task(master, bundle, lib, *, family="general", unity_version="2022.3.62
     else:
         # Optional tables are part of the input identity when present. Their
         # absence is represented by the table list, not a made-up empty file.
-        tables += [name for name in ("birthdayPartyScenarios", "mysekaiCharacterTalkSomeCharacterTalks")
+        tables += [name for name in ("birthdayPartyScenarios", "mysekaiCharacterTalkSomeCharacterTalks", "mysekaiTutorialTalks")
                    if (Path(master) / (name + ".json")).is_file()]
     inputs += [file_input("master/" + name, Path(master) / (name + ".json")) for name in tables]
     return task("talks.extract", family, inputs, family=family, unityVersion=unity_version)
@@ -100,7 +100,7 @@ def validate_installed(value):
     elif name == "talks.extract":
         if value["params"]["family"] not in {"general", "fixture"}:
             raise ValueError("unknown conversation family")
-        permitted = set(TALK_TABLES) | {"birthdayPartyScenarios", "mysekaiCharacterTalkSomeCharacterTalks",
+        permitted = set(TALK_TABLES) | {"birthdayPartyScenarios", "mysekaiCharacterTalkSomeCharacterTalks", "mysekaiTutorialTalks",
                                       "mysekaiFixtures", "mysekaiCharacterTalkNoTalkMysekaiFixtureActions"}
         if not {"bundle", "lib"} <= roles or any(
                 role not in {"bundle", "lib"} and role not in {"master/" + t for t in permitted}

@@ -123,6 +123,8 @@ def _corpus_talks(document):
         yield from unit.get("talks") or []
     yield from document.get("talks") or []
     yield from (document.get("commonSomeCharacter") or {}).get("talks") or []
+    for lua, row in ((document.get("tutorial") or {}).get("talks") or {}).items():
+        yield {**row, 'lua': lua}
 
 
 def voice_requests(document):
@@ -143,7 +145,7 @@ def voice_requests(document):
                 # stripping a fixed number of underscore fields does not.
                 stem = script if isinstance(script, str) and cue.startswith(
                     CUE_PREFIX + script + "_") else voice_stem(cue)
-                requests.setdefault(TALK_VOICE + stem, set()).add(cue)
+                requests.setdefault(talk.get('voiceBank') or TALK_VOICE + stem, set()).add(cue)
     # A party script's cues live in the bank the talk engine loads under the
     # Birthday context, not in the plain one, and the talk document names that
     # bank per script; it is read from there rather than assumed from a prefix.

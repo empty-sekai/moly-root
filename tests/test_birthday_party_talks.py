@@ -127,7 +127,7 @@ def test_party_and_common_blocks_preserve_the_ordinary_corpus_keys(tmp_path, mon
     talks.extract_talks(master, "synthetic.bundle", out)
     document = json.loads(out.read_text(encoding="utf-8"))
     assert list(document) == ["version", "semantics", "units", "summary",
-                              "birthdayParty", "commonSomeCharacter"]
+                              "birthdayParty", "commonSomeCharacter", "tutorial"]
     assert document["birthdayParty"]["semantics"]["table"].startswith(
         "birthdayPartyScenarios")
 
@@ -175,7 +175,7 @@ def test_attach_leaves_every_other_key_alone(tmp_path, monkeypatch):
     assert after["birthdayParty"]["status"] == "present"
     assert after["birthdayParty"]["talks"]["party_001"]["voices"] == ["voice_party_001_01_006"]
     assert report["preservedKeys"] == ["version", "semantics", "units", "summary",
-                                       "commonSomeCharacter"]
+                                       "commonSomeCharacter", "tutorial"]
     # Byte for byte: with the block taken back out, the attached document is
     # the corpus the extraction wrote, minus that run's own absent block.
     del after["birthdayParty"]

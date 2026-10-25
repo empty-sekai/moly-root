@@ -30,6 +30,8 @@ def corpus_rows(document):
         yield "common", row, row["unitIds"]
     for lua, row in (document.get("birthdayParty") or {}).get("talks", {}).items():
         yield "birthday", {**row, "lua": lua, "talkId": lua}, []
+    for lua, row in (document.get("tutorial") or {}).get("talks", {}).items():
+        yield "tutorial", {**row, "lua": lua, "talkId": lua}, []
 
 
 def _display_rows(row):

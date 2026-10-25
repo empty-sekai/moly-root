@@ -319,8 +319,16 @@ def read_renderers(assets, tr_index):
                 raise KeyError("renderer bone outside the prefab tree")
             bones.append(bi)
         go = gos.get(go_pid)
+        bounds = tt.get('m_AABB')
+        if bounds is None:
+            raise ValueError('skinned renderer has no authored bounds')
+        root_bone = tr_index.get(tt.get('m_RootBone', {}).get('m_PathID', 0))
         out.append({"mesh": mesh_obj, "materialNames": mats, "materialObjs": mat_objs,
                     "bones": bones, "node": node,
+                    "bounds": {"node": node, "rootBone": root_bone,
+                               "center": list(unity_to_gltf_pos([bounds['m_Center'][k] for k in ('x', 'y', 'z')])),
+                               "extents": [bounds['m_Extent'][k] for k in ('x', 'y', 'z')],
+                               "updateWhenOffscreen": bool(tt.get('m_UpdateWhenOffscreen', False))},
                     "rendererName": go["m_Name"] if go else ""})
     return out
 
@@ -481,6 +489,29 @@ def _bake_animations(glb, rig, sampled, node_by_name, node_by_hash):
         report[name] = {"frames": len(times), "humanoidBones": len(bones),
                         "twistTracks": len(twist), "tdofTracks": len(tdof_t)}
     return report
+
+
+def head_ik_axes(avatar, nodes):
+    """Bind humanoid look-at axes to the emitted skeleton in canonical space."""
+    human = avatar['human']
+    def bone(slot):
+        index = human['humanBoneIndex'][slot]
+        if index < 0:
+            return None
+        source = human['nodes'][index]
+        matches = [i for i, node in enumerate(nodes) if node['name'] == source['name']]
+        if len(matches) != 1 or source['axesId'] < 0:
+            raise ValueError(f'look-at bone has no unique skeleton/axes binding: {source["name"]}')
+        axes = human['axes'][source['axesId']]
+        def quaternion(value):
+            # Reflection of X preserves quaternion X/W and negates Y/Z.
+            return [value[0], -value[1], -value[2], value[3]]
+        return {'node': matches[0], 'name': source['name'],
+                'preQ': quaternion(axes['preQ']), 'postQ': quaternion(axes['postQ'])}
+    head, neck = bone(11), bone(10)
+    if head is None:
+        raise ValueError('humanoid avatar has no head binding')
+    return {**head, 'neck': neck}
 
 
 def extract_character(bundle, out_dir, name, sampled=None, aux=(),
@@ -788,6 +819,8 @@ def extract_character(bundle, out_dir, name, sampled=None, aux=(),
         "mouthAtlas": _atlas_doc(mouth_tex.m_Width, mouth_tex.m_Height, atlas_cell),
         "cloth": cloth_rig,
         "anchors": read_anchors(assets, tr_index, nodes),
+        "headIk": head_ik_axes(rig.doc, nodes),
+        "rendererBounds": [{**renderer['bounds'], 'name': renderer['rendererName']} for renderer in renderers],
         "textures": [tex_paths[n] for n in sorted(pngs)],
         # materials[i].name's contract is "the glTF material's own name",
         # matching the site domain's convention (there it holds the real

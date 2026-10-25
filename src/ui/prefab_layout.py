@@ -3050,6 +3050,14 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
         sitemap_package = Path(bundles_root) / SITEMAP_TEXTURE_PACKAGE
         if not sitemap_package.is_file():
             raise FileNotFoundError(f"UI texture package missing: {sitemap_package.name}")
+    from ui import photo_layout
+    photo_package = None
+    if "ScreenLayerMysekaiPhotoShot" in selected:
+        if bundles_root is None:
+            raise ValueError("photo-shot UI needs its decrypted texture package")
+        photo_package = Path(bundles_root) / photo_layout.PACKAGE
+        if not photo_package.is_file():
+            raise FileNotFoundError(f"UI texture package missing: {photo_package.name}")
     bgm_player_package = None
     if "ScreenLayerMysekaiBGMSelect" in selected:
         if bundles_root is None:
@@ -3356,6 +3364,14 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
     if bgm_player_package is not None:
         textures, sprites, source = bgm_select_player_textures(
             bgm_player_package.read_bytes(), out, image_dir)
+        for alias in textures:
+            if alias in runtime_textures:
+                raise ValueError(f"UI runtime texture alias collision: {alias}")
+        runtime_textures.update(textures)
+        runtime_sprites.update(sprites)
+        texture_sources.append(source)
+    if photo_package is not None:
+        textures, sprites, source = photo_layout.package_images(photo_package.read_bytes(), out)
         for alias in textures:
             if alias in runtime_textures:
                 raise ValueError(f"UI runtime texture alias collision: {alias}")
