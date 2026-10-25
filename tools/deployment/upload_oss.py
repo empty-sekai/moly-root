@@ -166,6 +166,75 @@ def parse_args():
     return p.parse_args()
 
 
+def validate_font_publication(doc):
+    # Preparation is not a trust boundary: manifests and staging paths can
+    # change before execution. Reuse its catalogue contract, then bind every
+    # declared input and the actual upload stream to the full root closure.
+    from prepare_fonts import parse_catalog, content_type, cache_control
+
+    catalog = doc['fontCatalog']
+    rows = {row['path']: row for row in doc['files']}
+    root_row = rows.get(catalog['path'])
+    if root_row is None:
+        raise SafeFailure('font_pointer_identity_mismatch')
+    try:
+        with Path(root_row['sourceRaw']).open('rb') as stream:
+            raw = stream.read(2 * 1024 * 1024 + 1)
+        root, references = parse_catalog(raw)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise SafeFailure('invalid_local_font_catalogue', errorType=type(error).__name__) from None
+    if (root['revision'] != catalog['revision']
+            or references['latest.json']['sha256'] != catalog['sha256']):
+        raise SafeFailure('font_pointer_identity_mismatch')
+    expected_paths = {'fonts/' + name for name in references}
+    if rows.keys() != expected_paths:
+        raise SafeFailure('font_publication_closure_mismatch',
+                          missing=sorted(expected_paths - rows.keys()),
+                          extra=sorted(rows.keys() - expected_paths))
+    url_prefix = doc.get('urlPrefix')
+    if (not isinstance(url_prefix, str) or not url_prefix.startswith('/') or not url_prefix.endswith('/')
+            or any(part in {'.', '..'} for part in url_prefix.split('/'))
+            or any(char in url_prefix for char in '\\%?#:')
+            or any(ord(char) < 32 or ord(char) == 127 for char in url_prefix)):
+        raise SafeFailure('invalid_font_url_prefix')
+    verified = set()
+    for name, expected in references.items():
+        logical = 'fonts/' + name
+        row = rows[logical]
+        if (row['sha256'] != expected['sha256'] or row['decodedSha256'] != expected['sha256']
+                or row['bytes'] != expected['bytes'] or row['decodedBytes'] != expected['bytes']
+                or row['contentEncoding'] != 'identity' or row['contentType'] != content_type(name)
+                or row['cacheControl'] != cache_control(name)
+                or row.get('urlPath') != url_prefix + logical):
+            raise SafeFailure('font_object_metadata_mismatch', path=logical)
+        # All aliases are checked; sourceRaw must not validate one document
+        # while staging/source supplies a different body to put_one().
+        aliases = [row.get('sourceRaw'), row.get('source')]
+        if 'staging' in row:
+            aliases.append(row['staging'])
+        for alias in aliases:
+            if not isinstance(alias, str) or not alias:
+                raise SafeFailure('invalid_font_object_source', path=logical)
+            try:
+                path = Path(alias).resolve(strict=True)
+                identity = (path, expected['sha256'], expected['bytes'])
+                if identity in verified:
+                    continue
+                digest, size = hashlib.sha256(), 0
+                with path.open('rb') as stream:
+                    while block := stream.read(1024 * 1024):
+                        size += len(block)
+                        if size > expected['bytes']:
+                            raise SafeFailure('local_font_object_changed', path=logical)
+                        digest.update(block)
+                if size != expected['bytes'] or digest.hexdigest() != expected['sha256']:
+                    raise SafeFailure('local_font_object_changed', path=logical)
+                verified.add(identity)
+            except OSError as error:
+                raise SafeFailure('cannot_read_font_object', path=logical,
+                                  errorType=type(error).__name__) from None
+
+
 def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)):
     try:
         doc = json.loads(args.manifest.read_bytes())
@@ -264,14 +333,7 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
     if not selected:
         raise SafeFailure('no_objects_selected')
     if font_catalog is not None:
-        roots = [row for row in doc['files'] if row['path'] == font_catalog['path']]
-        if len(roots) != 1 or roots[0]['decodedSha256'] != font_catalog['sha256']:
-            raise SafeFailure('font_pointer_identity_mismatch')
-        raw = Path(roots[0]['sourceRaw']).read_bytes()
-        root = json.loads(raw)
-        if (hashlib.sha256(raw).hexdigest() != font_catalog['sha256']
-                or root.get('schema') != 'moly-text-fonts/1' or root.get('revision') != font_catalog['revision']):
-            raise SafeFailure('local_font_pointer_changed')
+        validate_font_publication(doc)
     if translation is not None:
         roots = [row for row in doc['files'] if row['path'] == translation['path']]
         if len(roots) != 1 or roots[0]['decodedSha256'] != translation['sha256']:
