@@ -40,6 +40,10 @@ SEMANTICS = {
              "gameCharacterId: firstName + givenName, skipping absent parts; "
              "null when the character row is absent — the caller decides how to "
              "label a nameless unit, this module never invents one"),
+    "gameCharacter": ("identity.gameCharacterId joined to the gameCharacters row; "
+                      "id and verbatim gender are kept together. Null means the "
+                      "source row is absent; gender is not inferred from unit, "
+                      "motion family, model name, or available animation files"),
     "storedVsRuntime": ("the runtime divides pauseMilliSeconds, "
                         "changeMotionMilliSeconds, walkSpeed and runSpeed by 1000; "
                         "both forms are given and the runtime form is the one to use"),
@@ -100,11 +104,14 @@ def build_registry(master, unit_ids, motion_library_index=None, client_configs=_
                                        ("soloAction", solo.get(unit))) if row is None]
         if gaps:
             missing[str(unit)] = gaps
-        name = _display_name(game_characters.get(ident_row["gameCharacterId"])
-                             if (game_characters and ident_row) else None)
+        character_id = ident_row.get("gameCharacterId") if ident_row else None
+        character_row = game_characters.get(character_id) if game_characters is not None else None
+        name = _display_name(character_row)
         entry = {
             "unitId": unit,
             "name": name,
+            "gameCharacter": ({"id": character_id, "gender": character_row.get("gender")}
+                              if character_row is not None else None),
             "identity": ({f: ident_row.get(f) for f in IDENTITY_FIELDS}
                          if ident_row else None),
             "locomotion": None,
@@ -160,6 +167,7 @@ def build_registry(master, unit_ids, motion_library_index=None, client_configs=_
             "requested": len(set(unit_ids)),
             "withIdentity": sum(1 for c in characters.values() if c["identity"]),
             "withName": sum(1 for c in characters.values() if c["name"]),
+            "withGameCharacter": sum(1 for c in characters.values() if c["gameCharacter"] is not None),
             "withLocomotion": sum(1 for c in characters.values() if c["locomotion"]),
             "withSoloAction": sum(1 for c in characters.values() if c["soloAction"]),
             "missing": missing,

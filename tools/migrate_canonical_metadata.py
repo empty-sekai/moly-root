@@ -25,9 +25,10 @@ from core.coordinate_contract import CONTRACT, UNITS, validate_glb
 # They keep the guard usable in source archives and installed source copies.
 # Update them only after reviewing the coordinate-writing code.
 REVIEWED_PRODUCERS = {
-    # Adds sidecar look-at axes and renderer bounds using the existing X
-    # reflection. Mesh vertices, animation, skinning and GLB writes are unchanged.
-    'src/chara/characters.py': 'a7f8e51574dac542f0bc4ea07077736f929eb08634ef385149bcd4269323461d',
+    # Adds source controller/clip identities to the rig only. Removing that
+    # read-only helper, its call and the one sidecar field reproduces the prior
+    # reviewed AST; mesh, animation, skinning and GLB writes are unchanged.
+    'src/chara/characters.py': '435068f0dd34ff6cb3c329196e0a4165ff78fa409ee93469dec881aff0d7ad70',
     'src/chara/motion_library.py': '3ca5702e6ff3d02ee065c32dc5a2e1fe24716999976c135ffa77e52a3b26465c',
     'src/chara/player_avatar.py': 'f10f702f6fc3b58f23c1f1a5a388bbe94789e27fec7d93d2b8316abf13a012e1',
     'src/chara/avatar_parts.py': '74a42b5519bae8b645850e0281420c707ebac33fa08df3f5bd6326a4dcf89fc3',
