@@ -671,6 +671,11 @@ def main(argv=None):
     fixture_animations.add_argument("--plan", action="store_true")
     capabilities = sub.add_parser("timeline-capabilities", help="index source payload requirements per fixture prefab")
     capabilities.add_argument("--asset-root", required=True)
+    fonts = sub.add_parser("text-fonts", help="prepare an independent display-font catalogue")
+    fonts.add_argument("--base-font", action="append", required=True)
+    fonts.add_argument("--font", action="append", required=True)
+    fonts.add_argument("--license", required=True)
+    fonts.add_argument("--out-dir", required=True)
     tutorial = sub.add_parser("tutorial-placements", help="export source NPC tutorial placement poses")
     tutorial.add_argument("--apk", action="append", required=True)
     tutorial.add_argument("--client-version", required=True)
@@ -1257,6 +1262,12 @@ def main(argv=None):
         from fixtures.timeline_capabilities import build_capabilities
         report = build_capabilities(args.asset_root)
         print(json.dumps({"prefabs": len(report["prefabs"]), "packages": len(report["sources"])}))
+        return 0
+
+    if args.cmd == "text-fonts":
+        from ui.text_fonts import build_font_catalog
+        result = build_font_catalog(args.base_font, args.font, args.license, args.out_dir)
+        print(json.dumps({"revision": result['revision'], "fonts": len(result['fonts'])}))
         return 0
 
     if args.cmd == "tutorial-placements":

@@ -24,7 +24,7 @@ BUCKET = 'pjsk-stems'
 REGION = 'cn-shanghai'
 ENDPOINT = 'https://oss-cn-shanghai.aliyuncs.com'
 PREFIX = 'moly/alpha/'
-MUTABLE = {'manifest.json', 'cache-worker.mjs', 'game/manifest.json'}
+MUTABLE = {'manifest.json', 'cache-worker.mjs', 'game/manifest.json', 'fonts/latest.json'}
 TRANSLATION_ROOT = re.compile(r'translations/(jp|cn|tw|en|kr)/(zh-CN|zh-TW|en-US|ja-JP|ko-KR)/latest\.json')
 
 
@@ -177,6 +177,13 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
         raise SafeFailure('unsupported_delivery_mode')
     snapshots = set(doc.get('snapshots', []))
     translation = doc.get('translation')
+    font_catalog = doc.get('fontCatalog')
+    if font_catalog is not None:
+        if (not isinstance(font_catalog, dict) or snapshots or translation is not None
+                or font_catalog.get('path') != 'fonts/latest.json'
+                or not SHA256.fullmatch(font_catalog.get('revision', ''))
+                or not SHA256.fullmatch(font_catalog.get('sha256', ''))):
+            raise SafeFailure('invalid_font_publication')
     if translation is not None:
         if (not isinstance(translation, dict) or snapshots
                 or not TRANSLATION_ROOT.fullmatch(translation.get('path', ''))
@@ -186,7 +193,7 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
         translation_base = translation['path'].removesuffix('latest.json')
     else:
         translation_base = None
-    if (not snapshots and translation is None) or any(not IDENTIFIER.fullmatch(s) for s in snapshots):
+    if (not snapshots and translation is None and font_catalog is None) or any(not IDENTIFIER.fullmatch(s) for s in snapshots):
         raise SafeFailure('invalid_snapshot_identities')
     if args.scope == 'release' and (args.release_id != doc.get('release') or not IDENTIFIER.fullmatch(args.release_id or '')):
         raise SafeFailure('explicit_release_id_must_match_manifest')
@@ -204,6 +211,8 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
     selected, seen = [], set()
     for row in doc.get('files', []):
         logical = row.get('path', '')
+        if font_catalog is not None and not re.fullmatch(r'fonts/(?:latest\.json|revisions/[a-f0-9]{64}\.json|objects/[a-f0-9]{64}\.(?:ttf|txt))', logical):
+            raise SafeFailure('font_manifest_contains_unrelated_object')
         if translation_base and (not logical.startswith(translation_base) or not re.fullmatch(
                 r'(?:latest\.json|(?:objects|revisions)/[a-f0-9]{64}\.json)', logical[len(translation_base):])):
             raise SafeFailure('translation_manifest_contains_unrelated_object')
@@ -241,8 +250,9 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
         # The shared content-addressed stores are immutable like snapshot payloads.
         shared_store = len(parts) >= 2 and parts[0] in {'asset-store', 'catalog-store'}
         translation_object = translation_base and logical.startswith(translation_base) and logical != translation['path']
+        font_object = font_catalog is not None and logical != font_catalog['path']
         choose = ((args.scope == 'stable' and ((is_snapshot and parts[2] in {'assets', 'catalog', 'text'} and len(parts) >= 4)
-                                               or shared_store or translation_object))
+                                               or shared_store or translation_object or font_object))
                   or (args.scope == 'descriptors' and is_snapshot and len(parts) == 3 and parts[2] in {'snapshot.json', 'provenance.json'})
                   or (args.scope == 'release' and len(parts) >= 3 and parts[:2] == ('releases', args.release_id))
                   or (args.scope == 'mutable' and logical in args.mutable_path))
@@ -253,6 +263,15 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
         selected = selected[:args.limit]
     if not selected:
         raise SafeFailure('no_objects_selected')
+    if font_catalog is not None:
+        roots = [row for row in doc['files'] if row['path'] == font_catalog['path']]
+        if len(roots) != 1 or roots[0]['decodedSha256'] != font_catalog['sha256']:
+            raise SafeFailure('font_pointer_identity_mismatch')
+        raw = Path(roots[0]['sourceRaw']).read_bytes()
+        root = json.loads(raw)
+        if (hashlib.sha256(raw).hexdigest() != font_catalog['sha256']
+                or root.get('schema') != 'moly-text-fonts/1' or root.get('revision') != font_catalog['revision']):
+            raise SafeFailure('local_font_pointer_changed')
     if translation is not None:
         roots = [row for row in doc['files'] if row['path'] == translation['path']]
         if len(roots) != 1 or roots[0]['decodedSha256'] != translation['sha256']:

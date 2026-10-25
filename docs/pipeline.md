@@ -121,12 +121,35 @@ only the current pointer. Replacing an existing pointer also requires
 `--expect-previous-sha256` for the exact previous bytes. Dry-run remains the
 default; `--execute --exclusive-writer` explicitly enables writes. Retain old
 objects and roots for rollback; ordinary resource deployment excludes this tree.
-This preparation path handles text-only publications; additional font delivery
-requires a separately reviewed font publication rather than silently omitting
-font references.
+This preparation path handles text-only publications. Fonts use the independent
+catalogue described below rather than being copied into translation revisions.
 
 These exports prepare inputs for the editorial and playback systems. They do
 not publish translations or grant approval to drafts.
+
+## Independent font catalogue
+
+An operator prepares the approved open font once. Translators continue to enter
+text; they do not upload font files. Coverage is read from each supplied font's
+character map, and the base font is identified by the exact UI font hash:
+
+```sh
+pip install 'moly-root[fonts]'
+moly export text-fonts --base-font UI.subset.ttf --font OPEN-FONT.ttf \
+  --license OFL-1.1.txt --out-dir font-publication/fonts
+python tools/deployment/prepare_fonts.py --publication font-publication/fonts \
+  --output font-staging --object-prefix sekai-extra-assets/ --url-prefix /moly/
+```
+
+`fonts/latest.json` and `fonts/revisions/<revision>.json` contain the
+`moly-text-fonts/1` catalogue, base-font coverage, and immutable font and license
+references under `fonts/objects/`. Upload stable objects first, then use the
+existing uploader's explicit mutable scope for `fonts/latest.json`, checking
+the previous pointer hash when replacing it. No font object changes when a
+translator changes text. Retain historical catalogues and referenced objects.
+Set NextTrans's `MYSEKAI_FONT_CATALOG_URL` to the public catalogue so its coverage
+check and the stage use the same approved fonts. This command only prepares
+files and does not deploy or configure the translation service.
 
 ## One store, two kinds of roots
 
