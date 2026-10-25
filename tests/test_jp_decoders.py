@@ -162,10 +162,10 @@ def test_700_table_holds_the_changed_classes_only():
     changed; every other class is the same chain in both tables."""
     table_681 = jd.decoders_for("6.8.1")
     table_700 = jd.decoders_for("7.0.0")
-    assert set(table_700) - set(table_681) == set(_VERSIONED_BODIES) - {
+    assert set(table_700) - set(table_681) == (set(_VERSIONED_BODIES) - {
         "Sekai.Mysekai.MysekaiInfoOption1Page",
         "Sekai.Mysekai.Inventory.CraftPreview",
-    }
+    }) | set(jd.photo_layout.DECODERS)
     for name, body in _VERSIONED_BODIES.items():
         assert table_700[name].__name__ == body
     for name in set(table_681) & set(table_700):

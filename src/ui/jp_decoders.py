@@ -141,6 +141,7 @@ from ui import craft_layout
 from ui import bgm_select_layout
 from ui import mission_layout
 from ui import convert_layout
+from ui import photo_layout
 
 
 REGION = "jp"
@@ -534,6 +535,7 @@ DECODERS_681 = {**SHARED, **ONLY_681}
 # The 7.0.0 layout: the four dialogs end at their click event, and the five
 # classes the 7.0.0 declaration changed read their added fields.
 ONLY_700 = {
+    **photo_layout.DECODERS,
     "Sekai.UI.CustomScrollRect": decode_custom_scroll_rect_700,
     "Sekai.Mysekai.MysekaiMissionStartDialog": mission_layout.decode_mission_start_dialog,
     "Sekai.Mysekai.MysekaiMissionCompleteDialog": mission_layout.decode_mission_complete_dialog,
@@ -560,6 +562,9 @@ VERSIONS = tuple(LAYOUT_CHAINS)
 
 # (class name, serialized type hash hex) -> the layout the bytes carry.
 TYPE_LAYOUTS = {
+    ("Sekai.Mysekai.MysekaiPhotoShotView", "9c249c4e2d9276be8c161151ab811ebf"): "7.0.0",
+    ("Sekai.Mysekai.MysekaiPhotoShotAnimation", "f1b1ff8667c818bf70d56dd9b284b432"): "7.0.0",
+    ("Sekai.Mysekai.ScreenLayerMysekaiPhotoShotPresenter", "a4805d90303631a00c5a8e37e1ff5a00"): "7.0.0",
     ("Sekai.ColorFader", "2a6b976ee5ac7d8120ec45875b46424f"): "6.8.1",
     ("Sekai.CrystalShop.ShopConfirmDialogPriceParts", "2a424898f46b3aeb4201e3430b854139"): "6.8.1",
     ("Sekai.EventBreakTimeController", "273defc7d306842f06a7362af5082289"): "6.8.1",

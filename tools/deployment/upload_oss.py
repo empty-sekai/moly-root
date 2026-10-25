@@ -25,6 +25,13 @@ REGION = 'cn-shanghai'
 ENDPOINT = 'https://oss-cn-shanghai.aliyuncs.com'
 PREFIX = 'moly/alpha/'
 MUTABLE = {'manifest.json', 'cache-worker.mjs', 'game/manifest.json'}
+TRANSLATION_ROOT = re.compile(r'translations/(jp|cn|tw|en|kr)/(zh-CN|zh-TW|en-US|ja-JP|ko-KR)/latest\.json')
+
+
+def mutable_path(value):
+    if value not in MUTABLE and not TRANSLATION_ROOT.fullmatch(value):
+        raise argparse.ArgumentTypeError('expected a known publication pointer')
+    return value
 IDENTIFIER = re.compile(r'^[a-z0-9][a-z0-9._-]{0,95}$')
 SHA256 = re.compile(r'^[a-f0-9]{64}$')
 
@@ -144,7 +151,7 @@ def parse_args():
     p.add_argument('--manifest', type=Path, required=True)
     p.add_argument('--scope', choices=['stable', 'release', 'descriptors', 'mutable'], default='stable')
     p.add_argument('--release-id', help='Required explicit release ID for --scope release')
-    p.add_argument('--mutable-path', choices=sorted(MUTABLE), action='append', default=[])
+    p.add_argument('--mutable-path', type=mutable_path, action='append', default=[])
     p.add_argument('--allow-mutable-update', action='store_true')
     p.add_argument('--expect-previous-sha256', help='Required to replace an existing mutable object; one mutable path per run')
     p.add_argument('--threads', type=int, default=16, choices=range(1, 17), metavar='1..16')
@@ -169,7 +176,17 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
     if doc.get('deliveryMode', 'fixed') != 'fixed':
         raise SafeFailure('unsupported_delivery_mode')
     snapshots = set(doc.get('snapshots', []))
-    if not snapshots or any(not IDENTIFIER.fullmatch(s) for s in snapshots):
+    translation = doc.get('translation')
+    if translation is not None:
+        if (not isinstance(translation, dict) or snapshots
+                or not TRANSLATION_ROOT.fullmatch(translation.get('path', ''))
+                or not SHA256.fullmatch(translation.get('revision', ''))
+                or not SHA256.fullmatch(translation.get('sha256', ''))):
+            raise SafeFailure('invalid_translation_publication')
+        translation_base = translation['path'].removesuffix('latest.json')
+    else:
+        translation_base = None
+    if (not snapshots and translation is None) or any(not IDENTIFIER.fullmatch(s) for s in snapshots):
         raise SafeFailure('invalid_snapshot_identities')
     if args.scope == 'release' and (args.release_id != doc.get('release') or not IDENTIFIER.fullmatch(args.release_id or '')):
         raise SafeFailure('explicit_release_id_must_match_manifest')
@@ -187,6 +204,9 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
     selected, seen = [], set()
     for row in doc.get('files', []):
         logical = row.get('path', '')
+        if translation_base and (not logical.startswith(translation_base) or not re.fullmatch(
+                r'(?:latest\.json|(?:objects|revisions)/[a-f0-9]{64}\.json)', logical[len(translation_base):])):
+            raise SafeFailure('translation_manifest_contains_unrelated_object')
         parts = PurePosixPath(logical).parts
         # This is an object key, not a URL. S3 permits a literal '#'; URL
         # consumers must percent-encode that segment when constructing a
@@ -220,8 +240,9 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
         is_snapshot = len(parts) >= 3 and parts[0] == 'snapshots' and parts[1] in snapshots
         # The shared content-addressed stores are immutable like snapshot payloads.
         shared_store = len(parts) >= 2 and parts[0] in {'asset-store', 'catalog-store'}
+        translation_object = translation_base and logical.startswith(translation_base) and logical != translation['path']
         choose = ((args.scope == 'stable' and ((is_snapshot and parts[2] in {'assets', 'catalog', 'text'} and len(parts) >= 4)
-                                               or shared_store))
+                                               or shared_store or translation_object))
                   or (args.scope == 'descriptors' and is_snapshot and len(parts) == 3 and parts[2] in {'snapshot.json', 'provenance.json'})
                   or (args.scope == 'release' and len(parts) >= 3 and parts[:2] == ('releases', args.release_id))
                   or (args.scope == 'mutable' and logical in args.mutable_path))
@@ -232,6 +253,17 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
         selected = selected[:args.limit]
     if not selected:
         raise SafeFailure('no_objects_selected')
+    if translation is not None:
+        roots = [row for row in doc['files'] if row['path'] == translation['path']]
+        if len(roots) != 1 or roots[0]['decodedSha256'] != translation['sha256']:
+            raise SafeFailure('translation_pointer_identity_mismatch')
+        raw = Path(roots[0]['sourceRaw']).read_bytes()
+        root = json.loads(raw)
+        parts = translation['path'].split('/')
+        if (hashlib.sha256(raw).hexdigest() != translation['sha256']
+                or root.get('schema') != 'moly-text-publication/1' or root.get('region') != parts[1]
+                or root.get('locale') != parts[2] or root.get('revision') != translation['revision']):
+            raise SafeFailure('local_translation_pointer_changed')
     # Publishing descriptions requires the actual production descriptor bytes.
     for row in selected:
         if row['path'] in {'manifest.json', 'game/manifest.json'} or row['path'].endswith('/snapshot.json'):
@@ -291,7 +323,7 @@ def put_one(pool, row, args, stop):
         # Legacy mutable pointers predate uploader metadata. Verify their
         # actual stored bytes, bounded to this tiny control-plane surface,
         # instead of treating absent metadata as proof of their identity.
-        if previous is None and args.expect_previous_sha256 and key in {PREFIX + name for name in MUTABLE}:
+        if previous is None and args.expect_previous_sha256 and is_mutable:
             response = pool.get().get_object(key)
             try:
                 body = response.read(1048577)

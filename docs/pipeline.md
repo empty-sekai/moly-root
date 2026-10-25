@@ -97,6 +97,34 @@ and source ID/hash compatibility is checked per line, not by requiring the
 whole source registry revision to match. Retain historical publication roots
 and their objects for playback pins and rollback.
 
+Catalogue browsing uses optional `searchBuckets`: 16 shards selected by the
+first hash digit. Source rows are `[id, sourceHash, kind, text]`; translation
+rows are `[id, sourceHash, text, source]`, grouped by script. These compact
+indexes let hosts translate titles and search all dialogue without fetching
+each playback document. Source and translation indexes remain in their
+respective publications. A translation edit changes its leaf, route and search
+shard; unrelated shards and all resource snapshot bytes remain identical.
+
+Prepare official text for the existing S3 uploader independently:
+
+```sh
+python tools/deployment/prepare_translations.py \
+  --publication display/translations/jp/zh-CN --output translation-staging \
+  --object-prefix sekai-extra-assets/ --url-prefix /moly/
+```
+
+Use the resulting `upload-manifest.json` with `upload_s3.py` and the existing
+destination options. `--scope stable` selects immutable objects and the archived
+revision root. After these have been uploaded and verified, `--scope mutable
+--mutable-path translations/jp/zh-CN/latest.json --allow-mutable-update` selects
+only the current pointer. Replacing an existing pointer also requires
+`--expect-previous-sha256` for the exact previous bytes. Dry-run remains the
+default; `--execute --exclusive-writer` explicitly enables writes. Retain old
+objects and roots for rollback; ordinary resource deployment excludes this tree.
+This preparation path handles text-only publications; additional font delivery
+requires a separately reviewed font publication rather than silently omitting
+font references.
+
 These exports prepare inputs for the editorial and playback systems. They do
 not publish translations or grant approval to drafts.
 

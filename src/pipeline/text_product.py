@@ -33,8 +33,9 @@ def build_product(source, overlays=()):
             if entry["id"] in locales[overlay["locale"]]:
                 raise ValueError("duplicate overlay line for the same locale")
             locales[overlay["locale"]][entry["id"]] = entry
-    files, buckets = {}, defaultdict(dict)
+    files, buckets, search = {}, defaultdict(dict), defaultdict(dict)
     translations = {locale: defaultdict(dict) for locale in locales}
+    translated_search = {locale: defaultdict(dict) for locale in locales}
 
     def store(document, prefix="text"):
         data = canonical_bytes(document)
@@ -57,6 +58,8 @@ def build_product(source, overlays=()):
         display["revision"] = document_hash(display)
         route = {"source": store(display)}
         bucket = content_hash(key.encode("utf-8"))[:2]
+        search[bucket[0]][key] = [[line["id"], line["sourceHash"], line["kind"], line["text"]]
+                                  for line in script["lines"]]
         ids = {line["id"] for row in selected for line in row["lines"]}
         for locale, entries in sorted(locales.items()):
             # Donor/global revision provenance stays in the source registry
@@ -73,21 +76,30 @@ def build_product(source, overlays=()):
             prefix = f"translations/{source['region']}/{locale}"
             ref = store(doc, prefix)
             translations[locale][bucket][key] = {**ref, "path": ref["path"].removeprefix(prefix + "/")}
+            own_ids = {line["id"] for line in script["lines"]}
+            own_entries = [[line["id"], line["sourceHash"], line["text"], line["source"]]
+                           for line in selected_entries if line["id"] in own_ids]
+            if own_entries:
+                translated_search[locale][bucket[0]][key] = own_entries
         buckets[bucket][key] = route
     root = {"schema": "moly-text-runtime/1", "region": source["region"],
             "sourceRevision": source["revision"], "routing": "sha256-utf8-prefix-2",
-            "buckets": {}}
+            "buckets": {}, "searchBuckets": {}}
     for bucket, routes in sorted(buckets.items()):
         root["buckets"][bucket] = store({"schema": "moly-text-routes/1", "scripts": routes})
+    for bucket, rows in sorted(search.items()):
+        root["searchBuckets"][bucket] = store({"schema": "moly-text-source-search/1", "scripts": rows})
     root["revision"] = document_hash(root)
     files["text/index.json"] = canonical_bytes(root)
     for locale, translation_buckets in sorted(translations.items()):
         prefix = f"translations/{source['region']}/{locale}"
         publication = {"schema": "moly-text-publication/1", "region": source["region"],
-                       "locale": locale, "routing": "sha256-utf8-prefix-2", "buckets": {}}
+                       "locale": locale, "routing": "sha256-utf8-prefix-2", "buckets": {}, "searchBuckets": {}}
         for bucket, routes in sorted(translation_buckets.items()):
             ref = store({"schema": "moly-text-translation-routes/1", "scripts": routes}, prefix)
             publication["buckets"][bucket] = {**ref, "path": ref["path"].removeprefix(prefix + "/")}
+        for bucket, rows in sorted(translated_search[locale].items()):
+            publication["searchBuckets"][bucket] = store({"schema": "moly-text-translation-search/1", "scripts": rows}, prefix)
         publication["revision"] = document_hash(publication)
         data = canonical_bytes(publication)
         files[f"{prefix}/revisions/{publication['revision']}.json"] = data

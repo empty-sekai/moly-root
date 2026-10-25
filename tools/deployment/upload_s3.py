@@ -607,7 +607,7 @@ def parse_args(argv=None):
     parser.add_argument('--profile', help='Optional local AWS SDK profile; otherwise the standard credential chain')
     parser.add_argument('--scope', choices=['stable', 'release', 'descriptors', 'mutable'], default='stable')
     parser.add_argument('--release-id')
-    parser.add_argument('--mutable-path', choices=sorted(common.MUTABLE), action='append', default=[])
+    parser.add_argument('--mutable-path', type=common.mutable_path, action='append', default=[])
     parser.add_argument('--allow-mutable-update', action='store_true')
     parser.add_argument('--expect-previous-sha256')
     parser.add_argument('--limit', type=int)
