@@ -122,6 +122,7 @@ def _corpus_talks(document):
     for unit in (document.get("units") or {}).values():
         yield from unit.get("talks") or []
     yield from document.get("talks") or []
+    yield from (document.get("commonSomeCharacter") or {}).get("talks") or []
 
 
 def voice_requests(document):

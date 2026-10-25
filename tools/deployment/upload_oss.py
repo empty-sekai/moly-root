@@ -220,7 +220,7 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
         is_snapshot = len(parts) >= 3 and parts[0] == 'snapshots' and parts[1] in snapshots
         # The shared content-addressed stores are immutable like snapshot payloads.
         shared_store = len(parts) >= 2 and parts[0] in {'asset-store', 'catalog-store'}
-        choose = ((args.scope == 'stable' and ((is_snapshot and parts[2] in {'assets', 'catalog'} and len(parts) >= 4)
+        choose = ((args.scope == 'stable' and ((is_snapshot and parts[2] in {'assets', 'catalog', 'text'} and len(parts) >= 4)
                                                or shared_store))
                   or (args.scope == 'descriptors' and is_snapshot and len(parts) == 3 and parts[2] in {'snapshot.json', 'provenance.json'})
                   or (args.scope == 'release' and len(parts) >= 3 and parts[:2] == ('releases', args.release_id))

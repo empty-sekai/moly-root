@@ -117,10 +117,9 @@ def test_an_absent_party_table_is_stated_not_silently_empty(tmp_path, monkeypatc
     assert "birthdayPartyScenarios" in block["reason"]
 
 
-def test_the_party_block_is_the_only_key_the_change_adds(tmp_path, monkeypatch):
-    # The ordinary corpus is the document it always was, plus one key: a reader
-    # that held the top-level keys as a closed set would see exactly one new
-    # name, and no key it already had may be renamed, dropped or reordered.
+def test_party_and_common_blocks_preserve_the_ordinary_corpus_keys(tmp_path, monkeypatch):
+    # Additional families have their own blocks; ordinary corpus keys stay
+    # present and ordered before them.
     monkeypatch.setattr(talks, "_text_assets", lambda bundle: _assets())
     master = _master(tmp_path, [{"id": 1, "birthdayPartyId": 1, "seq": 1,
                                  "lua": "party_001"}])
@@ -128,7 +127,7 @@ def test_the_party_block_is_the_only_key_the_change_adds(tmp_path, monkeypatch):
     talks.extract_talks(master, "synthetic.bundle", out)
     document = json.loads(out.read_text(encoding="utf-8"))
     assert list(document) == ["version", "semantics", "units", "summary",
-                              "birthdayParty"]
+                              "birthdayParty", "commonSomeCharacter"]
     assert document["birthdayParty"]["semantics"]["table"].startswith(
         "birthdayPartyScenarios")
 
@@ -175,7 +174,8 @@ def test_attach_leaves_every_other_key_alone(tmp_path, monkeypatch):
     after = json.loads(out.read_text(encoding="utf-8"))
     assert after["birthdayParty"]["status"] == "present"
     assert after["birthdayParty"]["talks"]["party_001"]["voices"] == ["voice_party_001_01_006"]
-    assert report["preservedKeys"] == ["version", "semantics", "units", "summary"]
+    assert report["preservedKeys"] == ["version", "semantics", "units", "summary",
+                                       "commonSomeCharacter"]
     # Byte for byte: with the block taken back out, the attached document is
     # the corpus the extraction wrote, minus that run's own absent block.
     del after["birthdayParty"]

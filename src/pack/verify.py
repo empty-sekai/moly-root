@@ -730,6 +730,16 @@ def verify_catalog(catalog_path, schema_path=None, *, retained_catalogs=None, ro
     default = root / "asset-packs.json"
     if default.is_file() and default.resolve() != catalog_path:
         include(default, "default")
+    # Extraction results and published catalogs share these blobs. A result
+    # must retain its referenced artifacts before a runtime release selects it.
+    from .task_results import retained_results
+    try:
+        task_roots, task_blobs = retained_results(root)
+        roots.update(task_roots)
+        referenced.update(task_blobs)
+        info["blob_sizes"].update(task_blobs)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        errors.append(f"extraction results: {exc}")
     on_disk = {path.relative_to(root / "blobs").as_posix()
                for path in (root / "blobs").rglob("*") if path.is_file()}
     package_files = {path.relative_to(root).as_posix()

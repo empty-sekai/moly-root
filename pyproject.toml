@@ -24,7 +24,7 @@ jp = [
 ]
 
 [project.scripts]
-moly = "core.cli:main"
+moly = "cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

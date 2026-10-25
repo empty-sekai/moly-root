@@ -7,7 +7,7 @@ The cross-language semantic projection only permits nonnegative safe integers,
 strings, booleans and null (with arrays/objects); it never contains floats.
 """
 from __future__ import annotations
-import json
+from core.content import canonical_bytes
 from .hashing import sha256_bytes
 
 MANIFEST_V2 = "moly-asset-manifest/2"
@@ -15,11 +15,6 @@ CATALOG_V2 = "moly-asset-packs/2"
 CONTENT_V1 = "moly-asset-content/1"
 CHANNEL_V1 = "moly-asset-channel/1"
 MAX_SAFE_INTEGER = (1 << 53) - 1
-
-
-def canonical_bytes(document):
-    return (json.dumps(document, ensure_ascii=False, sort_keys=True,
-                       separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
 
 
 def content_projection(manifest):

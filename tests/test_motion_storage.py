@@ -205,7 +205,8 @@ def test_actor_job_propagates_encoding_and_checks_receipt_metadata(monkeypatch, 
 
 @pytest.mark.parametrize("override", [[], ["--rotation-encoding", "float32"]])
 def test_export_cli_forwards_rotation_encoding(monkeypatch, override):
-    from core import cli, extract, runtime_pack
+    from cli import legacy as cli
+    from core import extract, runtime_pack
     expected = "float32" if override else "snorm16"
     monkeypatch.setattr(cli, "_configure_unity", lambda _: None)
     calls = []

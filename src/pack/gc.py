@@ -25,6 +25,21 @@ import re
 def catalog_garbage(output):
     """List unused blobs only after validating every retained release root."""
     output = Path(output)
+    if not (output / "asset-packs.json").exists():
+        from .task_results import retained_results
+        roots, blobs = retained_results(output)
+        if not roots:
+            raise ValueError("no release or extraction result roots; refusing unrooted collection")
+        on_disk = {p.relative_to(output / "blobs").as_posix(): p.stat().st_size
+                   for p in (output / "blobs").rglob("*") if p.is_file()}
+        garbage = sorted(on_disk.keys() - blobs.keys())
+        # Without a release selector, preserve manifests and channel/archive
+        # state. Such a store may be mid-migration rather than task-only.
+        if any((output / folder).exists() for folder in ("catalogs", "channels", "packages")):
+            raise ValueError("release objects exist without a default catalog; restore it before GC")
+        return {"delete": garbage, "delete_manifests": [], "delete_manifest_bytes": 0,
+                "channel_roots": {}, "roots": roots, "delete_bytes": sum(on_disk[p] for p in garbage),
+                "retained_catalogs": 0, "referenced_blobs": sorted(blobs)}
     errors, info = verify_catalog(output / "asset-packs.json", root=output)
     if errors:
         raise ValueError("cannot determine catalog garbage: " + "; ".join(errors))
