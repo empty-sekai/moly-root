@@ -273,7 +273,37 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
         translation_base = None
     if (not snapshots and translation is None and font_catalog is None and resource_catalog is None) or any(not IDENTIFIER.fullmatch(s) for s in snapshots):
         raise SafeFailure('invalid_snapshot_identities')
-    if args.scope == 'release' and (args.release_id != doc.get('release') or not IDENTIFIER.fullmatch(args.release_id or '')):
+    releases = doc.get('releases', [doc['release']] if doc.get('release') else [])
+    if (not isinstance(releases, list) or len(releases) > 2
+            or any(not isinstance(value, str) or not IDENTIFIER.fullmatch(value) for value in releases)
+            or len(set(releases)) != len(releases)
+            or (doc.get('release') is not None and doc['release'] not in releases)
+            or (releases and (resource_catalog is not None or font_catalog is not None or translation is not None))):
+        raise SafeFailure('invalid_release_identities')
+    if len(releases) > 1:
+        # A second release must be the actual game pointer target, not an
+        # arbitrary directory added to the upload inventory by an operator.
+        pointers = {}
+        for logical in ('manifest.json', 'game/manifest.json'):
+            rows = [row for row in doc.get('files', []) if row.get('path') == logical]
+            if len(rows) != 1:
+                raise SafeFailure('missing_release_pointer', path=logical)
+            try:
+                raw = Path(rows[0]['sourceRaw']).read_bytes()
+                if hashlib.sha256(raw).hexdigest() != rows[0]['decodedSha256']:
+                    raise SafeFailure('local_descriptor_hash_mismatch', path=logical)
+                pointers[logical] = json.loads(raw)
+            except (OSError, KeyError, TypeError, ValueError) as error:
+                raise SafeFailure('cannot_read_release_pointer', path=logical) from None
+        primary = pointers['manifest.json'].get('release', {}).get('id')
+        game = pointers['game/manifest.json']
+        game_id = game.get('release', {}).get('id')
+        if (primary != doc.get('release') or releases != list(dict.fromkeys([primary, game_id]))
+                or game.get('publisher') != 'moly-release-artifact-v1' or game.get('schemaVersion') != 1
+                or game.get('prefix') != doc.get('urlPrefix')
+                or game.get('release', {}).get('module') != f"{doc.get('urlPrefix')}releases/{game_id}/game-boot.mjs"):
+            raise SafeFailure('release_pointers_do_not_match_manifest')
+    if args.scope == 'release' and args.release_id not in releases:
         raise SafeFailure('explicit_release_id_must_match_manifest')
     if args.scope == 'mutable':
         if not args.allow_mutable_update or len(args.mutable_path) != 1:
