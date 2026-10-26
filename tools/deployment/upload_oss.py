@@ -277,6 +277,7 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
     if (not isinstance(releases, list) or len(releases) > 2
             or any(not isinstance(value, str) or not IDENTIFIER.fullmatch(value) for value in releases)
             or len(set(releases)) != len(releases)
+            or (releases and doc.get('release') is None)
             or (doc.get('release') is not None and doc['release'] not in releases)
             or (releases and (resource_catalog is not None or font_catalog is not None or translation is not None))):
         raise SafeFailure('invalid_release_identities')

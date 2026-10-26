@@ -75,6 +75,11 @@ def test_prepare_and_selection_include_both_pointer_releases(publication, tmp_pa
     assert all(r['path'].startswith('releases/stage-synthetic/') for r in select('stage-synthetic'))
     with pytest.raises(uploader.SafeFailure, match='explicit_release_id_must_match_manifest'):
         select('unrelated')
+    original_release = doc.pop('release')
+    write(filename, doc)
+    with pytest.raises(uploader.SafeFailure, match='invalid_release_identities'):
+        select('game-synthetic')
+    doc['release'] = original_release
     doc['releases'][1] = 'unrelated'
     write(filename, doc)
     with pytest.raises(uploader.SafeFailure, match='release_pointers_do_not_match_manifest'):
