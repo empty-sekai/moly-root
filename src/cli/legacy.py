@@ -450,6 +450,14 @@ def main(argv=None):
                      help="directory containing declared effect, mesh, texture and shader dependencies")
     fpe.add_argument("--out-dir", required=True,
                      help="effect directory, normally <assets>/fixture-put-effects")
+    sep = sub.add_parser("site-edit-pick",
+                         help="export tagged editor raycast colliders in authored Unity coordinates")
+    sep.add_argument("--bundle", required=True,
+                     help="one mysekai__site__field__<scene> source bundle")
+    sep.add_argument("--apk", action="append", required=True,
+                     help="matching client APK containing TagManager; repeat for split APKs")
+    sep.add_argument("--out", required=True,
+                     help="output sidecar, normally <assets>/site/edit-pick/<scene>.json")
     ssw = sub.add_parser("site-sound-wave",
                          help="resolve MysekaiSiteView._soundWaveMeshFilter (the footstep "
                               "surface) of site scene packages: node, mesh and vertex colours")
@@ -1499,6 +1507,11 @@ def main(argv=None):
         from sites.prefab_package import extract_prefab_package
         print(json.dumps(extract_prefab_package(args.bundle, args.prefab, args.out_dir,
                                                 bundle_root=args.bundle_root),
+                         ensure_ascii=False))
+        return 0
+    if args.cmd == "site-edit-pick":
+        from sites.edit_pick import extract_site_edit_pick
+        print(json.dumps(extract_site_edit_pick(args.bundle, args.apk, args.out),
                          ensure_ascii=False))
         return 0
     if args.cmd == "site-sound-wave":

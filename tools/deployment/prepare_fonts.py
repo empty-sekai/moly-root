@@ -98,7 +98,7 @@ def prepare(publication, output, *, object_prefix, url_prefix):
         if len(raw) != ref['bytes'] or hashlib.sha256(raw).hexdigest() != ref['sha256']:
             raise ValueError('font object integrity mismatch')
         files[name] = raw
-    if (not object_prefix.endswith('/') or object_prefix.startswith('/') or not url_prefix.startswith('/')
+    if ((object_prefix and not object_prefix.endswith('/')) or object_prefix.startswith('/') or not url_prefix.startswith('/')
             or not url_prefix.endswith('/') or any(part in {'.', '..'} for value in [object_prefix, url_prefix] for part in value.split('/'))
             or any(char in object_prefix + url_prefix for char in '\\%?#:')):
         raise ValueError('publication prefixes must be directories')

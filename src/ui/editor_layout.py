@@ -8,7 +8,7 @@ PREFABS = (
     "ScreenLayerSiteEditMode", "MysekaiEditSaveConfirmationDialog",
     "SiteEditListSelectorCell", "SiteEditOutDoorContentList", "SiteEditFloorContentList",
     "SiteEditWallContentList", "SiteEnvironmentContentList", "RoadFixtureContentList",
-    "FixtureSelectCell", "UIPartsLeftTabListMysekaiContentCell",
+    "FixtureSelectCell", "SiteEnvironmentSelectCell", "UIPartsLeftTabListMysekaiContentCell",
     "ScreenLayerHeader",
 )
 
@@ -177,6 +177,18 @@ def decode_left_tab_controller(r):
     return d
 
 
+def decode_site_environment_cell(r):
+    """ListViewItem fields, then SiteEnvironmentSelectCell's two references."""
+    return {"sizeX": r.f32(), "sizeY": r.f32(),
+            **refs(r, ("_thumbnail", "_selected"))}
+
+
+def decode_site_environment_thumbnail(r):
+    """UIPartsThumbnail fields, then its environment button and detector."""
+    from ui.bgm_select_layout import decode_thumbnail
+    return {**decode_thumbnail(r), **refs(r, ("button", "clickDetector"))}
+
+
 def decode_fixture_cell(r):
     d = {"sizeX": r.f32(), "sizeY": r.f32()}
     d.update(refs(r, ("thumbnail", "selected", "_inPlacedLabel", "_missionLabel")))
@@ -301,6 +313,8 @@ DECODERS = {
     "Sekai.UI.UITextureLoader": decode_texture_loader,
     "Sekai.UI.UIPartsLeftTabListController": decode_left_tab_controller,
     "Sekai.UI.FixtureSelectCell": decode_fixture_cell,
+    "Sekai.UI.SiteEnvironmentSelectCell": decode_site_environment_cell,
+    "Sekai.Mysekai.UIPartsSiteEnvironmentThumbnail": decode_site_environment_thumbnail,
     "Sekai.UI.UIPartsIconInfoView": lambda r: refs(r, ("infoTextRoot", "infoText", "lockedObject")),
     "Sekai.UI.UIPartsLeftTabList": lambda r: refs(r, ("scroller", "topScrollableIcon", "bottomScrollableIcon", "backPanelTransform")),
     "Sekai.UI.UIPartsLeftTabSubList": lambda r: refs(r, ("scroller", "topScrollableIcon", "bottomScrollableIcon")),

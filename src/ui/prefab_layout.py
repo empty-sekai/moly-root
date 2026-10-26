@@ -290,6 +290,8 @@ JP_FAMILIES = {
 # cell instance, adds a fourth item, the node's path under the page, and builds
 # the prefab from the page's own nodes (see follow_page_prefab_reference).
 POINTER_PREFABS = {
+    "SiteEnvironmentSelectCell": (
+        "SiteEnvironmentContentList", "Sekai.UI.ListView", "listViewItemPrefab"),
     **CRAFT_POINTER_PREFABS, **MISSION_POINTER_PREFABS,
     "UIPartsPhotoFrameListThumbnail": (
         "ScreenLayerMysekaiPhotoShot", "Sekai.FixedSizeReuseScroller", "prefab"),

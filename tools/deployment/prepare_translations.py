@@ -63,7 +63,7 @@ def prepare(publication, output, *, object_prefix, url_prefix):
             raise ValueError('invalid translation search shard')
     if (publication / f"revisions/{root['revision']}.json").read_bytes() != root_bytes:
         raise ValueError('archived publication differs from latest')
-    if (not object_prefix.endswith('/') or object_prefix.startswith('/') or not url_prefix.startswith('/') or not url_prefix.endswith('/')
+    if ((object_prefix and not object_prefix.endswith('/')) or object_prefix.startswith('/') or not url_prefix.startswith('/') or not url_prefix.endswith('/')
             or any(part in {'.', '..'} for prefix in [object_prefix, url_prefix] for part in prefix.split('/'))
             or any(char in object_prefix + url_prefix for char in '\\%?#:')):
         raise ValueError('publication prefixes must be directories')

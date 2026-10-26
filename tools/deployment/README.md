@@ -1,5 +1,27 @@
 # Direct-URL deployment
 
+## Publish resources before an application release
+
+`prepare_resources.py` prepares one content-addressed asset catalogue without
+an application release, snapshot descriptor or mutable pointer. Build the store
+with `build_store.py`, then pass the returned catalogue hash:
+
+```sh
+python tools/deployment/prepare_resources.py --source RUNTIME_ROOT --store ASSET_STORE --catalog CATALOG_SHA256 --output RESOURCE_STAGING --object-prefix= --url-prefix /moly/ --encoding best --stage
+python tools/deployment/upload_s3.py --manifest RESOURCE_STAGING/upload-manifest.json --endpoint https://objects.example.invalid --bucket resource-bucket --region CONFIRMED_REGION --object-prefix= --scope stable
+```
+
+Preparation verifies the catalogue, package graph, source provenance, every
+blob, and exact browser membership and content against the supplied runtime
+root. The manifest's `resourceCatalog` identifies this one immutable graph.
+The uploader verifies it again from actual local bytes and accepts only its
+complete `stable` scope; unrelated objects, partial selections, application
+releases and mutable pointers are rejected. The command above remains a local
+dry-run. Existing S3 capacity, conditional-write and explicit execution rules
+apply unchanged. Uploading the catalogue does not select it for any app.
+
+## Application publication
+
 `prepare_deployment.py` audits exporter-owned membership and stages a publication
 without any cloud API calls. `upload_oss.py` is the existing bounded OSS uploader,
 now versioned here; its default is dry-run. It keeps its explicit target,

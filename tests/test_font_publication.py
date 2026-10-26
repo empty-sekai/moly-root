@@ -20,8 +20,9 @@ def load_tool(name):
     return module
 
 
-@pytest.fixture
-def publication(tmp_path, monkeypatch):
+@pytest.fixture(params=['font-test/', ''])
+def publication(tmp_path, monkeypatch, request):
+    object_prefix = request.param
     tool_dir = Path(__file__).parents[1] / 'tools' / 'deployment'
     monkeypatch.syspath_prepend(str(tool_dir))
     prepare, uploader = load_tool('prepare_fonts'), load_tool('upload_oss')
@@ -45,7 +46,7 @@ def publication(tmp_path, monkeypatch):
     (root_dir / f"revisions/{root['revision']}.json").write_bytes(raw)
     (root_dir / 'latest.json').write_bytes(raw)
     output = tmp_path / 'prepared'
-    doc = prepare.prepare(root_dir, output, object_prefix='font-test/', url_prefix='/moly/')
+    doc = prepare.prepare(root_dir, output, object_prefix=object_prefix, url_prefix='/moly/')
     manifest = output / 'upload-manifest.json'
 
     def select(scope='stable', limit=None):
@@ -53,7 +54,7 @@ def publication(tmp_path, monkeypatch):
         args = SimpleNamespace(manifest=manifest, scope=scope, release_id=None,
             mutable_path=['fonts/latest.json'] if scope == 'mutable' else [],
             allow_mutable_update=scope == 'mutable', expect_previous_sha256=None, limit=limit)
-        return uploader.load_selection(args, object_prefix='font-test/', schemas=('moly-object-upload/1',))[1]
+        return uploader.load_selection(args, object_prefix=object_prefix, schemas=('moly-object-upload/1',))[1]
 
     return SimpleNamespace(doc=doc, root=root, raw=raw, select=select, uploader=uploader,
                            prepare=prepare, directory=root_dir)

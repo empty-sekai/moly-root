@@ -152,7 +152,8 @@ def test_local_dry_run_never_creates_client_or_receipt(s3, tmp_path, capsys):
     assert set(tmp_path.iterdir()) == before
 
 
-def test_translation_publication_selects_only_its_immutable_objects_or_one_pointer(s3, tmp_path, capsys):
+@pytest.mark.parametrize('object_prefix', ['text/', ''])
+def test_translation_publication_selects_only_its_immutable_objects_or_one_pointer(s3, tmp_path, capsys, object_prefix):
     from pipeline.text_product import build_product
     from prepare_translations import prepare
     source = {'schema': 'moly-text-source/1', 'region': 'jp', 'revision': 'a' * 64,
@@ -166,10 +167,10 @@ def test_translation_publication_selects_only_its_immutable_objects_or_one_point
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_bytes(body)
     staging = tmp_path / 'staging'
-    prepare(product / 'translations/jp/zh-CN', staging, object_prefix='text/', url_prefix='/moly/')
+    prepare(product / 'translations/jp/zh-CN', staging, object_prefix=object_prefix, url_prefix='/moly/')
     manifest = staging / 'upload-manifest.json'
     arguments = cli(manifest)
-    arguments[arguments.index('--object-prefix') + 1] = 'text/'
+    arguments[arguments.index('--object-prefix') + 1] = object_prefix
     args = s3.parse_args(arguments)
     _, stable = s3.selection(args)
     assert stable and all('/objects/' in row['path'] or '/revisions/' in row['path'] for row in stable)
@@ -180,7 +181,7 @@ def test_translation_publication_selects_only_its_immutable_objects_or_one_point
     _, pointers = s3.selection(args)
     assert [row['path'] for row in pointers] == ['translations/jp/zh-CN/latest.json']
     doc = json.loads(manifest.read_bytes())
-    doc['files'].append(row_at(tmp_path, 'snapshots/unrelated/assets/x.bin', prefix='text/'))
+    doc['files'].append(row_at(tmp_path, 'snapshots/unrelated/assets/x.bin', prefix=object_prefix))
     manifest.write_text(json.dumps(doc), encoding='utf-8')
     assert_failure(s3, 'translation_manifest_contains_unrelated_object', lambda: s3.selection(args))
 
@@ -354,6 +355,27 @@ def test_capacity_is_whole_bucket_encoded_and_incomplete_plans_cannot_execute(s3
     monkeypatch.setattr(s3, "create_client", lambda _: over)
     assert_failure(s3, "capacity_unverified_or_exceeded", lambda: s3.main(cli(manifest, "--execute", "--exclusive-writer")))
     assert all(kind != "put" for kind, _ in over.calls)
+
+
+def test_explicit_incremental_budget_counts_selected_namespaces_and_retains_guards(s3, tmp_path):
+    row = row_at(tmp_path)
+    args = s3.parse_args(cli(manifest_at(tmp_path, [row]), '--capacity-bytes', '0'))
+    client = FakeS3()
+    client.pages = [{"Contents": [{"Key": "snapshots/cn-test/assets/old.bin", "Size": s3.CAPACITY + 1}],
+                     "IsTruncated": False}]
+    plan = s3.inspect_capacity(client, s3.destination(args), [row], capacity_bytes=args.capacity_bytes)
+    assert plan['capacityBytes'] is None and plan['currentObjectBytes'] is None
+    assert plan['projectedBytesUpperBound'] is None and plan['withinCapacity']
+    assert plan['additionalBytesUpperBound'] == row['bytes']
+    assert all(request['Prefix'] == row['objectKey'].rsplit('/', 1)[0] + '/'
+               for kind, request in client.calls if kind == 'list')
+    client.versioning = {"Status": "Enabled"}
+    assert not s3.inspect_capacity(client, s3.destination(args), [row], capacity_bytes=0)['withinCapacity']
+    client.versioning = {}
+    client.objects[row['objectKey']] = head_for(s3, row)
+    client.objects[row['objectKey']]['Metadata']['moly-sha256'] = 'b' * 64
+    client.pages = [{"Contents": [{"Key": row['objectKey'], "Size": row['bytes']}], "IsTruncated": False}]
+    assert s3.inspect_capacity(client, s3.destination(args), [row], capacity_bytes=0)['immutableConflictCount'] == 1
 
 
 def test_receipts_are_destination_bound_and_never_replace_remote_verification(s3, tmp_path):

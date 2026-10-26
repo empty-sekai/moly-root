@@ -247,6 +247,15 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
     snapshots = set(doc.get('snapshots', []))
     translation = doc.get('translation')
     font_catalog = doc.get('fontCatalog')
+    resource_catalog = doc.get('resourceCatalog')
+    if resource_catalog is not None:
+        if (not isinstance(resource_catalog, dict) or snapshots or translation is not None
+                or font_catalog is not None or doc.get('release') is not None
+                or not SHA256.fullmatch(resource_catalog.get('sha256', ''))
+                or resource_catalog.get('path') != f"asset-store/catalogs/{resource_catalog['sha256']}.json"):
+            raise SafeFailure('invalid_resource_catalogue_publication')
+        if args.scope != 'stable' or args.limit is not None:
+            raise SafeFailure('resource_catalogue_requires_complete_stable_scope')
     if font_catalog is not None:
         if (not isinstance(font_catalog, dict) or snapshots or translation is not None
                 or font_catalog.get('path') != 'fonts/latest.json'
@@ -262,7 +271,7 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
         translation_base = translation['path'].removesuffix('latest.json')
     else:
         translation_base = None
-    if (not snapshots and translation is None and font_catalog is None) or any(not IDENTIFIER.fullmatch(s) for s in snapshots):
+    if (not snapshots and translation is None and font_catalog is None and resource_catalog is None) or any(not IDENTIFIER.fullmatch(s) for s in snapshots):
         raise SafeFailure('invalid_snapshot_identities')
     if args.scope == 'release' and (args.release_id != doc.get('release') or not IDENTIFIER.fullmatch(args.release_id or '')):
         raise SafeFailure('explicit_release_id_must_match_manifest')
@@ -280,6 +289,8 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
     selected, seen = [], set()
     for row in doc.get('files', []):
         logical = row.get('path', '')
+        if resource_catalog is not None and not re.fullmatch(r'asset-store/(?:(?:catalogs|packages)/[a-f0-9]{64}\.json|blobs/[a-f0-9]{2}/[a-f0-9]{64}\.(?:bin|gzz|brz|br))', logical):
+            raise SafeFailure('resource_catalogue_contains_unrelated_object')
         if font_catalog is not None and not re.fullmatch(r'fonts/(?:latest\.json|revisions/[a-f0-9]{64}\.json|objects/[a-f0-9]{64}\.(?:ttf|txt))', logical):
             raise SafeFailure('font_manifest_contains_unrelated_object')
         if translation_base and (not logical.startswith(translation_base) or not re.fullmatch(
@@ -334,6 +345,12 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
         raise SafeFailure('no_objects_selected')
     if font_catalog is not None:
         validate_font_publication(doc)
+    if resource_catalog is not None:
+        try:
+            from resource_publication import validate_upload
+            validate_upload(doc)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise SafeFailure('invalid_resource_catalogue_closure', errorType=type(error).__name__) from None
     if translation is not None:
         roots = [row for row in doc['files'] if row['path'] == translation['path']]
         if len(roots) != 1 or roots[0]['decodedSha256'] != translation['sha256']:
