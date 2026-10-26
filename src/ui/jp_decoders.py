@@ -562,6 +562,11 @@ VERSIONS = tuple(LAYOUT_CHAINS)
 
 # (class name, serialized type hash hex) -> the layout the bytes carry.
 TYPE_LAYOUTS = {
+    ("Sekai.UIPartsPhotoFrameThumbnail", "701a1b9241173c653af93358697fbf4a"): "7.0.0",
+    ("Sekai.Mysekai.MysekaiSelectFrameView", "56a5828cb66f421adde139868f381dc6"): "7.0.0",
+    ("Sekai.UIPartsPhotoFramePreview", "8d1a4f81285d407da7fc2608b914a06e"): "7.0.0",
+    ("Sekai.Mysekai.MysekaiPhotoSaveAnimation", "a7952c6374ff1805f356704076fb3a8a"): "7.0.0",
+    ("Sekai.AnimationClipEvent", "431f36454113f7d83bc74347ac5d008f"): "7.0.0",
     ("Sekai.Mysekai.MysekaiPhotoShotView", "9c249c4e2d9276be8c161151ab811ebf"): "7.0.0",
     ("Sekai.Mysekai.MysekaiPhotoShotAnimation", "f1b1ff8667c818bf70d56dd9b284b432"): "7.0.0",
     ("Sekai.Mysekai.ScreenLayerMysekaiPhotoShotPresenter", "a4805d90303631a00c5a8e37e1ff5a00"): "7.0.0",

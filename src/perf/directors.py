@@ -95,12 +95,13 @@ def _signal_receiver(store, record, component_id, owner, hierarchy):
             "hierarchy": hierarchy, "reactions": rows}
 
 
-def _director(store, record, path_id, owner, hierarchy):
+def _director(store, record, path_id, owner, hierarchy, transforms):
     tree = record.tree(path_id)
     return {
         "asset": identity(record, path_id),
         "gameObject": identity(*owner),
         "hierarchy": hierarchy,
+        "transforms": transforms,
         "timeline": reference(store, record, tree.get("m_PlayableAsset")),
         "enabled": tree.get("m_Enabled"),
         "updateMode": tree.get("m_DirectorUpdateMode"),
@@ -214,7 +215,7 @@ def read_prefab_directors(store, package):
                         component_kind = component_file.kinds[component_id]
                         if component_kind == "PlayableDirector":
                             prefab["directors"].append(_director(
-                                store, component_file, component_id, owner, hierarchy))
+                                store, component_file, component_id, owner, hierarchy, own))
                         elif (component_kind == "MonoBehaviour"
                               and component_file.script_of(component_id) in TIMELINE_VIEW_SCRIPTS):
                             prefab["fixtureTimelineViews"].append(_fixture_timeline_view(

@@ -58,7 +58,7 @@ def resolve_script_class(obj, mono_index: dict) -> str:
     raw = obj.get_raw_data()
     if len(raw) < 28:
         return "?"
-    fid, pid = struct.unpack("<iQ", raw[16:28])
+    fid, pid = struct.unpack("<iq", raw[16:28])
     if fid == 0:
         fname = obj.assets_file.name
     else:

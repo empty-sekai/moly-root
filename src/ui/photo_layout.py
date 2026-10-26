@@ -10,6 +10,7 @@ IMAGES = (
     "btn_photoshot_gr_h180", "icon_callout_wh", "icon_camera_wh_h80", "btn_circle120_lgr",
     "icon_cameraEffect_h56", "icon_tripod_wh_h44", "icon_photoalbum_wh_h42",
     "txt_photoshot_blur", "txt_photoshot_filmCount",
+    "tex_mysekai_photo_shot_camera", "tex_mysekai_photo_shot_parts", "img_film_default",
 )
 
 
@@ -89,6 +90,7 @@ def package_effects(bundle, bundle_root, out):
     for role, prefab in (
         ('call-button', 'fx_mysekai_photo_shot_call_character_pt'),
         ('call-wave', 'fx_mysekai_photo_shot_call_character_wave'),
+        ('shot', 'fx_mysekai_photo_shot_pt'),
     ):
         targets = [(record, path_id) for name, record, path_id in package.contents
                    if name == prefab + '.prefab']
@@ -158,8 +160,39 @@ def decode_presenter(reader: talk.Reader):
     return editor_layout.refs(reader, ("_photoShotView", "_selectFrameView", "_photoSaveAnimation"))
 
 
+def decode_select_frame(reader: talk.Reader):
+    return references(reader, (
+        "_canvasGroup", "_photoShotAnimation", "_scroller",
+        "_selectedPhotoFrameNameText", "_savePhotoButton", "_photoShotSkipButton",
+    ))
+
+
+def decode_preview(reader: talk.Reader):
+    return references(reader, (
+        "_rootCanvasGroup", "_photoLoader", "_frameLoader", "_frameCanvasGroup",
+    ))
+
+
+def decode_save_animation(reader: talk.Reader):
+    return references(reader, ("_canvasGroup", "_photoAlbumPageView"))
+
+
+def decode_thumbnail(reader: talk.Reader):
+    return references(reader, ("_frameLoader", "_quantityText", "_selectedImage", "_selectedButton"))
+
+
+def decode_clip_event(reader: talk.Reader):
+    # Callback is a runtime Action<string>, not a serialized UnityEvent.
+    return {}
+
+
 DECODERS = {
     "Sekai.Mysekai.MysekaiPhotoShotView": decode_view,
     "Sekai.Mysekai.MysekaiPhotoShotAnimation": decode_animation,
     "Sekai.Mysekai.ScreenLayerMysekaiPhotoShotPresenter": decode_presenter,
+    "Sekai.Mysekai.MysekaiSelectFrameView": decode_select_frame,
+    "Sekai.UIPartsPhotoFramePreview": decode_preview,
+    "Sekai.Mysekai.MysekaiPhotoSaveAnimation": decode_save_animation,
+    "Sekai.AnimationClipEvent": decode_clip_event,
+    "Sekai.UIPartsPhotoFrameThumbnail": decode_thumbnail,
 }

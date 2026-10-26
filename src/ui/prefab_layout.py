@@ -142,6 +142,7 @@ REFERENCED_FAMILIES = {
     # The mission cells sit in Resources folders and are instantiated from
     # their lists' serialized cell prefab reference (see POINTER_PREFABS).
     "missioncell": ("MysekaiMissionScreenCell", "MysekaiMissionRewardCell"),
+    "photocell": ("UIPartsPhotoFrameListThumbnail",),
 }
 
 # Screen layers and dialogs the JP UI census maps to but the product does not
@@ -288,7 +289,11 @@ JP_FAMILIES = {
 # repeats its page, whose pages each hold a copy of the content beside the list's
 # cell instance, adds a fourth item, the node's path under the page, and builds
 # the prefab from the page's own nodes (see follow_page_prefab_reference).
-POINTER_PREFABS = {**CRAFT_POINTER_PREFABS, **MISSION_POINTER_PREFABS}
+POINTER_PREFABS = {
+    **CRAFT_POINTER_PREFABS, **MISSION_POINTER_PREFABS,
+    "UIPartsPhotoFrameListThumbnail": (
+        "ScreenLayerMysekaiPhotoShot", "Sekai.FixedSizeReuseScroller", "prefab"),
+}
 POINTER_PAGE_PREFABS = {**MISSION_PAGE_POINTER_PREFABS}
 
 # Prefabs -> (holder, the holder's list field, the cell's name): the field names
@@ -794,6 +799,7 @@ EXTRA_DECODERS = {
     **FIELD_HUD_CN_DECODERS,
     "UnityEngine.UI.Toggle": decode_unity_toggle,
     "Sekai.UI.CustomRawImage": decode_raw_image_base,
+    "UnityEngine.UI.RawImage": decode_raw_image_base,
     "Sekai.UI.CustomToggle": decode_custom_toggle,
     "Sekai.UI.CustomIndexToggleGroup": decode_custom_index_toggle_group,
     "Sekai.MenuDialogCell": decode_menu_dialog_cell,
@@ -3490,6 +3496,10 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
                     runtime_textures[alias] = sprite["image"]
                     runtime_sprites[alias] = sprite
         path = write_json(out / family / f"{prefab}.json", document)
+        if prefab == "ScreenLayerMysekaiPhotoShot":
+            from ui.photo_presentation import export_presentation
+            presentation = export_presentation(document, master_path, bundles_root, out)
+            rows.append({**presentation, **identity})
         monos, decoded, raw = _document_counts(document)
         closure = _closure_of(env, file_name)
         row = {
