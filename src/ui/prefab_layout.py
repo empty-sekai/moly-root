@@ -276,6 +276,7 @@ _PRODUCT_PREFABS = frozenset(
 # The JP prefab registry: the product families, the referenced-only prefabs
 # and the census-only ones.
 JP_FAMILIES = {
+    "bulkharvest": ("BulkHarvestChargeGauge", "UIPartsThumbnailRewardListCell"),
     **SCREENS,
     **REFERENCED_FAMILIES,
     **{family: tuple(n for n in names if n not in _PRODUCT_PREFABS)
@@ -290,6 +291,8 @@ JP_FAMILIES = {
 # cell instance, adds a fourth item, the node's path under the page, and builds
 # the prefab from the page's own nodes (see follow_page_prefab_reference).
 POINTER_PREFABS = {
+    "BulkHarvestChargeGauge": ("ScreenLayerMysekaiHUD", "Sekai.Mysekai.HarvestPlayerHeadUpDisplay", "_bulkHarvestChargeGaugeView"),
+    "UIPartsThumbnailRewardListCell": ("MysekaiBulkHarvestRewardDialog", "Sekai.UI.ListView", "listViewItemPrefab"),
     "SiteEnvironmentSelectCell": (
         "SiteEnvironmentContentList", "Sekai.UI.ListView", "listViewItemPrefab"),
     **CRAFT_POINTER_PREFABS, **MISSION_POINTER_PREFABS,
@@ -3227,7 +3230,7 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
             reference, (go_pid, transform_pid, _) = follow_prefab_reference(
                 env, holder_objects, holder_roots[0][1], item["via"][1], item["via"][2],
                 Resolver({}, mono_index, None, env=env, decoders=decoders),
-                lambda name: _file_objects(env, name))
+                lambda name: _file_objects(env, name), allow_nested=item["prefab"] == "BulkHarvestChargeGauge")
         if "targetSerializedFile" not in reference:
             reference["targetSerializedFile"] = holder_file
         item["target"] = (reference["targetSerializedFile"], go_pid)

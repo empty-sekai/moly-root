@@ -767,7 +767,8 @@ def extract_from_store(store, out_dir, *, shader_compiler=None, domains=DOMAINS,
     domain the router gives them -- one package of a domain whose other
     packages are not read this way (the travel cannon of the site domain).  A
     named package the store does not hold is not extracted; its document's
-    ``domain`` is still the one the router reports.
+    ``domain`` is the routed domain, or ``explicit`` when the router does not
+    claim that package.
     """
     domains = tuple(domains)
     packages = tuple(sorted(set(packages)))
@@ -786,7 +787,7 @@ def extract_from_store(store, out_dir, *, shader_compiler=None, domains=DOMAINS,
     target_names, lookup_names = [], []
     for name in sorted(names):
         target = route(name)
-        if target is not None and (target.domain in domains or name in packages):
+        if name in packages or target is not None and target.domain in domains:
             target_names.append(name)
         else:
             lookup_names.append(name)
@@ -797,7 +798,7 @@ def extract_from_store(store, out_dir, *, shader_compiler=None, domains=DOMAINS,
     documents = {}
     per_domain = {domain: 0 for domain in domains}
     for name in target_names:
-        per_domain.setdefault(route(name).domain, 0)
+        per_domain.setdefault(route(name).domain if route(name) else "explicit", 0)
     totals = {"packages": len(target_names), "lookupPackages": len(lookup_names),
               "emitters": 0, "materials": 0, "textures": 0,
               "unsupported": 0, "missing": 0,
@@ -805,7 +806,7 @@ def extract_from_store(store, out_dir, *, shader_compiler=None, domains=DOMAINS,
               "systemReadFailures": 0, "rendererReadFailures": 0}
     for name in target_names:
         routed = route(name)
-        document, file_name = _export_package(store, name, out, routed.domain,
+        document, file_name = _export_package(store, name, out, routed.domain if routed else "explicit",
                                               lambda directory: _Images(directory),
                                               source.materials, source.geometry)
         for emitter in document["emitters"]:

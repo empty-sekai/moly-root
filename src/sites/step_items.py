@@ -393,7 +393,8 @@ def export_site_timelines(bundles_root, asset_root, packages):
     paths = [bundles / name for name in packages]
     require_paths([str(path) for path in paths])
     for name in packages:
-        if not name.startswith(SITE_PREFIX):
+        from .bulk_harvest import PACKAGE as BULK_PACKAGE
+        if not name.startswith(SITE_PREFIX) and name != BULK_PACKAGE:
             raise ValueError(f"{name} is not a site package")
     output = root / OUTPUT
     staged = output.with_name(output.name + ".staging")
@@ -416,7 +417,11 @@ def export_site_timelines(bundles_root, asset_root, packages):
         targets = json.loads(targets_path.read_text(encoding="utf-8"))
         package = store.package(name)
         records = _Records(store, package)
-        items, item_reports = export_step_items(store, records, name, tracks, targets, step_dir)
+        if name == BULK_PACKAGE:
+            from .bulk_harvest import export_bulk_harvest
+            items, item_reports = export_bulk_harvest(store, records, tracks, targets, step_dir)
+        else:
+            items, item_reports = export_step_items(store, records, name, tracks, targets, step_dir)
         containers = {row["container"] for row in items.values()}
         directors, director_reports = export_scene_directors(store, records, name, tracks, targets,
                                                              step_dir, containers)
