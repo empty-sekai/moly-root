@@ -710,6 +710,25 @@ def test_actor_export_plans_progress_receipts_and_backups_never_enter_runtime(as
     assert packages(before) == packages(after)
 
 
+def test_bulk_gauge_document_and_textures_reach_the_published_catalogue(assets, tmp_path):
+    required = {
+        "ui-bulkharvest/gauge/fx_mysekai_bulk_harvest_gauge_charge.json":
+            b'{"geometry":null,"textures":["textures/pulse.png"]}',
+        "ui-bulkharvest/gauge/textures/pulse.png": b"synthetic gauge texture",
+    }
+    for name, data in required.items():
+        path = assets / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    evidence = assets / "ui-bulkharvest/gauge/export-report.json"
+    evidence.write_bytes(b"private extraction evidence")
+    assert required.keys() <= runtime_paths(assets).keys()
+    catalog = build_groups(assets, tmp_path / "store", "7.0.0", region="jp")
+    published = {path for package in catalog["packages"] for path in package["paths"]}
+    assert required.keys() <= published
+    assert evidence.relative_to(assets).as_posix() not in published
+
+
 def test_verifier_shares_successful_blob_checks_only_within_one_call(assets, tmp_path, monkeypatch):
     import pack.verify as verifier
     out = tmp_path / "store"

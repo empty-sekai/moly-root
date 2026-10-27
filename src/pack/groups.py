@@ -61,7 +61,7 @@ ASSET_DIRECTORIES = (
     "avatar", "avatar-parts", "camera", "cutscene-timeline", "emoticons", "fixture-areas",
     "fixture-attach", "fixture-interface", "fixture-meshes", "fixture-models",
     "fixture-gimmick", "fixture-particles-v2", "fixture-talks", "fixture-timeline", "perf-animations",
-    "phenomena", "site", "ui", "ui-layout-v2", "ui-jp",
+    "phenomena", "site", "ui", "ui-layout-v2", "ui-jp", "ui-bulkharvest",
     "field-camera", "house-transition", "live-transitioner",
     "effect-resources", "graphics-config", "layout-grid",
     "site-action-effects", "site-common-action-effects", "site-harvest-object-effects",
