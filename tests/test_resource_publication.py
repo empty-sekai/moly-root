@@ -11,6 +11,48 @@ import pytest
 from pack.groups import build_groups
 
 
+@pytest.mark.parametrize('size,maximum,accepted', [
+    (0, 0, True), (17, 128 * 1024 * 1024, True), (17, 17, True),
+    (18, 17, False), (1, 0, False),
+    (1024 * 1024 + 7, 1024 * 1024 + 7, True),
+    (1024 * 1024 + 8, 1024 * 1024 + 7, False),
+])
+def test_store_reader_preserves_eof_and_budget(tmp_path, monkeypatch, size, maximum, accepted):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / 'tools/deployment'))
+    from resource_publication import read_store_file
+    body = b'x' * size
+    source = tmp_path / 'object.bin'
+    source.write_bytes(body)
+    if accepted:
+        resolved, actual = read_store_file(tmp_path, source.name, maximum)
+        assert resolved == source.resolve()
+        assert actual == body
+    else:
+        with pytest.raises(ValueError, match='exceeds runtime budget'):
+            read_store_file(tmp_path, source.name, maximum)
+
+
+def test_store_reader_handles_short_reads_without_budget_sized_allocation(tmp_path, monkeypatch):
+    import io
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / 'tools/deployment'))
+    from resource_publication import read_store_file
+    source = tmp_path / 'object.bin'
+    source.write_bytes(b'present')
+    body = b'short reads still require the complete body'
+    requests = []
+
+    class ShortReader(io.BytesIO):
+        def read(self, size=-1):
+            requests.append(size)
+            assert 0 < size <= 1024 * 1024
+            return super().read(min(size, 3))
+
+    monkeypatch.setattr(Path, 'open', lambda *_args, **_kwargs: ShortReader(body))
+    _, actual = read_store_file(tmp_path, source.name, 128 * 1024 * 1024)
+    assert actual == body
+    assert len(requests) > 1
+
+
 @pytest.fixture
 def publication(tmp_path, monkeypatch):
     directory = Path(__file__).parents[1] / 'tools/deployment'

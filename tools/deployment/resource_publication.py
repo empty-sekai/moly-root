@@ -32,7 +32,17 @@ def read_store_file(store, relative, maximum):
     if not resolved.is_relative_to(store):
         raise ValueError('store object escaped root')
     with resolved.open('rb') as stream:
-        data = stream.read(maximum + 1)
+        # Read to EOF or the first excess byte without allocating the entire
+        # runtime budget for every small object in the catalogue.
+        remaining = maximum + 1
+        chunks = []
+        while remaining:
+            chunk = stream.read(min(remaining, 1024 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b''.join(chunks)
     if len(data) > maximum:
         raise ValueError('store object exceeds runtime budget')
     return resolved, data
