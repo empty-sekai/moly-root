@@ -379,6 +379,7 @@ def main():
     parser.add_argument('--stage', action='store_true', help='Create immutable hardlink staging grouped by content encoding')
     parser.add_argument('--encoding', choices=['identity', 'gzip', 'best'], default='best', help='Generate/select verified lossless HTTP representations; best allows Brotli')
     parser.add_argument('--existing-encodings-only', action='store_true', help='Audit/reuse existing sidecars without generating new representations')
+    parser.add_argument('--verified-representations', type=Path, help='Explicit local index of verified immutable origin bodies and headers')
     parser.add_argument('--engine-reads', action='append', default=[], metavar='REGION=FILE',
                         help='Request or console log of a browser run; the audit fails on a requested path the membership lacks (engine_reads.py)')
     args = parser.parse_args()
@@ -393,6 +394,8 @@ def main():
     sys.path.insert(0, str(args.exporter.resolve() / 'src'))
     from pack.groups import runtime_paths
     from pack.http_delivery import choose_representation
+    from verified_representations import VerifiedRepresentations
+    reuse = VerifiedRepresentations(args.verified_representations)
     profile = delivery_profile(args.encoding, not args.existing_encodings_only)
     manifest = json.loads((publication / 'manifest.json').read_bytes())
     source_overrides = {}
@@ -479,7 +482,9 @@ def main():
     entries, invalid_sidecars = [], []
     # All preferred representations are validated against the exact raw bytes.
     for index, (logical, source) in enumerate(sorted(files.items())):
-        representation = choose_representation(source, logical, output / 'representations',
+        media_type = content_type(logical, source)
+        reused = reuse.select(source, logical, prefix + logical, media_type)
+        representation = reused.representation if reused else choose_representation(source, logical, output / 'representations',
             mode=args.encoding, generate=not args.existing_encodings_only)
         selected, encoding, body = representation.source, representation.encoding, representation.body
         invalid_sidecars.extend(representation.invalid_sidecars)
@@ -490,6 +495,8 @@ def main():
         }
         if encoding != 'identity' or logical.startswith('asset-store/'):
             entry['cacheControl'] += ', no-transform'
+        if reused:
+            reused.apply(entry)
         address = STORE_OBJECT.fullmatch(logical)
         if address and entry['decodedSha256'] != address[1]:
             raise RuntimeError(f'Content-addressed object does not match its name: {logical}')
@@ -529,7 +536,7 @@ def main():
                         'Staging hardlinks must never be edited in place.'], 'files': entries}
     write_json(output / 'upload-manifest.json', result)
     write_json(report_path, {'regions': reports, 'totals': totals, 'invalidSidecarsSkipped': invalid_sidecars,
-                            'releaseIntegrityFilesChecked': integrity_count})
+                            'releaseIntegrityFilesChecked': integrity_count, 'verifiedRepresentations': reuse.audit()})
     print(json.dumps({'totals': totals, 'invalidSidecars': len(invalid_sidecars), 'output': str(output)}), flush=True)
 
 

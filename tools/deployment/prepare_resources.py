@@ -10,9 +10,10 @@ from pack.groups import runtime_paths
 from pack.http_delivery import choose_representation
 from prepare_deployment import browser_membership, content_type, delivery_profile, write_json
 from resource_publication import catalog_closure, digest, CACHE_CONTROL
+from verified_representations import VerifiedRepresentations
 
 
-def prepare(source, store, catalog_id, output, *, object_prefix='', url_prefix='/moly/', encoding='best', stage=False):
+def prepare(source, store, catalog_id, output, *, object_prefix='', url_prefix='/moly/', encoding='best', stage=False, verified_representations=None):
     source, store, output = Path(source).resolve(strict=True), Path(store).resolve(strict=True), Path(output).resolve()
     for left, right in [(source, store), (source, output), (store, output)]:
         if left.is_relative_to(right) or right.is_relative_to(left):
@@ -32,15 +33,20 @@ def prepare(source, store, catalog_id, output, *, object_prefix='', url_prefix='
         if len(data) != entries[name]['bytes'] or digest(data) != entries[name]['content_sha256']:
             raise ValueError('resource catalogue content differs from the supplied source: ' + name)
     profile = delivery_profile(encoding, True)
+    reuse = VerifiedRepresentations(verified_representations)
     rows, invalid_sidecars = [], []
     for name, item in sorted(objects.items()):
         logical = 'asset-store/' + name
-        representation = choose_representation(item['source'], logical, output / 'representations', mode=encoding)
+        media_type = content_type(logical, item['source'])
+        reused = reuse.select(item['source'], logical, object_prefix + logical, media_type)
+        representation = reused.representation if reused else choose_representation(item['source'], logical, output / 'representations', mode=encoding)
         if representation.decoded_sha256 != item['sha256'] or representation.decoded_bytes != item['bytes']:
             raise ValueError('store changed while preparing HTTP representations')
         row = {'path': logical, 'objectKey': object_prefix + logical, 'urlPath': url_prefix + logical,
                'contentType': content_type(logical, item['source']), 'cacheControl': CACHE_CONTROL,
                **representation.manifest_fields}
+        if reused:
+            reused.apply(row)
         invalid_sidecars.extend(representation.invalid_sidecars)
         if stage:
             target = output / 'staging' / representation.encoding / logical
@@ -62,7 +68,7 @@ def prepare(source, store, catalog_id, output, *, object_prefix='', url_prefix='
                 'totals': {'files': len(rows), 'bytes': sum(row['bytes'] for row in rows),
                            'decodedBytes': sum(row['decodedBytes'] for row in rows)}, 'deliveryProfile': profile}
     write_json(output / 'audit.json', {'resourceCatalog': identity, 'source': audit,
-                                     'verifiedStore': verified, 'invalidSidecars': invalid_sidecars})
+                                     'verifiedStore': verified, 'invalidSidecars': invalid_sidecars, 'verifiedRepresentations': reuse.audit()})
     write_json(output / 'upload-manifest.json', manifest)
     return manifest
 
@@ -76,10 +82,11 @@ def main():
     parser.add_argument('--object-prefix', default='')
     parser.add_argument('--url-prefix', default='/moly/')
     parser.add_argument('--encoding', choices=['identity', 'gzip', 'best'], default='best')
+    parser.add_argument('--verified-representations', type=Path, help='Explicit local index of verified immutable origin bodies and headers')
     parser.add_argument('--stage', action='store_true')
     args = parser.parse_args()
     result = prepare(args.source, args.store, args.catalog, args.output, object_prefix=args.object_prefix,
-                     url_prefix=args.url_prefix, encoding=args.encoding, stage=args.stage)
+                     url_prefix=args.url_prefix, encoding=args.encoding, stage=args.stage, verified_representations=args.verified_representations)
     import json
     print(json.dumps({'resourceCatalog': result['resourceCatalog'], 'totals': result['totals']}))
 

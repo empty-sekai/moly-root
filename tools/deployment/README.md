@@ -112,3 +112,25 @@ This reduces network bytes only. Browser HTTP decoding restores original hashes;
 the existing decoded CacheStorage and live CPU/GPU assets do not become smaller.
 The old `moly-deploy` viewer/R2 pipeline uses a different client-side `.glb.br`
 contract and is not used or modified by this direct-URL deployment path.
+
+
+### Reuse an existing immutable HTTP representation
+
+`prepare_resources.py` and `prepare_deployment.py` accept
+`--verified-representations INDEX.json`. The default still chooses fresh
+lossless representations. Use this explicit index when an immutable origin URL
+already holds an equivalent body with different compression or cache headers.
+The index has schema `moly-verified-http-representations/1` and a `files` array.
+Each row names `path`, `objectKey`, a relative local `body`, stored `sha256` and
+`bytes`, decoded `decodedSha256` and `decodedBytes`, and exact origin `headers`:
+`ContentLength`, `ContentType`, `ContentEncoding` (null means identity),
+`CacheControl`, and `Metadata` with `moly-sha256`, `moly-decoded-sha256`, and
+`moly-decoded-bytes`.
+
+Only content-addressed immutable resource URLs are eligible. Preparation checks
+the actual stored body, bounded lossless decoding, source identity, key, media
+type and headers. The audit lists reused and unused index entries. Resource
+upload validation repeats these checks against the index SHA-256 recorded in
+each reused row. Keep the index and bodies until upload finishes. This feature
+does not contact the origin or change its objects; upload conflict checks still
+require an exact match and reject a changed immutable representation.

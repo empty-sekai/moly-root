@@ -123,11 +123,16 @@ def validate_upload(doc):
     for name, expected in objects.items():
         logical = 'asset-store/' + name
         row = rows[logical]
+        media_type = content_type(logical, expected['source'])
+        reused = None
+        if 'representationReuse' in row:
+            from verified_representations import validate_reused_row
+            reused = validate_reused_row(row, expected['source'], media_type)
         if (Path(row['sourceRaw']).absolute() != expected['source']
                 or row['decodedSha256'] != expected['sha256'] or row['decodedBytes'] != expected['bytes']
-                or row['bytes'] > expected['bytes']
+                or (reused is None and row['bytes'] > expected['bytes'])
                 or row['contentType'] != content_type(logical, expected['source'])
-                or row['cacheControl'] != CACHE_CONTROL or row.get('urlPath') != url_prefix + logical):
+                or (reused is None and row['cacheControl'] != CACHE_CONTROL) or row.get('urlPath') != url_prefix + logical):
             raise ValueError('resource object metadata differs from its catalogue')
         for alias in [row.get('source'), *([row['staging']] if 'staging' in row else [])]:
             if not isinstance(alias, str) or not alias:
