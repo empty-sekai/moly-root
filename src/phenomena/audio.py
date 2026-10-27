@@ -33,6 +33,8 @@ names the cue sheet's format number (``acbVersion``), which decides a branch of
 the random-without-repeat type.
 """
 import re
+import hashlib
+import json
 import shutil
 import struct
 import subprocess
@@ -163,13 +165,60 @@ def attach_sequences(entry, data):
 class Library:
     """Audio of one run: archives always, waveforms when the decoder is present."""
 
-    def __init__(self, directory, prefix, decoder=None, transcoder=None):
+    def __init__(self, directory, prefix, decoder=None, transcoder=None, *, preserve_existing=False):
         self.root = Path(directory)
         self.prefix = prefix
         self.decoder = tool(DECODER, decoder)
         self.transcoder = tool(TRANSCODER, transcoder)
         self.packages = []
         self.unsupported = []
+        self.previous = None
+        if preserve_existing and (self.root / "loop.json").is_file():
+            self.previous = json.loads((self.root / "loop.json").read_bytes())
+            # Capture identity before add() can write an archive at its old path.
+            for entry in self.previous.get("packages", []):
+                if not entry.get("sourceSha256"):
+                    archive = self._existing_file(entry.get("archive"))
+                    if archive is not None:
+                        entry["sourceSha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+
+    def _existing_file(self, logical):
+        if not isinstance(logical, str) or not logical.startswith(self.prefix + "/"):
+            return None
+        target = self.root / logical[len(self.prefix) + 1:]
+        if not target.resolve().is_relative_to(self.root.resolve()):
+            raise ValueError("existing audio path escaped output root")
+        return target if target.is_file() else None
+
+    def _preserved_packages(self):
+        if self.previous is None:
+            return self.packages
+        current = {(row["package"], Path(row["archive"]).name): row for row in self.packages}
+        combined = []
+        for prior in self.previous.get("packages", []):
+            key = (prior["package"], Path(prior["archive"]).name)
+            fresh = current.pop(key, None)
+            if fresh is None:
+                combined.append(prior)
+                continue
+            if not prior.get("sourceSha256") or prior["sourceSha256"] != fresh["sourceSha256"]:
+                raise ValueError("audio archive identity changed; use a fresh output root")
+            # A weather subset cannot erase the whole bank the corpus decoded.
+            keys = {(row.get("cue"), row.get("subsong")) for row in fresh["streams"]}
+            retained = [row for row in prior.get("streams", [])
+                        if (row.get("cue"), row.get("subsong")) not in keys]
+            if any(not any(self._existing_file(row.get(kind)) is not None
+                           for kind in ("wav", "ogg")) for row in retained):
+                raise ValueError("existing audio stream is missing; repair the corpus before extraction")
+            merged = {**fresh, "streams": [*retained, *fresh["streams"]]}
+            for name in ("archiveSetRevision", "archiveSetCount", "archiveSetIndex"):
+                if name in prior:
+                    merged[name] = prior[name]
+            archive = self._existing_file(fresh["archive"])
+            attach_sequences(merged, archive.read_bytes())
+            combined.append(merged)
+        combined.extend(current.values())
+        return combined
 
     @property
     def status(self):
@@ -211,9 +260,15 @@ class Library:
         prefix = f"{self.prefix}/{relative.as_posix()}"
         directory.mkdir(parents=True, exist_ok=True)
         archive = directory / f"{name}.acb"
+        source_sha = hashlib.sha256(data).hexdigest()
+        for prior in (self.previous or {}).get("packages", []):
+            if prior["package"] == package and Path(prior["archive"]).name == archive.name:
+                if prior.get("sourceSha256") != source_sha:
+                    raise ValueError("audio archive identity changed; use a fresh output root")
         archive.write_bytes(data)
         entry = {"package": package, "archive": f"{prefix}/{archive.name}",
-                 "archiveBytes": len(data), "status": self.status, "streams": []}
+                 "archiveBytes": len(data), "sourceSha256": source_sha,
+                 "status": self.status, "streams": []}
         if not self.decoder:
             entry["error"] = NO_DECODER
             self.packages.append(entry)
@@ -256,13 +311,10 @@ class Library:
     def finish(self):
         """Write the loop sidecar and return the index-level audio document.
 
-        The write is a wholesale replacement, not a merge: the file on disk
-        becomes exactly this run's package list.  Merging with what a previous
-        run wrote lives on the corpus side (``audio_corpus._merge_loop``),
-        which is also what the corpus's resume reads as its skip roster — so
-        re-running the phenomena job in place over a directory the corpus
-        already wrote replaces that roster whole, and the next corpus run
-        re-decodes every package the phenomena run did not carry.
+        By default the index becomes exactly this run's package list. Weather
+        callers opt into preserve_existing so re-exporting its cue subset does
+        not erase the rest of the same-source sound corpus. Overlapping banks
+        must retain their exact archive hash; changing releases needs a new root.
         """
         # Only tool names, never the paths they were found at: this document ships
         # next to the audio and would otherwise carry one machine's directory layout.
@@ -270,7 +322,7 @@ class Library:
                     "decoderPresent": bool(self.decoder),
                     "transcoder": TRANSCODER,
                     "transcoderPresent": bool(self.transcoder),
-                    "packages": self.packages}
+                    "packages": self._preserved_packages()}
         if not self.decoder:
             document["error"] = NO_DECODER
         elif not self.transcoder:
