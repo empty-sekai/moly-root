@@ -116,10 +116,30 @@ def test_a_missing_source_row_is_reported_not_defaulted():
 def test_a_character_absent_from_every_table_still_appears():
     doc = build_registry(_master(), [12, 21])
     assert doc["characters"]["21"] == {"unitId": 21, "name": None,
+                                       "gameCharacter": None,
                                        "identity": None,
                                        "locomotion": None, "soloAction": None}
     assert doc["summary"]["missing"]["21"] == ["identity", "locomotion", "soloAction"]
     assert doc["summary"]["requested"] == 2
+
+
+def test_gender_joins_character_identity_and_preserves_the_source_value():
+    master = _master(identity={12: {"gameCharacterId": 7}, 13: {"gameCharacterId": 7}},
+                     characters={7: {"id": 7, "gender": "MaLe"},
+                                 12: {"id": 12, "gender": "female"}})
+    doc = build_registry(master, [12, 13])
+    for unit in ("12", "13"):
+        assert doc["characters"][unit]["gameCharacter"] == {"id": 7, "gender": "MaLe"}
+        assert doc["characters"][unit]["identity"]["gameCharacterId"] == 7
+    assert doc["summary"]["withGameCharacter"] == 2
+
+
+def test_missing_character_or_gender_is_not_inferred_from_motion_names():
+    absent = build_registry(_master(), [12])["characters"]["12"]
+    assert absent["identity"]["gameCharacterId"] == 12
+    assert absent["gameCharacter"] is None
+    no_gender = build_registry(_master(characters={12: {"id": 12}}), [12])
+    assert no_gender["characters"]["12"]["gameCharacter"] == {"id": 12, "gender": None}
 
 
 def test_motion_names_are_checked_against_the_library_when_given():

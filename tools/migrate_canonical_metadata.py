@@ -25,13 +25,19 @@ from core.coordinate_contract import CONTRACT, UNITS, validate_glb
 # They keep the guard usable in source archives and installed source copies.
 # Update them only after reviewing the coordinate-writing code.
 REVIEWED_PRODUCERS = {
-    'src/chara/characters.py': 'e18e112c332b31c26110e73aaacfc90911c5124f28782fff8e2da0bcd006a25f',
+    # Adds source controller/clip identities to the rig only. Removing that
+    # read-only helper, its call and the one sidecar field reproduces the prior
+    # reviewed AST; mesh, animation, skinning and GLB writes are unchanged.
+    'src/chara/characters.py': '435068f0dd34ff6cb3c329196e0a4165ff78fa409ee93469dec881aff0d7ad70',
     'src/chara/motion_library.py': '3ca5702e6ff3d02ee065c32dc5a2e1fe24716999976c135ffa77e52a3b26465c',
     'src/chara/player_avatar.py': 'f10f702f6fc3b58f23c1f1a5a388bbe94789e27fec7d93d2b8316abf13a012e1',
     'src/chara/avatar_parts.py': '74a42b5519bae8b645850e0281420c707ebac33fa08df3f5bd6326a4dcf89fc3',
     'src/chara/avatar_compose.py': '366c5f5e1253728dbbcbb6f476f26dfddaa2062cbe7a6e0ccab5bffd85ec4ca7',
     'src/chara/sd_switch.py': '3943cde0837981f94dc9721271313a96dae6a6df6bc928802e2bd82a1f0d473c',
-    'src/perf/animations.py': '00f0f58f26895fb5b2163a788ba95a424fd8e0b36052ab2928b77fb1948afe47',
+    # Only the CLI's default output location changed (MOLY_EXTRACT_OUT);
+    # reverting that return expression reproduces the previous reviewed hash.
+    # The coordinate-writing implementation is byte-identical.
+    'src/perf/animations.py': '16e31e5b719d47bc04077db95236f3e1efa4295d96fe57433a03f94154e9e851',
     'src/core/mesh.py': 'e310116a5d0a905f9cb4f89e2e6c8a5057fd1feb86ded789f00abc4d076fa882',
     'src/phenomena/meshes.py': 'd4a20e8f9b0b1d0b9ce7a00ea52ebd63745851c5b9d4b28a6b2d39a46f481a8f',
     'src/core/gltf.py': '11129743aab66fa0ed7c6997c7f779f1a06d4cc88a021bfb17a1a42d506451fd',

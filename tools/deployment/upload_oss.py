@@ -24,7 +24,14 @@ BUCKET = 'pjsk-stems'
 REGION = 'cn-shanghai'
 ENDPOINT = 'https://oss-cn-shanghai.aliyuncs.com'
 PREFIX = 'moly/alpha/'
-MUTABLE = {'manifest.json', 'cache-worker.mjs', 'game/manifest.json'}
+MUTABLE = {'manifest.json', 'cache-worker.mjs', 'game/manifest.json', 'fonts/latest.json'}
+TRANSLATION_ROOT = re.compile(r'translations/(jp|cn|tw|en|kr)/(zh-CN|zh-TW|en-US|ja-JP|ko-KR)/latest\.json')
+
+
+def mutable_path(value):
+    if value not in MUTABLE and not TRANSLATION_ROOT.fullmatch(value):
+        raise argparse.ArgumentTypeError('expected a known publication pointer')
+    return value
 IDENTIFIER = re.compile(r'^[a-z0-9][a-z0-9._-]{0,95}$')
 SHA256 = re.compile(r'^[a-f0-9]{64}$')
 
@@ -144,7 +151,7 @@ def parse_args():
     p.add_argument('--manifest', type=Path, required=True)
     p.add_argument('--scope', choices=['stable', 'release', 'descriptors', 'mutable'], default='stable')
     p.add_argument('--release-id', help='Required explicit release ID for --scope release')
-    p.add_argument('--mutable-path', choices=sorted(MUTABLE), action='append', default=[])
+    p.add_argument('--mutable-path', type=mutable_path, action='append', default=[])
     p.add_argument('--allow-mutable-update', action='store_true')
     p.add_argument('--expect-previous-sha256', help='Required to replace an existing mutable object; one mutable path per run')
     p.add_argument('--threads', type=int, default=16, choices=range(1, 17), metavar='1..16')
@@ -159,6 +166,75 @@ def parse_args():
     return p.parse_args()
 
 
+def validate_font_publication(doc):
+    # Preparation is not a trust boundary: manifests and staging paths can
+    # change before execution. Reuse its catalogue contract, then bind every
+    # declared input and the actual upload stream to the full root closure.
+    from prepare_fonts import parse_catalog, content_type, cache_control
+
+    catalog = doc['fontCatalog']
+    rows = {row['path']: row for row in doc['files']}
+    root_row = rows.get(catalog['path'])
+    if root_row is None:
+        raise SafeFailure('font_pointer_identity_mismatch')
+    try:
+        with Path(root_row['sourceRaw']).open('rb') as stream:
+            raw = stream.read(2 * 1024 * 1024 + 1)
+        root, references = parse_catalog(raw)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise SafeFailure('invalid_local_font_catalogue', errorType=type(error).__name__) from None
+    if (root['revision'] != catalog['revision']
+            or references['latest.json']['sha256'] != catalog['sha256']):
+        raise SafeFailure('font_pointer_identity_mismatch')
+    expected_paths = {'fonts/' + name for name in references}
+    if rows.keys() != expected_paths:
+        raise SafeFailure('font_publication_closure_mismatch',
+                          missing=sorted(expected_paths - rows.keys()),
+                          extra=sorted(rows.keys() - expected_paths))
+    url_prefix = doc.get('urlPrefix')
+    if (not isinstance(url_prefix, str) or not url_prefix.startswith('/') or not url_prefix.endswith('/')
+            or any(part in {'.', '..'} for part in url_prefix.split('/'))
+            or any(char in url_prefix for char in '\\%?#:')
+            or any(ord(char) < 32 or ord(char) == 127 for char in url_prefix)):
+        raise SafeFailure('invalid_font_url_prefix')
+    verified = set()
+    for name, expected in references.items():
+        logical = 'fonts/' + name
+        row = rows[logical]
+        if (row['sha256'] != expected['sha256'] or row['decodedSha256'] != expected['sha256']
+                or row['bytes'] != expected['bytes'] or row['decodedBytes'] != expected['bytes']
+                or row['contentEncoding'] != 'identity' or row['contentType'] != content_type(name)
+                or row['cacheControl'] != cache_control(name)
+                or row.get('urlPath') != url_prefix + logical):
+            raise SafeFailure('font_object_metadata_mismatch', path=logical)
+        # All aliases are checked; sourceRaw must not validate one document
+        # while staging/source supplies a different body to put_one().
+        aliases = [row.get('sourceRaw'), row.get('source')]
+        if 'staging' in row:
+            aliases.append(row['staging'])
+        for alias in aliases:
+            if not isinstance(alias, str) or not alias:
+                raise SafeFailure('invalid_font_object_source', path=logical)
+            try:
+                path = Path(alias).resolve(strict=True)
+                identity = (path, expected['sha256'], expected['bytes'])
+                if identity in verified:
+                    continue
+                digest, size = hashlib.sha256(), 0
+                with path.open('rb') as stream:
+                    while block := stream.read(1024 * 1024):
+                        size += len(block)
+                        if size > expected['bytes']:
+                            raise SafeFailure('local_font_object_changed', path=logical)
+                        digest.update(block)
+                if size != expected['bytes'] or digest.hexdigest() != expected['sha256']:
+                    raise SafeFailure('local_font_object_changed', path=logical)
+                verified.add(identity)
+            except OSError as error:
+                raise SafeFailure('cannot_read_font_object', path=logical,
+                                  errorType=type(error).__name__) from None
+
+
 def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)):
     try:
         doc = json.loads(args.manifest.read_bytes())
@@ -169,9 +245,66 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
     if doc.get('deliveryMode', 'fixed') != 'fixed':
         raise SafeFailure('unsupported_delivery_mode')
     snapshots = set(doc.get('snapshots', []))
-    if not snapshots or any(not IDENTIFIER.fullmatch(s) for s in snapshots):
+    translation = doc.get('translation')
+    font_catalog = doc.get('fontCatalog')
+    resource_catalog = doc.get('resourceCatalog')
+    if resource_catalog is not None:
+        if (not isinstance(resource_catalog, dict) or snapshots or translation is not None
+                or font_catalog is not None or doc.get('release') is not None
+                or not SHA256.fullmatch(resource_catalog.get('sha256', ''))
+                or resource_catalog.get('path') != f"asset-store/catalogs/{resource_catalog['sha256']}.json"):
+            raise SafeFailure('invalid_resource_catalogue_publication')
+        if args.scope != 'stable' or args.limit is not None:
+            raise SafeFailure('resource_catalogue_requires_complete_stable_scope')
+    if font_catalog is not None:
+        if (not isinstance(font_catalog, dict) or snapshots or translation is not None
+                or font_catalog.get('path') != 'fonts/latest.json'
+                or not SHA256.fullmatch(font_catalog.get('revision', ''))
+                or not SHA256.fullmatch(font_catalog.get('sha256', ''))):
+            raise SafeFailure('invalid_font_publication')
+    if translation is not None:
+        if (not isinstance(translation, dict) or snapshots
+                or not TRANSLATION_ROOT.fullmatch(translation.get('path', ''))
+                or not SHA256.fullmatch(translation.get('revision', ''))
+                or not SHA256.fullmatch(translation.get('sha256', ''))):
+            raise SafeFailure('invalid_translation_publication')
+        translation_base = translation['path'].removesuffix('latest.json')
+    else:
+        translation_base = None
+    if (not snapshots and translation is None and font_catalog is None and resource_catalog is None) or any(not IDENTIFIER.fullmatch(s) for s in snapshots):
         raise SafeFailure('invalid_snapshot_identities')
-    if args.scope == 'release' and (args.release_id != doc.get('release') or not IDENTIFIER.fullmatch(args.release_id or '')):
+    releases = doc.get('releases', [doc['release']] if doc.get('release') else [])
+    if (not isinstance(releases, list) or len(releases) > 2
+            or any(not isinstance(value, str) or not IDENTIFIER.fullmatch(value) for value in releases)
+            or len(set(releases)) != len(releases)
+            or (releases and doc.get('release') is None)
+            or (doc.get('release') is not None and doc['release'] not in releases)
+            or (releases and (resource_catalog is not None or font_catalog is not None or translation is not None))):
+        raise SafeFailure('invalid_release_identities')
+    if len(releases) > 1:
+        # A second release must be the actual game pointer target, not an
+        # arbitrary directory added to the upload inventory by an operator.
+        pointers = {}
+        for logical in ('manifest.json', 'game/manifest.json'):
+            rows = [row for row in doc.get('files', []) if row.get('path') == logical]
+            if len(rows) != 1:
+                raise SafeFailure('missing_release_pointer', path=logical)
+            try:
+                raw = Path(rows[0]['sourceRaw']).read_bytes()
+                if hashlib.sha256(raw).hexdigest() != rows[0]['decodedSha256']:
+                    raise SafeFailure('local_descriptor_hash_mismatch', path=logical)
+                pointers[logical] = json.loads(raw)
+            except (OSError, KeyError, TypeError, ValueError) as error:
+                raise SafeFailure('cannot_read_release_pointer', path=logical) from None
+        primary = pointers['manifest.json'].get('release', {}).get('id')
+        game = pointers['game/manifest.json']
+        game_id = game.get('release', {}).get('id')
+        if (primary != doc.get('release') or releases != list(dict.fromkeys([primary, game_id]))
+                or game.get('publisher') != 'moly-release-artifact-v1' or game.get('schemaVersion') != 1
+                or game.get('prefix') != doc.get('urlPrefix')
+                or game.get('release', {}).get('module') != f"{doc.get('urlPrefix')}releases/{game_id}/game-boot.mjs"):
+            raise SafeFailure('release_pointers_do_not_match_manifest')
+    if args.scope == 'release' and args.release_id not in releases:
         raise SafeFailure('explicit_release_id_must_match_manifest')
     if args.scope == 'mutable':
         if not args.allow_mutable_update or len(args.mutable_path) != 1:
@@ -187,6 +320,13 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
     selected, seen = [], set()
     for row in doc.get('files', []):
         logical = row.get('path', '')
+        if resource_catalog is not None and not re.fullmatch(r'asset-store/(?:(?:catalogs|packages)/[a-f0-9]{64}\.json|blobs/[a-f0-9]{2}/[a-f0-9]{64}\.(?:bin|gzz|brz|br))', logical):
+            raise SafeFailure('resource_catalogue_contains_unrelated_object')
+        if font_catalog is not None and not re.fullmatch(r'fonts/(?:latest\.json|revisions/[a-f0-9]{64}\.json|objects/[a-f0-9]{64}\.(?:ttf|txt))', logical):
+            raise SafeFailure('font_manifest_contains_unrelated_object')
+        if translation_base and (not logical.startswith(translation_base) or not re.fullmatch(
+                r'(?:latest\.json|(?:objects|revisions)/[a-f0-9]{64}\.json)', logical[len(translation_base):])):
+            raise SafeFailure('translation_manifest_contains_unrelated_object')
         parts = PurePosixPath(logical).parts
         # This is an object key, not a URL. S3 permits a literal '#'; URL
         # consumers must percent-encode that segment when constructing a
@@ -220,8 +360,10 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
         is_snapshot = len(parts) >= 3 and parts[0] == 'snapshots' and parts[1] in snapshots
         # The shared content-addressed stores are immutable like snapshot payloads.
         shared_store = len(parts) >= 2 and parts[0] in {'asset-store', 'catalog-store'}
-        choose = ((args.scope == 'stable' and ((is_snapshot and parts[2] in {'assets', 'catalog'} and len(parts) >= 4)
-                                               or shared_store))
+        translation_object = translation_base and logical.startswith(translation_base) and logical != translation['path']
+        font_object = font_catalog is not None and logical != font_catalog['path']
+        choose = ((args.scope == 'stable' and ((is_snapshot and parts[2] in {'assets', 'catalog', 'text'} and len(parts) >= 4)
+                                               or shared_store or translation_object or font_object))
                   or (args.scope == 'descriptors' and is_snapshot and len(parts) == 3 and parts[2] in {'snapshot.json', 'provenance.json'})
                   or (args.scope == 'release' and len(parts) >= 3 and parts[:2] == ('releases', args.release_id))
                   or (args.scope == 'mutable' and logical in args.mutable_path))
@@ -232,6 +374,25 @@ def load_selection(args, *, object_prefix=PREFIX, schemas=('moly-oss-upload/1',)
         selected = selected[:args.limit]
     if not selected:
         raise SafeFailure('no_objects_selected')
+    if font_catalog is not None:
+        validate_font_publication(doc)
+    if resource_catalog is not None:
+        try:
+            from resource_publication import validate_upload
+            validate_upload(doc)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise SafeFailure('invalid_resource_catalogue_closure', errorType=type(error).__name__) from None
+    if translation is not None:
+        roots = [row for row in doc['files'] if row['path'] == translation['path']]
+        if len(roots) != 1 or roots[0]['decodedSha256'] != translation['sha256']:
+            raise SafeFailure('translation_pointer_identity_mismatch')
+        raw = Path(roots[0]['sourceRaw']).read_bytes()
+        root = json.loads(raw)
+        parts = translation['path'].split('/')
+        if (hashlib.sha256(raw).hexdigest() != translation['sha256']
+                or root.get('schema') != 'moly-text-publication/1' or root.get('region') != parts[1]
+                or root.get('locale') != parts[2] or root.get('revision') != translation['revision']):
+            raise SafeFailure('local_translation_pointer_changed')
     # Publishing descriptions requires the actual production descriptor bytes.
     for row in selected:
         if row['path'] in {'manifest.json', 'game/manifest.json'} or row['path'].endswith('/snapshot.json'):
@@ -291,7 +452,7 @@ def put_one(pool, row, args, stop):
         # Legacy mutable pointers predate uploader metadata. Verify their
         # actual stored bytes, bounded to this tiny control-plane surface,
         # instead of treating absent metadata as proof of their identity.
-        if previous is None and args.expect_previous_sha256 and key in {PREFIX + name for name in MUTABLE}:
+        if previous is None and args.expect_previous_sha256 and is_mutable:
             response = pool.get().get_object(key)
             try:
                 body = response.read(1048577)

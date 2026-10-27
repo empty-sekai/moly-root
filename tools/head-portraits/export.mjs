@@ -120,7 +120,7 @@ export async function exportHeads(options) {
   let page;
   const errors = [];
   try {
-    browser = await chromium.launch({ headless: true, ...(options.channel ? { channel: options.channel } : {}) });
+    browser = await chromium.launch({ headless: !options.headed, ...(options.channel ? { channel: options.channel } : {}) });
     const browserVersion = browser.version();
     page = await browser.newPage({ viewport: { width: 1024, height: 900 }, deviceScaleFactor: 1 });
     page.setDefaultTimeout(40000);
@@ -191,10 +191,10 @@ export async function exportHeads(options) {
 async function main() {
   const { values } = parseArgs({ options: {
     source: { type: 'string' }, out: { type: 'string' }, region: { type: 'string' }, version: { type: 'string' },
-    units: { type: 'string' }, channel: { type: 'string' }, python: { type: 'string' }, help: { type: 'boolean' },
+    units: { type: 'string' }, headed: { type: 'boolean' }, channel: { type: 'string' }, python: { type: 'string' }, help: { type: 'boolean' },
   } });
   if (values.help) {
-    console.log('node tools/head-portraits/export.mjs --source <runtime-dir> --out <empty-dir> --region <cn|jp> [--version <expected-version>] [--units 1,17] [--channel chrome] [--python python]');
+    console.log('node tools/head-portraits/export.mjs --source <runtime-dir> --out <empty-dir> --region <cn|jp> [--version <expected-version>] [--units 1,17] [--channel chrome] [--headed] [--python python]');
     return;
   }
   for (const key of ['source', 'out', 'region']) if (!values[key]) throw new Error(`Missing --${key}`);

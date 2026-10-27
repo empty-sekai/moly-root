@@ -141,6 +141,7 @@ from ui import craft_layout
 from ui import bgm_select_layout
 from ui import mission_layout
 from ui import convert_layout
+from ui import photo_layout
 
 
 REGION = "jp"
@@ -533,7 +534,83 @@ ONLY_681 = {
 DECODERS_681 = {**SHARED, **ONLY_681}
 # The 7.0.0 layout: the four dialogs end at their click event, and the five
 # classes the 7.0.0 declaration changed read their added fields.
+
+
+def decode_bulk_checkbox_control(r):
+    return {"checkObj": r.pptr(), "check": r.bool4(), "toggle": r.pptr()}
+
+
+def decode_harvest_player_hud_700(r):
+    return editor_layout.refs(r, ("_staminaView", "_bulkHarvestChargeGaugeView", "_canvasGroup"))
+
+
+def decode_stock_scroll_rect(r):
+    fields = {"m_Content": r.pptr(), "m_Horizontal": r.bool4(), "m_Vertical": r.bool4(),
+        "m_MovementType": r.i32(), "m_Elasticity": r.f32(), "m_Inertia": r.bool4(),
+        "m_DecelerationRate": r.f32(), "m_ScrollSensitivity": r.f32()}
+    fields.update(editor_layout.refs(r, ("m_Viewport", "m_HorizontalScrollbar", "m_VerticalScrollbar")))
+    fields.update(m_HorizontalScrollbarVisibility=r.i32(), m_VerticalScrollbarVisibility=r.i32(),
+        m_HorizontalScrollbarSpacing=r.f32(), m_VerticalScrollbarSpacing=r.f32(),
+        m_OnValueChanged=talk.decode_unity_event(r))
+    return fields
+
+def decode_bulk_harvest_button(r):
+    fields = decode_custom_button(r)
+    fields.update(editor_layout.refs(r, ("_cannotButton", "_cannotBalloon", "_iconLoader")))
+    return fields
+
+
+def decode_bulk_harvest_gauge(r):
+    return editor_layout.refs(r, ("_gaugeImage", "_canvasGroup", "_maxEffectRoot"))
+
+
+def decode_bulk_harvest_settings(r):
+    from ui.window_animation import decode_common2_button_dialog
+    fields = decode_common2_button_dialog(r)
+    fields.update(editor_layout.refs(r, ("_siteTabGroup", "_checkBoxListViewPrefab", "_checkBoxListViewParent")))
+    return fields
+
+
+def decode_bulk_harvest_list(r):
+    return editor_layout.refs(r, ("_allCheckBox", "_groupViewRoot", "_groupViewBase"))
+
+
+def decode_bulk_harvest_group(r):
+    return editor_layout.refs(r, ("_groupNameText", "_allCheckBox", "_checkBoxRoot", "_checkBoxBase"))
+
+
+def decode_bulk_harvest_checkbox(r):
+    return editor_layout.refs(r, ("_checkBox", "_text"))
+
+
+def decode_bulk_harvest_reward(r):
+    from ui.window_animation import decode_common1_button_dialog
+    fields = decode_common1_button_dialog(r)
+    fields.update(editor_layout.refs(r, ("_listView", "_shortageTextRoot", "_staminaShortageText", "_toolShortageText")))
+    return fields
+
+
+def decode_harvest_layer_700(r):
+    fields = {"layerCamera": r.pptr()}
+    fields.update(editor_layout.refs(r, ("_menuUIContent", "_selectedToolView", "_toolSelectorViewController",
+        "_harvestActionButton", "_toolNotHaveBalloon", "_harvestActionCannotButton", "_dashButton", "_bulkHarvestActionButton")))
+    return fields
+
 ONLY_700 = {
+    "Sekai.UIPartsThumbnailRewardListCell": lambda r: {"sizeX": r.f32(), "sizeY": r.f32(), "thumbnailRoots": talk.decode_pptr_list(r), "nameText": r.pptr()},
+    "Sekai.UIPartsCheckBox": decode_bulk_checkbox_control,
+    "Sekai.Mysekai.HarvestPlayerHeadUpDisplay": decode_harvest_player_hud_700,
+    "UnityEngine.UI.ScrollRect": decode_stock_scroll_rect,
+    "Sekai.Mysekai.BulkHarvestActionButton": decode_bulk_harvest_button,
+    "Sekai.Mysekai.BulkHarvestChargeGaugeView": decode_bulk_harvest_gauge,
+    "Sekai.Mysekai.BulkHarvestCheckBoxListView": decode_bulk_harvest_list,
+    "Sekai.Mysekai.BulkHarvestGroupCheckBoxView": decode_bulk_harvest_group,
+    "Sekai.Mysekai.BulkHarvestTargetSettingCheckBox": decode_bulk_harvest_checkbox,
+    "Sekai.Mysekai.BulkHarvestTargetSettingDialog": decode_bulk_harvest_settings,
+    "Sekai.Mysekai.MysekaiBulkHarvestRewardDialog": decode_bulk_harvest_reward,
+    "Sekai.Mysekai.ScreenLayerMysekaiHarvest": decode_harvest_layer_700,
+
+    **photo_layout.DECODERS,
     "Sekai.UI.CustomScrollRect": decode_custom_scroll_rect_700,
     "Sekai.Mysekai.MysekaiMissionStartDialog": mission_layout.decode_mission_start_dialog,
     "Sekai.Mysekai.MysekaiMissionCompleteDialog": mission_layout.decode_mission_complete_dialog,
@@ -560,6 +637,28 @@ VERSIONS = tuple(LAYOUT_CHAINS)
 
 # (class name, serialized type hash hex) -> the layout the bytes carry.
 TYPE_LAYOUTS = {
+    ("Sekai.UIPartsThumbnailRewardListCell", "d2817fbfe87a2ef02b700815f2918477"): "7.0.0",
+    ("Sekai.Mysekai.HarvestPlayerHeadUpDisplay", "b0aefa4373b8001001f4e51227165a4e"): "7.0.0",
+    ("Sekai.UIPartsCheckBox", "beb6fd08a47ed26ebf63cc74f518fb08"): "7.0.0",
+    ("UnityEngine.UI.ScrollRect", "d5cd7f207e91ca8336c65a577a6fb2a0"): "7.0.0",
+
+    ("Sekai.Mysekai.BulkHarvestActionButton", "0502d10b158ddd2b9dd787bb9dd58fb4"): "7.0.0",
+    ("Sekai.Mysekai.BulkHarvestChargeGaugeView", "2167f64c1ddff3c0aece99da045ee93c"): "7.0.0",
+    ("Sekai.Mysekai.BulkHarvestCheckBoxListView", "d2835e1e2684fe21d4e3bddcd2841cf3"): "7.0.0",
+    ("Sekai.Mysekai.BulkHarvestGroupCheckBoxView", "b3511010ceb423f8f82c90a70d17ce65"): "7.0.0",
+    ("Sekai.Mysekai.BulkHarvestTargetSettingCheckBox", "5ad4d5bf1f146309431caa4cfd96f525"): "7.0.0",
+    ("Sekai.Mysekai.BulkHarvestTargetSettingDialog", "1faddd3b4959d3e99ca1afa0d2c7ac43"): "7.0.0",
+    ("Sekai.Mysekai.MysekaiBulkHarvestRewardDialog", "7231bc0e697f6ce50d2b7ce254736217"): "7.0.0",
+    ("Sekai.Mysekai.ScreenLayerMysekaiHarvest", "4dda12598a43e512cb119ab96403b0a9"): "7.0.0",
+
+    ("Sekai.UIPartsPhotoFrameThumbnail", "701a1b9241173c653af93358697fbf4a"): "7.0.0",
+    ("Sekai.Mysekai.MysekaiSelectFrameView", "56a5828cb66f421adde139868f381dc6"): "7.0.0",
+    ("Sekai.UIPartsPhotoFramePreview", "8d1a4f81285d407da7fc2608b914a06e"): "7.0.0",
+    ("Sekai.Mysekai.MysekaiPhotoSaveAnimation", "a7952c6374ff1805f356704076fb3a8a"): "7.0.0",
+    ("Sekai.AnimationClipEvent", "431f36454113f7d83bc74347ac5d008f"): "7.0.0",
+    ("Sekai.Mysekai.MysekaiPhotoShotView", "9c249c4e2d9276be8c161151ab811ebf"): "7.0.0",
+    ("Sekai.Mysekai.MysekaiPhotoShotAnimation", "f1b1ff8667c818bf70d56dd9b284b432"): "7.0.0",
+    ("Sekai.Mysekai.ScreenLayerMysekaiPhotoShotPresenter", "a4805d90303631a00c5a8e37e1ff5a00"): "7.0.0",
     ("Sekai.ColorFader", "2a6b976ee5ac7d8120ec45875b46424f"): "6.8.1",
     ("Sekai.CrystalShop.ShopConfirmDialogPriceParts", "2a424898f46b3aeb4201e3430b854139"): "6.8.1",
     ("Sekai.EventBreakTimeController", "273defc7d306842f06a7362af5082289"): "6.8.1",

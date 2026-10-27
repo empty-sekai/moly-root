@@ -56,7 +56,7 @@ def check(source, work):
     moly = scripts / ("moly.exe" if os.name == "nt" else "moly")
     run("install", [str(python), "-m", "pip", "install", str(wheel)])
     run("dependencies", [str(python), "-m", "pip", "check"])
-    for command in ([], ["pull"], ["extract"], ["fetch-apk"]):
+    for command in ([], ["pull"], ["extract"], ["fetch-apk"], ["source"], ["depot"], ["export", "text-runtime"]):
         run("help-" + (command[0] if command else "moly"), [str(moly), *command, "--help"])
 
     runtime = r'''

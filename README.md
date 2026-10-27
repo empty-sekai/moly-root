@@ -1,5 +1,12 @@
 # moly-root
 
+## 可复用的提取任务与文本产品
+
+`moly source` 记录输入快照；`moly export talks|text-catalog|official-text|text-runtime`
+通过有版本的任务提取对话、维护文本身份、匹配其他区服官方文本并输出按脚本加载的显示分片。
+`moly depot plan|run|verify|layout|gc` 管理任务复用与校验，复用现有 pack 存储。
+旧的平面命令继续可用。使用方式、缓存边界与源目录保留要求见 [提取管线](docs/pipeline.md)。
+
 ## 玩家布局导入资源
 
 从对应区服的主表和已解密家具包生成导入目录及配色贴图：

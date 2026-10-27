@@ -166,7 +166,7 @@ def classify_ops(text, script_name=None):
 def _text_assets(bundle):
     """``{TextAsset name: script text}``."""
     out = {}
-    for obj in UnityPy.load(bundle).objects:
+    for obj in UnityPy.load(Path(bundle).read_bytes()).objects:
         if obj.type.name != "TextAsset":
             continue
         tree = obj.read_typetree()

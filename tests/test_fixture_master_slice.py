@@ -59,6 +59,23 @@ def test_absent_sub_genre_is_exported_as_null(tmp_path):
     assert document["fixtures"][0]["subGenreId"] is None
 
 
+@pytest.mark.parametrize("costs", [{}, {"firstPutCost": 17, "secondPutCost": 2},
+                                   {"firstPutCost": 0, "secondPutCost": 0}])
+def test_placement_costs_preserve_source_values_and_missing_columns(tmp_path, costs):
+    document, _ = export(tmp_path, [fixture_row(**costs)])
+    row = document["fixtures"][0]
+    assert row["firstPutCost"] == costs.get("firstPutCost")
+    assert row["secondPutCost"] == costs.get("secondPutCost")
+
+
+@pytest.mark.parametrize("field", ["firstPutCost", "secondPutCost"])
+@pytest.mark.parametrize("value", [-1, True, "3", 1.5])
+def test_invalid_placement_cost_never_produces_runtime_data(tmp_path, field, value):
+    with pytest.raises(ValueError, match=field):
+        export(tmp_path, [fixture_row(**{field: value})])
+    assert not (tmp_path / "mysekai-fixtures.json").exists()
+
+
 @pytest.mark.parametrize("optional", [{}, {"name": None, "flavorText": None}])
 def test_missing_presentation_metadata_is_not_invented(tmp_path, optional):
     document, _ = export(tmp_path, [fixture_row(**optional)])

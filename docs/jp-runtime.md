@@ -1,5 +1,22 @@
 # Japanese runtime resources
 
+NPC tutorial poses are exported from the client Resources index with the same
+canonical position/quaternion basis as characters and sites:
+
+```sh
+moly export tutorial-placements --apk base.apk --apk asset-pack.apk \
+  --client-version 7.0.0 --out-dir runtime/tutorial \
+  --processor-input source/tutorial-processor.json
+```
+
+The optional processor input contains source-qualified introductory poses that
+are defined by client code rather than serialized placements. Its identity and
+canonical coordinates are checked before writing. Section progress and other
+server state remain inputs to the runtime; they are not invented by extraction.
+The photo-shot UI export also includes its two dynamically loaded call effects,
+each restricted to its own referenced objects so identical internal node names
+from neighboring prefabs cannot collide.
+
 The built-in JP commands follow the public asset-discovery protocol documented
 by `sssekai`. Install the optional protocol dependencies with
 `pip install -e '.[jp]'`. Discovery and downloads happen only when requested.

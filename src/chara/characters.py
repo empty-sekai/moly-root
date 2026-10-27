@@ -88,6 +88,69 @@ class CharacterAssets:
         return objs[0]
 
 
+def read_animation_controller(assets):
+    """Exact clip membership of the character's controller-bearing Animator.
+
+    Auxiliary Animators without controllers are present in character packages.
+    A missing controller stays null; multiple concrete owners are ambiguous.
+    Clip references retain their serialized order and source identities, so a
+    consumer can join names and authored timing from the shared motion index
+    without treating its union of clips as this particular actor's repertoire.
+    """
+    def pointer(owner, value, *, allow_null=False):
+        if not isinstance(value, dict):
+            raise ValueError('character animation reference is not a PPtr')
+        file_id, path_id = value.get('m_FileID'), value.get('m_PathID')
+        if (type(file_id) is not int or file_id < 0 or type(path_id) is not int
+                or not -(1 << 63) <= path_id < (1 << 63)):
+            raise ValueError('character animation reference has invalid identifiers')
+        if path_id == 0:
+            if allow_null:
+                return None
+            raise ValueError('character controller has a null animation clip')
+        if file_id == 0:
+            file = owner.assets_file.name
+        elif file_id <= len(owner.assets_file.externals):
+            file = owner.assets_file.externals[file_id - 1].path.replace('\\', '/').rsplit('/', 1)[-1]
+        else:
+            raise ValueError('character animation reference has no external file')
+        if not isinstance(file, str) or not file:
+            raise ValueError('character animation reference has no source file')
+        return {'file': file, 'pathId': str(path_id)}
+
+    candidates = []
+    for obj in assets.objects:
+        if obj.type.name != 'Animator':
+            continue
+        ref = obj.read_typetree().get('m_Controller')
+        identity = pointer(obj, ref, allow_null=True)
+        if identity is not None:
+            candidates.append((obj, ref, identity))
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise ValueError('character needs one controller-bearing Animator')
+    animator, ref, identity = candidates[0]
+    controller = assets.deref(animator, ref)
+    if controller is None or controller.type.name != 'AnimatorController':
+        raise ValueError('character Animator requires its actual AnimatorController')
+    source = {'file': controller.assets_file.name, 'pathId': str(controller.path_id)}
+    if source != identity:
+        raise ValueError('character Animator controller identity mismatch')
+    references = controller.read_typetree().get('m_AnimationClips')
+    if not isinstance(references, list):
+        raise ValueError('character controller has no animation clip table')
+    clips = [pointer(controller, value) for value in references]
+    if len({(value['file'], value['pathId']) for value in clips}) != len(clips):
+        raise ValueError('character controller duplicates an animation clip')
+    return {
+        'schema': 'moly-character-animation-map/1',
+        'animator': {'file': animator.assets_file.name, 'pathId': str(animator.path_id)},
+        'controller': source,
+        'clips': clips,
+    }
+
+
 def read_scene(assets):
     """The instantiable prefab transform tree.
 
@@ -319,8 +382,16 @@ def read_renderers(assets, tr_index):
                 raise KeyError("renderer bone outside the prefab tree")
             bones.append(bi)
         go = gos.get(go_pid)
+        bounds = tt.get('m_AABB')
+        if bounds is None:
+            raise ValueError('skinned renderer has no authored bounds')
+        root_bone = tr_index.get(tt.get('m_RootBone', {}).get('m_PathID', 0))
         out.append({"mesh": mesh_obj, "materialNames": mats, "materialObjs": mat_objs,
                     "bones": bones, "node": node,
+                    "bounds": {"node": node, "rootBone": root_bone,
+                               "center": list(unity_to_gltf_pos([bounds['m_Center'][k] for k in ('x', 'y', 'z')])),
+                               "extents": [bounds['m_Extent'][k] for k in ('x', 'y', 'z')],
+                               "updateWhenOffscreen": bool(tt.get('m_UpdateWhenOffscreen', False))},
                     "rendererName": go["m_Name"] if go else ""})
     return out
 
@@ -483,6 +554,29 @@ def _bake_animations(glb, rig, sampled, node_by_name, node_by_hash):
     return report
 
 
+def head_ik_axes(avatar, nodes):
+    """Bind humanoid look-at axes to the emitted skeleton in canonical space."""
+    human = avatar['human']
+    def bone(slot):
+        index = human['humanBoneIndex'][slot]
+        if index < 0:
+            return None
+        source = human['nodes'][index]
+        matches = [i for i, node in enumerate(nodes) if node['name'] == source['name']]
+        if len(matches) != 1 or source['axesId'] < 0:
+            raise ValueError(f'look-at bone has no unique skeleton/axes binding: {source["name"]}')
+        axes = human['axes'][source['axesId']]
+        def quaternion(value):
+            # Reflection of X preserves quaternion X/W and negates Y/Z.
+            return [value[0], -value[1], -value[2], value[3]]
+        return {'node': matches[0], 'name': source['name'],
+                'preQ': quaternion(axes['preQ']), 'postQ': quaternion(axes['postQ'])}
+    head, neck = bone(11), bone(10)
+    if head is None:
+        raise ValueError('humanoid avatar has no head binding')
+    return {**head, 'neck': neck}
+
+
 def extract_character(bundle, out_dir, name, sampled=None, aux=(),
                       unit_id=None, facial=None, atlas_cell=DEFAULT_ATLAS_CELL,
                       with_cloth=True):
@@ -491,6 +585,7 @@ def extract_character(bundle, out_dir, name, sampled=None, aux=(),
     verification numbers (all verifications also raise on hard violations).
     """
     assets = CharacterAssets(bundle, aux)
+    animation_controller = read_animation_controller(assets)
     av_tt = assets.one("Avatar").read_typetree()
     rig = Rig(rig_doc(av_tt))
     nodes, tr_index = read_scene(assets)
@@ -788,6 +883,9 @@ def extract_character(bundle, out_dir, name, sampled=None, aux=(),
         "mouthAtlas": _atlas_doc(mouth_tex.m_Width, mouth_tex.m_Height, atlas_cell),
         "cloth": cloth_rig,
         "anchors": read_anchors(assets, tr_index, nodes),
+        "headIk": head_ik_axes(rig.doc, nodes),
+        "animationController": animation_controller,
+        "rendererBounds": [{**renderer['bounds'], 'name': renderer['rendererName']} for renderer in renderers],
         "textures": [tex_paths[n] for n in sorted(pngs)],
         # materials[i].name's contract is "the glTF material's own name",
         # matching the site domain's convention (there it holds the real

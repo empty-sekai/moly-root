@@ -610,7 +610,9 @@ def parse_script(text, tables, scalars=None, script_name=None, defaults=None,
 def _text_assets(bundle):
     """Return ``{TextAsset name: decoded script text}`` from a Unity bundle."""
     out = {}
-    for obj in UnityPy.load(bundle).objects:
+    # These small script bundles are consumed in one pass. Loading their
+    # bytes avoids retaining an open source file through Unity object cycles.
+    for obj in UnityPy.load(Path(bundle).read_bytes()).objects:
         if obj.type.name != "TextAsset":
             continue
         tree = obj.read_typetree()
@@ -771,6 +773,29 @@ def birthday_talks(master, assets, tables, scalars):
     return block, dict(report, status="present")
 
 
+def tutorial_talks(master, assets, tables, scalars):
+    """Tutorial IDs select authored scripts; they do not enter the talk lottery."""
+    try:
+        rows = master.table('mysekaiTutorialTalks')
+    except MissingTable:
+        return {'status': 'absent', 'rows': [], 'talks': {}}, {'status': 'absent', 'scripts': 0}
+    scripts = {}
+    for row in rows:
+        lua = row['lua']
+        if lua in scripts:
+            continue
+        name = lua if lua.endswith('.lua') else lua + '.lua'
+        script = _asset_named(assets, name)
+        if script is None:
+            raise LookupError(f'tutorial script asset not found: {name}')
+        parsed = parse_script(script, tables, scalars, script_name=name)
+        scripts[lua] = {'voices': parsed['voices'], 'steps': parsed['steps'],
+                        'voiceBank': 'mysekai/talk/tutorial/voice/' + lua}
+    return {'status': 'complete', 'rows': rows, 'talks': scripts}, {
+        'status': 'complete', 'scripts': len(scripts), 'rows': len(rows),
+        'steps': sum(len(script['steps']) for script in scripts.values())}
+
+
 def _semantics(source):
     return {
         "selection": (
@@ -911,6 +936,14 @@ def extract_talks(master_source, talk_bundle, out_path, master_cache=None,
     # its exact serialized form.
     birthday, birthday_report = birthday_talks(master, assets, tables, scalars)
     doc["birthdayParty"] = birthday
+    # Multi-character ordinary talks share the source package and parser,
+    # but have their own membership and runtime plan. Do not put them into
+    # any participant's solo lottery or invent a fixture for them.
+    from chara.common_talks import common_talks
+    common, common_report = common_talks(master, assets, tables, scalars)
+    doc["commonSomeCharacter"] = common
+    tutorial, tutorial_report = tutorial_talks(master, assets, tables, scalars)
+    doc['tutorial'] = tutorial
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(doc, handle, ensure_ascii=False, indent=1, allow_nan=False)
@@ -921,6 +954,8 @@ def extract_talks(master_source, talk_bundle, out_path, master_cache=None,
         "constantSource": constant_source,
         "constantTables": {key: len(value) for key, value in tables.items()},
         "birthdayParty": birthday_report,
+        "commonSomeCharacter": common_report,
+        "tutorial": tutorial_report,
     }
 
 

@@ -995,7 +995,7 @@ def extract_phenomena(bundles, out_dir, bundle_root=None, master=None,
                           "schemaVersion": collision_document["schemaVersion"],
                           **collision_document["summary"]}
 
-    library = Library(out / "audio", "audio", vgmstream, ffmpeg)
+    library = Library(out / "audio", "audio", vgmstream, ffmpeg, preserve_existing=True)
     sound_packages = {}
     wanted_cues = sorted({str(row.get("cue")) for row in sound_rows
                           if row.get("cue")})

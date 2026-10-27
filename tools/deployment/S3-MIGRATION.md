@@ -84,6 +84,13 @@ the limit block execution. A replacement conservatively counts its entire
 incoming body as additional space. Planning does not reserve capacity or delete
 objects.
 
+The default operator budget is 30 GiB. Set `--capacity-bytes N` to the actual
+deployment budget, or explicitly set `--capacity-bytes 0` when no total-byte
+budget applies. The latter inventories only the selected namespaces and reports
+the new-byte upper bound; whole-bucket usage and projected totals are unknown.
+Versioning, multipart, immutable conflicts and conditional-write checks still
+apply. This option does not change the provider quota.
+
 Uploads use bounded worker concurrency and single `PutObject` requests. Create
 uses `IfNoneMatch="*"`; mutable replacement uses the observed ETag in `IfMatch`
 after checking the expected SHA. Missing SDK support or rejected conditions

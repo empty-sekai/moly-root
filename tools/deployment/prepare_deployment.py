@@ -298,6 +298,73 @@ def delivery_profile(mode, generate):
     return profile
 
 
+
+def publication_release_files(publication, manifest, url_prefix):
+    """Verify only releases selected by the stage manifest and game pointer."""
+    identifier = re.compile(r'[a-z0-9][a-z0-9._-]{0,95}')
+    primary = manifest['release']['id']
+    if not isinstance(primary, str) or not identifier.fullmatch(primary):
+        raise ValueError('Invalid primary release identity')
+    releases = [primary]
+    game_path = publication / 'game/manifest.json'
+    game = json.loads(game_path.read_bytes()) if game_path.is_file() else None
+    if game is not None:
+        record = game.get('release', {})
+        game_id = record.get('id')
+        expected_snapshots = [{
+            'id': row['id'], 'region': row['region'], 'version': row['version'],
+            'assets': row['assets'], 'packs': row.get('packs') is True,
+            'assetCatalog': row.get('assetCatalog') if row.get('packs') is True else None,
+        } for row in manifest['snapshots']]
+        if (game.get('publisher') != 'moly-release-artifact-v1' or game.get('schemaVersion') != 1
+                or game.get('prefix') != url_prefix
+                or not isinstance(game_id, str) or not identifier.fullmatch(game_id)
+                or record.get('module') != f'{url_prefix}releases/{game_id}/game-boot.mjs'
+                or record.get('abi') != 2
+                or not record.get('coordinateContract')
+                or record['coordinateContract'] != manifest['release'].get('coordinateContract')
+                or game.get('snapshots') != expected_snapshots):
+            raise ValueError('Game pointer does not match the publication contract and snapshots')
+        if game_id not in releases:
+            releases.append(game_id)
+    files, integrity_count = {}, 0
+    for release_id in releases:
+        root = publication / 'releases' / release_id
+        if root.is_symlink() or not root.resolve().is_relative_to(publication.resolve()):
+            raise ValueError('Release root escapes publication')
+        integrity_file = root / 'integrity.json'
+        if integrity_file.is_symlink():
+            raise ValueError('Release integrity must be a regular local file')
+        integrity = json.loads(integrity_file.read_bytes())
+        if ('releaseId' in integrity and integrity['releaseId'] != release_id
+                or 'contractVersion' in integrity and integrity['contractVersion'] != manifest.get('schemaVersion')
+                or 'coordinateContract' in integrity and integrity['coordinateContract'] != manifest['release'].get('coordinateContract')):
+            raise ValueError(f'Release integrity identity mismatch: {release_id}')
+        hashes = integrity.get('hashes')
+        if not isinstance(hashes, dict) or not hashes:
+            raise ValueError(f'Release has no integrity membership: {release_id}')
+        if game is not None and game['release']['id'] == release_id:
+            if (integrity.get('schemaVersion') != 1 or integrity.get('releaseId') != release_id
+                    or integrity.get('contractVersion') != manifest.get('schemaVersion')
+                    or integrity.get('coordinateContract') != game['release']['coordinateContract']
+                    or 'game-boot.mjs' not in hashes):
+                raise ValueError('Game release has no matching integrity contract')
+        for name, expected_hash in hashes.items():
+            safe_relative(name)
+            if (not re.fullmatch(r'[a-f0-9]{64}', expected_hash or '')
+                    or name == 'integrity.json' or name.endswith(('.gz', '.br'))):
+                raise ValueError(f'Invalid release integrity member: {name}')
+            source = root / name
+            if (not source.resolve().is_relative_to(root.resolve())
+                    or source.is_symlink() or any(parent.is_symlink() for parent in source.parents if parent != publication)):
+                raise ValueError(f'Release member escapes publication: {name}')
+            if digest(source.read_bytes()) != expected_hash:
+                raise RuntimeError(f'Release integrity mismatch: {release_id}/{name}')
+            files[f'releases/{release_id}/{name}'] = source
+            integrity_count += 1
+        files[f'releases/{release_id}/integrity.json'] = integrity_file
+    return releases, files, integrity_count
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--publication', type=Path, required=True)
@@ -312,6 +379,7 @@ def main():
     parser.add_argument('--stage', action='store_true', help='Create immutable hardlink staging grouped by content encoding')
     parser.add_argument('--encoding', choices=['identity', 'gzip', 'best'], default='best', help='Generate/select verified lossless HTTP representations; best allows Brotli')
     parser.add_argument('--existing-encodings-only', action='store_true', help='Audit/reuse existing sidecars without generating new representations')
+    parser.add_argument('--verified-representations', type=Path, help='Explicit local index of verified immutable origin bodies and headers')
     parser.add_argument('--engine-reads', action='append', default=[], metavar='REGION=FILE',
                         help='Request or console log of a browser run; the audit fails on a requested path the membership lacks (engine_reads.py)')
     args = parser.parse_args()
@@ -326,6 +394,8 @@ def main():
     sys.path.insert(0, str(args.exporter.resolve() / 'src'))
     from pack.groups import runtime_paths
     from pack.http_delivery import choose_representation
+    from verified_representations import VerifiedRepresentations
+    reuse = VerifiedRepresentations(args.verified_representations)
     profile = delivery_profile(args.encoding, not args.existing_encodings_only)
     manifest = json.loads((publication / 'manifest.json').read_bytes())
     source_overrides = {}
@@ -354,16 +424,10 @@ def main():
     # A publication with the game profile carries the game page's pointer.
     if (publication / 'game' / 'manifest.json').is_file():
         add('game/manifest.json', publication / 'game' / 'manifest.json')
-    release_id = safe_relative(manifest['release']['id'])
-    release_root = publication / 'releases' / release_id
-    release_integrity = json.loads((release_root / 'integrity.json').read_bytes())
-    for name, expected_hash in release_integrity['hashes'].items():
-        safe_relative(name)
-        if digest((release_root / name).read_bytes()) != expected_hash:
-            raise RuntimeError(f'Release integrity mismatch: {name}')
-    for file in (publication / 'releases' / release_id).rglob('*'):
-        if file.is_file() and file.suffix not in {'.gz', '.br'}:
-            add(file.relative_to(publication).as_posix(), file)
+    release_ids, release_files, integrity_count = publication_release_files(publication, manifest, args.url_prefix)
+    release_id = release_ids[0]
+    for logical, source in release_files.items():
+        add(logical, source)
     reports = {}
     for snapshot in manifest['snapshots']:
         snapshot_id = safe_relative(snapshot['id'])
@@ -408,7 +472,7 @@ def main():
         print(json.dumps({snapshot['region']: {k: report[k] for k in ['files', 'bytes', 'excludedBytes', 'missing', 'browserBaseMismatch']},
                           **({'engineReadsUnpublished': report['engineReads']['unpublished']} if 'engineReads' in report else {})}), flush=True)
     report_path = output / 'audit.json'
-    write_json(report_path, {'regions': reports, 'releaseIntegrityFilesChecked': len(release_integrity['hashes'])})
+    write_json(report_path, {'regions': reports, 'releaseIntegrityFilesChecked': integrity_count})
     if args.engine_reads and set(engine_logs) - set(reports):
         raise ValueError(f'--engine-reads names a region without a snapshot: {sorted(set(engine_logs) - set(reports))}')
     if any(row['missing'] or row['browserBaseMismatch'] or row.get('engineReads', {}).get('unpublished')
@@ -418,7 +482,9 @@ def main():
     entries, invalid_sidecars = [], []
     # All preferred representations are validated against the exact raw bytes.
     for index, (logical, source) in enumerate(sorted(files.items())):
-        representation = choose_representation(source, logical, output / 'representations',
+        media_type = content_type(logical, source)
+        reused = reuse.select(source, logical, prefix + logical, media_type)
+        representation = reused.representation if reused else choose_representation(source, logical, output / 'representations',
             mode=args.encoding, generate=not args.existing_encodings_only)
         selected, encoding, body = representation.source, representation.encoding, representation.body
         invalid_sidecars.extend(representation.invalid_sidecars)
@@ -429,6 +495,8 @@ def main():
         }
         if encoding != 'identity' or logical.startswith('asset-store/'):
             entry['cacheControl'] += ', no-transform'
+        if reused:
+            reused.apply(entry)
         address = STORE_OBJECT.fullmatch(logical)
         if address and entry['decodedSha256'] != address[1]:
             raise RuntimeError(f'Content-addressed object does not match its name: {logical}')
@@ -456,7 +524,7 @@ def main():
                              for kind in ['identity', 'gzip', 'br']}}
     result = {'schema': 'moly-object-upload/1' if args.provider == 's3' else 'moly-oss-upload/1',
               'deliveryMode': 'fixed', 'bucket': None, 'objectPrefix': prefix, 'urlPrefix': args.url_prefix,
-              'release': release_id, 'snapshots': [s['id'] for s in manifest['snapshots']],
+              'release': release_id, 'releases': release_ids, 'snapshots': [s['id'] for s in manifest['snapshots']],
               'encodingPolicy': args.encoding, 'httpDelivery': profile,
               'totals': totals, 'invalidSidecarsSkipped': invalid_sidecars,
               'notes': ['No cloud writes performed.', 'Upload Content-Encoding exactly as listed; identity means omit that header.',
@@ -468,7 +536,7 @@ def main():
                         'Staging hardlinks must never be edited in place.'], 'files': entries}
     write_json(output / 'upload-manifest.json', result)
     write_json(report_path, {'regions': reports, 'totals': totals, 'invalidSidecarsSkipped': invalid_sidecars,
-                            'releaseIntegrityFilesChecked': len(release_integrity['hashes'])})
+                            'releaseIntegrityFilesChecked': integrity_count, 'verifiedRepresentations': reuse.audit()})
     print(json.dumps({'totals': totals, 'invalidSidecars': len(invalid_sidecars), 'output': str(output)}), flush=True)
 
 

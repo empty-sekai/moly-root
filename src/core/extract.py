@@ -122,6 +122,7 @@ DOMAIN_OBJECT_TYPES = {
     "motion": {"AnimationClip", "Avatar"},
     "facial": {"MonoBehaviour"},
     "performance": {"TextAsset"},
+    "communication": {"TextAsset"},
     "talk": {"TextAsset"},
     "talk-constants": {"TextAsset"},
     "camera": {"MonoBehaviour", "PlayableDirector"},
@@ -303,6 +304,7 @@ FIXED_ARTIFACT_PATHS = (
     "motion-library.index.json",
     "facial-tables.json",
     "alone-actions.json",
+    "communication-actions.json",
     "talks.json",
     "tweets.json",
     "emoticons/emoticons.json",
@@ -1688,6 +1690,11 @@ def extract_manifest(manifest, bundles, out, unity_version=None, master=None,
             elif target.domain == "performance":
                 from chara.alone_actions import write_alone_actions
                 result = write_alone_actions(str(bundle), str(out / "alone-actions.json"))
+            elif target.domain == "communication":
+                if not master:
+                    raise ValueError("communication actions require master tables")
+                from chara.communication_actions import extract_communication_actions
+                result = extract_communication_actions(master, str(bundle), str(out / "communication-actions.json"), master_cache)
             else:
                 from chara.characters import facial_tables
                 target_path = out / "facial-tables.json"

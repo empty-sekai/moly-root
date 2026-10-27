@@ -26,7 +26,7 @@ from typing import Any, Iterable
 
 import UnityPy
 
-from core.extract import DEFAULT_UNITY_VERSION
+from core.unity import configure_fallback_unity_version
 from core.jsonio import write_json
 
 # Identity of the bundle root this toolchain is pinned to.  Both go into the
@@ -117,7 +117,7 @@ def export_action_icons(
         "version": 1,
         "region": region,
         "gameVersion": game_version,
-        "unityVersion": DEFAULT_UNITY_VERSION,
+        "unityVersion": configure_fallback_unity_version(),
         "summary": {"bundles": len(paths), "icons": len(records)},
         "icons": records,
     }

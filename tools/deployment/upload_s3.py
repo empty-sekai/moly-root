@@ -295,11 +295,13 @@ def selection(args):
     return doc, rows
 
 
-def inspect_capacity(client, target, rows, *, mutable=False, known_existing_keys=None, absent_keys=None):
+def inspect_capacity(client, target, rows, *, mutable=False, known_existing_keys=None, absent_keys=None,
+                     capacity_bytes=None):
     """Current encoded object bytes, all bucket prefixes; never decoded lengths.
 
     `absent_keys`, when given, receives the selected keys the complete listing
     does not contain."""
+    capacity = CAPACITY if capacity_bytes is None else capacity_bytes
     incomplete = []
     try:
         if client.get_bucket_versioning(Bucket=target['bucket']).get('Status'):
@@ -316,30 +318,40 @@ def inspect_capacity(client, target, rows, *, mutable=False, known_existing_keys
         incomplete.append('multipart_storage_unverified')
     used = count = 0
     listed_keys = set()
-    continuation = None
-    for _ in range(10000):
-        response = client.list_objects_v2(Bucket=target['bucket'], MaxKeys=1000,
-            **({'ContinuationToken': continuation} if continuation else {}))
-        if type(response.get('IsTruncated')) is not bool:
-            raise SafeFailure('bucket_listing_completeness_unverified')
-        for item in response.get('Contents', []):
-            size = item.get('Size')
-            if type(size) is not int or size < 0:
-                raise SafeFailure('invalid_bucket_object_size')
-            used += size
-            count += 1
-            key = item.get('Key')
-            if not isinstance(key, str) or not key:
-                raise SafeFailure('invalid_bucket_object_key')
-            listed_keys.add(key)
-        if not response.get('IsTruncated'):
-            break
-        token = response.get('NextContinuationToken')
-        if not token or token == continuation:
-            raise SafeFailure('invalid_bucket_listing_cursor')
-        continuation = token
-    else:
-        raise SafeFailure('bucket_listing_page_limit')
+    # Without an operator capacity budget, only the selected namespaces need
+    # inventory. Unrelated historic assets do not affect this upload's delta.
+    prefixes = [None] if capacity else sorted({
+        row['objectKey'].rsplit('/', 1)[0] + '/' if '/' in row['objectKey'] else row['objectKey']
+        for row in rows
+    })
+    for prefix in prefixes:
+        continuation = None
+        seen_tokens = set()
+        for _ in range(10000):
+            response = client.list_objects_v2(Bucket=target['bucket'], MaxKeys=1000,
+                **({'Prefix': prefix} if prefix is not None else {}),
+                **({'ContinuationToken': continuation} if continuation else {}))
+            if type(response.get('IsTruncated')) is not bool:
+                raise SafeFailure('bucket_listing_completeness_unverified')
+            for item in response.get('Contents', []):
+                size, key = item.get('Size'), item.get('Key')
+                if type(size) is not int or size < 0:
+                    raise SafeFailure('invalid_bucket_object_size')
+                if not isinstance(key, str) or not key:
+                    raise SafeFailure('invalid_bucket_object_key')
+                if key not in listed_keys:
+                    used += size
+                    count += 1
+                    listed_keys.add(key)
+            if not response.get('IsTruncated'):
+                break
+            token = response.get('NextContinuationToken')
+            if not token or token in seen_tokens:
+                raise SafeFailure('invalid_bucket_listing_cursor')
+            seen_tokens.add(token)
+            continuation = token
+        else:
+            raise SafeFailure('bucket_listing_page_limit')
     additional = transfer = existing_count = 0
     conflicts = []
     conflict_count = 0
@@ -367,13 +379,15 @@ def inspect_capacity(client, target, rows, *, mutable=False, known_existing_keys
             # reclamation of an old representation during the upload.
             additional += row['bytes']
             transfer += row['bytes']
-    return {'capacityBytes': CAPACITY, 'currentObjectBytes': used, 'objects': count,
+    return {'capacityBytes': capacity or None, 'currentObjectBytes': used if capacity else None,
+            'objects': count if capacity else None, 'listedObjectBytes': used, 'listedObjects': count,
             'additionalBytesUpperBound': additional, 'transferBytes': transfer,
-            'matchingSelectedObjects': existing_count, 'projectedBytesUpperBound': used + additional,
+            'matchingSelectedObjects': existing_count, 'projectedBytesUpperBound': used + additional if capacity else None,
             'immutableConflictCount': conflict_count, 'immutableConflicts': conflicts,
             'complete': not incomplete, 'incompleteReasons': incomplete,
-            'withinCapacity': not incomplete and used + additional <= CAPACITY,
-            'scope': 'whole-bucket encoded object payload; requires an exclusive publisher; not a quota reservation'}
+            'withinCapacity': not incomplete and (not capacity or used + additional <= capacity),
+            'scope': ('whole-bucket encoded object payload; requires an exclusive publisher; not a quota reservation'
+                      if capacity else 'selected namespaces; incremental accounting; operator disabled capacity budget')}
 
 
 def previous_digest(client, target, key, existing):
@@ -607,7 +621,7 @@ def parse_args(argv=None):
     parser.add_argument('--profile', help='Optional local AWS SDK profile; otherwise the standard credential chain')
     parser.add_argument('--scope', choices=['stable', 'release', 'descriptors', 'mutable'], default='stable')
     parser.add_argument('--release-id')
-    parser.add_argument('--mutable-path', choices=sorted(common.MUTABLE), action='append', default=[])
+    parser.add_argument('--mutable-path', type=common.mutable_path, action='append', default=[])
     parser.add_argument('--allow-mutable-update', action='store_true')
     parser.add_argument('--expect-previous-sha256')
     parser.add_argument('--limit', type=int)
@@ -625,12 +639,16 @@ def parse_args(argv=None):
     parser.add_argument('--inspect', action='store_true', help='Read-only whole-bucket capacity and object inspection')
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--exclusive-writer', action='store_true', help='Confirm no concurrent publisher can consume the planned bucket capacity')
+    parser.add_argument('--capacity-bytes', type=int, default=CAPACITY,
+                        help='Operator storage budget in bytes (default: 30 GiB); 0 explicitly disables the budget and inventories selected namespaces')
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     global THROTTLE
     args = parse_args(argv)
+    if args.capacity_bytes < 0:
+        raise SafeFailure('capacity_bytes_must_be_nonnegative')
     if args.max_bytes_per_second is not None:
         if args.max_bytes_per_second < UPLOAD_CHUNK:
             raise SafeFailure('max_bytes_per_second_below_one_chunk', minimum=UPLOAD_CHUNK)
@@ -646,7 +664,7 @@ def main(argv=None):
     copy_sources = load_copy_sources(args.copy_source_manifest, args.object_prefix)
     copyable = [row for row in rows if copy_sources.get(content_identity(row), row['objectKey']) != row['objectKey']]
     common.emit('selection', destination=target, dryRun=not args.execute, objects=len(rows),
-        selectedEncodedBytes=sum(row['bytes'] for row in rows), capacityBytes=CAPACITY,
+        selectedEncodedBytes=sum(row['bytes'] for row in rows), capacityBytes=args.capacity_bytes or None,
         receipt=str(receipt_path(args, identity)), deleteObjects=False, changeAcl=False,
         copyCandidates=len(copyable), copyCandidateBytes=sum(row['bytes'] for row in copyable))
     if not args.inspect and not args.execute:
@@ -674,12 +692,13 @@ def main(argv=None):
             require_copy_conditions(client)
     absent_keys = set()
     plan = inspect_capacity(client, target, rows, mutable=args.scope == 'mutable',
-                            known_existing_keys=known_existing_keys, absent_keys=absent_keys)
+                            known_existing_keys=known_existing_keys, absent_keys=absent_keys,
+                            capacity_bytes=args.capacity_bytes)
     common.emit('capacity-plan', **plan)
     if not args.execute:
         return 0
     if not plan['withinCapacity']:
-        raise SafeFailure('capacity_unverified_or_exceeded', capacityBytes=CAPACITY)
+        raise SafeFailure('capacity_unverified_or_exceeded', capacityBytes=args.capacity_bytes or None)
     if plan['immutableConflictCount']:
         raise SafeFailure('immutable_object_conflicts', count=plan['immutableConflictCount'])
     return execute(client, target, rows, args, identity, absent_keys, copy_sources)

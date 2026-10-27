@@ -142,6 +142,7 @@ REFERENCED_FAMILIES = {
     # The mission cells sit in Resources folders and are instantiated from
     # their lists' serialized cell prefab reference (see POINTER_PREFABS).
     "missioncell": ("MysekaiMissionScreenCell", "MysekaiMissionRewardCell"),
+    "photocell": ("UIPartsPhotoFrameListThumbnail",),
 }
 
 # Screen layers and dialogs the JP UI census maps to but the product does not
@@ -275,6 +276,7 @@ _PRODUCT_PREFABS = frozenset(
 # The JP prefab registry: the product families, the referenced-only prefabs
 # and the census-only ones.
 JP_FAMILIES = {
+    "bulkharvest": ("BulkHarvestChargeGauge", "UIPartsThumbnailRewardListCell"),
     **SCREENS,
     **REFERENCED_FAMILIES,
     **{family: tuple(n for n in names if n not in _PRODUCT_PREFABS)
@@ -288,7 +290,15 @@ JP_FAMILIES = {
 # repeats its page, whose pages each hold a copy of the content beside the list's
 # cell instance, adds a fourth item, the node's path under the page, and builds
 # the prefab from the page's own nodes (see follow_page_prefab_reference).
-POINTER_PREFABS = {**CRAFT_POINTER_PREFABS, **MISSION_POINTER_PREFABS}
+POINTER_PREFABS = {
+    "BulkHarvestChargeGauge": ("ScreenLayerMysekaiHUD", "Sekai.Mysekai.HarvestPlayerHeadUpDisplay", "_bulkHarvestChargeGaugeView"),
+    "UIPartsThumbnailRewardListCell": ("MysekaiBulkHarvestRewardDialog", "Sekai.UI.ListView", "listViewItemPrefab"),
+    "SiteEnvironmentSelectCell": (
+        "SiteEnvironmentContentList", "Sekai.UI.ListView", "listViewItemPrefab"),
+    **CRAFT_POINTER_PREFABS, **MISSION_POINTER_PREFABS,
+    "UIPartsPhotoFrameListThumbnail": (
+        "ScreenLayerMysekaiPhotoShot", "Sekai.FixedSizeReuseScroller", "prefab"),
+}
 POINTER_PAGE_PREFABS = {**MISSION_PAGE_POINTER_PREFABS}
 
 # Prefabs -> (holder, the holder's list field, the cell's name): the field names
@@ -794,6 +804,7 @@ EXTRA_DECODERS = {
     **FIELD_HUD_CN_DECODERS,
     "UnityEngine.UI.Toggle": decode_unity_toggle,
     "Sekai.UI.CustomRawImage": decode_raw_image_base,
+    "UnityEngine.UI.RawImage": decode_raw_image_base,
     "Sekai.UI.CustomToggle": decode_custom_toggle,
     "Sekai.UI.CustomIndexToggleGroup": decode_custom_index_toggle_group,
     "Sekai.MenuDialogCell": decode_menu_dialog_cell,
@@ -3050,6 +3061,14 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
         sitemap_package = Path(bundles_root) / SITEMAP_TEXTURE_PACKAGE
         if not sitemap_package.is_file():
             raise FileNotFoundError(f"UI texture package missing: {sitemap_package.name}")
+    from ui import photo_layout
+    photo_package = None
+    if "ScreenLayerMysekaiPhotoShot" in selected:
+        if bundles_root is None:
+            raise ValueError("photo-shot UI needs its decrypted texture package")
+        photo_package = Path(bundles_root) / photo_layout.PACKAGE
+        if not photo_package.is_file():
+            raise FileNotFoundError(f"UI texture package missing: {photo_package.name}")
     bgm_player_package = None
     if "ScreenLayerMysekaiBGMSelect" in selected:
         if bundles_root is None:
@@ -3211,7 +3230,7 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
             reference, (go_pid, transform_pid, _) = follow_prefab_reference(
                 env, holder_objects, holder_roots[0][1], item["via"][1], item["via"][2],
                 Resolver({}, mono_index, None, env=env, decoders=decoders),
-                lambda name: _file_objects(env, name))
+                lambda name: _file_objects(env, name), allow_nested=item["prefab"] == "BulkHarvestChargeGauge")
         if "targetSerializedFile" not in reference:
             reference["targetSerializedFile"] = holder_file
         item["target"] = (reference["targetSerializedFile"], go_pid)
@@ -3362,6 +3381,16 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
         runtime_textures.update(textures)
         runtime_sprites.update(sprites)
         texture_sources.append(source)
+    if photo_package is not None:
+        textures, sprites, source = photo_layout.package_images(photo_package.read_bytes(), out)
+        for alias in textures:
+            if alias in runtime_textures:
+                raise ValueError(f"UI runtime texture alias collision: {alias}")
+        runtime_textures.update(textures)
+        runtime_sprites.update(sprites)
+        texture_sources.append(source)
+        for effect in photo_layout.package_effects(photo_package, bundles_root, out):
+            rows.append({**effect, **identity})
     for item in plan:
         prefab, family = item["prefab"], item["family"]
         file_name, root_pid = item["target"]
@@ -3472,6 +3501,10 @@ def extract_layout_jp(apks, out_dir, *, client_version, master_dir, prefabs,
                     runtime_textures[alias] = sprite["image"]
                     runtime_sprites[alias] = sprite
         path = write_json(out / family / f"{prefab}.json", document)
+        if prefab == "ScreenLayerMysekaiPhotoShot":
+            from ui.photo_presentation import export_presentation
+            presentation = export_presentation(document, master_path, bundles_root, out)
+            rows.append({**presentation, **identity})
         monos, decoded, raw = _document_counts(document)
         closure = _closure_of(env, file_name)
         row = {

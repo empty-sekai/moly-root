@@ -108,6 +108,12 @@ def export_fixture_master_slice(
         sub_genre = row.get("mysekaiFixtureSubGenreId")
         if sub_genre is not None and type(sub_genre) is not int:
             raise ValueError(f"row id={row['id']!r}: sub genre id must be an integer or null")
+        costs = {field: row.get(field) for field in ("firstPutCost", "secondPutCost")}
+        for field, value in costs.items():
+            # Older clients do not expose cost limits. Missing stays null;
+            # consumers cannot turn an absent cost into a free placement.
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"row id={row['id']!r}: {field} must be a nonnegative integer or null")
         grid = row["gridSize"]
         for axis in ("width", "depth", "height"):
             if axis not in grid:
@@ -130,6 +136,7 @@ def export_fixture_master_slice(
                 "gridDepth": int(grid["depth"]),
                 "gridHeight": int(grid["height"]),
                 "putSoundId": put_sound,
+                **costs,
             }
         )
     out.sort(key=lambda record: record["id"])

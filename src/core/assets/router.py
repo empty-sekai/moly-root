@@ -187,6 +187,8 @@ def route(name):
         return Route("facial", "facial-tables")
     if name == "mysekai__character_alone_action":
         return Route("performance", "alone-actions")
+    if name == "mysekai__some_character_communication":
+        return Route("communication", "communication-actions")
     if "__effect__emoticon__" in name:
         return Route("emoticon", "emoticons")
     if name == "mysekai__talk__scenario__talk":

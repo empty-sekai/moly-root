@@ -156,16 +156,25 @@ _VERSIONED_BODIES = {
     "Sekai.UI.CustomScrollRect": "decode_custom_scroll_rect_700",
 }
 
+BULK_CLASSES = {
+    "Sekai.UIPartsThumbnailRewardListCell", "Sekai.UIPartsCheckBox",
+    "Sekai.Mysekai.HarvestPlayerHeadUpDisplay", "UnityEngine.UI.ScrollRect",
+    "Sekai.Mysekai.BulkHarvestActionButton", "Sekai.Mysekai.BulkHarvestChargeGaugeView",
+    "Sekai.Mysekai.BulkHarvestCheckBoxListView", "Sekai.Mysekai.BulkHarvestGroupCheckBoxView",
+    "Sekai.Mysekai.BulkHarvestTargetSettingCheckBox", "Sekai.Mysekai.BulkHarvestTargetSettingDialog",
+    "Sekai.Mysekai.MysekaiBulkHarvestRewardDialog", "Sekai.Mysekai.ScreenLayerMysekaiHarvest",
+}
+
 
 def test_700_table_holds_the_changed_classes_only():
     """The 7.0.0 table differs from the 6.8.1 one in the classes the client
     changed; every other class is the same chain in both tables."""
     table_681 = jd.decoders_for("6.8.1")
     table_700 = jd.decoders_for("7.0.0")
-    assert set(table_700) - set(table_681) == set(_VERSIONED_BODIES) - {
+    assert set(table_700) - set(table_681) == (set(_VERSIONED_BODIES) - {
         "Sekai.Mysekai.MysekaiInfoOption1Page",
         "Sekai.Mysekai.Inventory.CraftPreview",
-    }
+    }) | set(jd.photo_layout.DECODERS) | BULK_CLASSES
     for name, body in _VERSIONED_BODIES.items():
         assert table_700[name].__name__ == body
     for name in set(table_681) & set(table_700):
@@ -184,3 +193,22 @@ def test_scroll_rect_tolerance_reads_after_the_681_chain():
     fields, remaining = decode("6.8.1", "Sekai.UI.CustomScrollRect", raw)
     assert remaining == 4
     assert "normalizedPositionTolerance" not in fields
+
+
+def test_bulk_checkbox_and_reward_cell_field_order():
+    fields, left = decode("7.0.0", "Sekai.UIPartsCheckBox",
+                          pptr(41) + b4(True) + pptr(42))
+    assert left == 0 and fields == {"checkObj": (0, 41), "check": True, "toggle": (0, 42)}
+    fields, left = decode("7.0.0", "Sekai.UIPartsThumbnailRewardListCell",
+        f32(24) + f32(30) + i32(2) + pptr(43) + pptr(44) + pptr(45))
+    assert left == 0
+    assert fields == {"sizeX": 24, "sizeY": 30,
+                      "thumbnailRoots": [(0, 43), (0, 44)], "nameText": (0, 45)}
+
+
+def test_stock_scroll_rect_ends_before_custom_extension():
+    raw = scroll_rect(1000)
+    fields, left = decode("7.0.0", "UnityEngine.UI.ScrollRect", raw)
+    assert left == 24
+    assert fields["m_Content"] == (0, 1000)
+    assert fields["m_Viewport"] == (0, 1001)

@@ -29,7 +29,7 @@ CATEGORIES = Path(__file__).with_name("groups.toml")
 # checks it against the paths a browser run requested.
 ROOT_DOCUMENTS = (
     "manifest.json", "source.json", "characters.json", "motion-library.glb", "motion-library.index.json",
-    "alone-actions.json", "facial-tables.json", "client-config.json", "birthday-parties.json",
+    "alone-actions.json", "communication-actions.json", "facial-tables.json", "client-config.json", "birthday-parties.json",
     "birthday-party-delivery.json",
     "mysekai-blueprints.json", "mysekai-fixtures.json", "mysekai-items.json",
     "mysekai-fixture-main-genres.json", "mysekai-fixture-sub-genres.json",
@@ -61,12 +61,12 @@ ASSET_DIRECTORIES = (
     "avatar", "avatar-parts", "camera", "cutscene-timeline", "emoticons", "fixture-areas",
     "fixture-attach", "fixture-interface", "fixture-meshes", "fixture-models",
     "fixture-gimmick", "fixture-particles-v2", "fixture-talks", "fixture-timeline", "perf-animations",
-    "phenomena", "site", "ui", "ui-layout-v2", "ui-jp",
+    "phenomena", "site", "ui", "ui-layout-v2", "ui-jp", "ui-bulkharvest",
     "field-camera", "house-transition", "live-transitioner",
     "effect-resources", "graphics-config", "layout-grid",
     "site-action-effects", "site-common-action-effects", "site-harvest-object-effects",
     "site-home-effects", "fixture-put-effects", "site-sound-wave", "site-timeline",
-    "honor", "honor_frame", "material-thumbnails",
+    "honor", "honor_frame", "material-thumbnails", "text", "tutorial",
 )
 FORMATS = {".json", ".glb", ".gltf", ".png", ".jpg", ".jpeg", ".webp", ".ktx2", ".rgba8", ".ogg", ".wav", ".mp3", ".bin"}
 BUILD_EVIDENCE_FILES = {"export-report.json", "export-plan.json", "export-progress.json",

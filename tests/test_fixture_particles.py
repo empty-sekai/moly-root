@@ -224,6 +224,24 @@ def test_emitter_and_renderer_pair_into_one_entry(tmp_path, monkeypatch):
     assert meta["renderers"] == 1
 
 
+def test_explicit_unrouted_package_is_extracted(tmp_path, monkeypatch):
+    name = "mysekai__player__motion__bulk_harvest"
+    package = _Package(name)
+    goid, _ = package.node("bulk")
+    package.particle_system(goid)
+    package.renderer(goid, [])
+    (tmp_path / name).touch()
+    monkeypatch.setattr(packages_module.UnityPy, "load", lambda _: package.finish())
+    store = PackageStore([str(tmp_path / name)])
+    out = tmp_path / "out"
+    extract_from_store(store, out, domains=(), packages=(name,))
+    document = _document(out, name)
+    assert document["domain"] == "explicit"
+    assert len(document["emitters"]) == 1
+    index = json.loads((out / "index.json").read_text())
+    assert index["summary"]["perDomain"]["explicit"] == 1
+
+
 def test_two_systems_share_the_node_renderer(tmp_path, monkeypatch):
     """Red when a node's several systems are fused into one emitter: the
     jacuzzi holds 103 systems on far fewer nodes, and each system keeps its own

@@ -1,5 +1,27 @@
 # Direct-URL deployment
 
+## Publish resources before an application release
+
+`prepare_resources.py` prepares one content-addressed asset catalogue without
+an application release, snapshot descriptor or mutable pointer. Build the store
+with `build_store.py`, then pass the returned catalogue hash:
+
+```sh
+python tools/deployment/prepare_resources.py --source RUNTIME_ROOT --store ASSET_STORE --catalog CATALOG_SHA256 --output RESOURCE_STAGING --object-prefix= --url-prefix /moly/ --encoding best --stage
+python tools/deployment/upload_s3.py --manifest RESOURCE_STAGING/upload-manifest.json --endpoint https://objects.example.invalid --bucket resource-bucket --region CONFIRMED_REGION --object-prefix= --scope stable
+```
+
+Preparation verifies the catalogue, package graph, source provenance, every
+blob, and exact browser membership and content against the supplied runtime
+root. The manifest's `resourceCatalog` identifies this one immutable graph.
+The uploader verifies it again from actual local bytes and accepts only its
+complete `stable` scope; unrelated objects, partial selections, application
+releases and mutable pointers are rejected. The command above remains a local
+dry-run. Existing S3 capacity, conditional-write and explicit execution rules
+apply unchanged. Uploading the catalogue does not select it for any app.
+
+## Application publication
+
 `prepare_deployment.py` audits exporter-owned membership and stages a publication
 without any cloud API calls. `upload_oss.py` is the existing bounded OSS uploader,
 now versioned here; its default is dry-run. It keeps its explicit target,
@@ -90,3 +112,25 @@ This reduces network bytes only. Browser HTTP decoding restores original hashes;
 the existing decoded CacheStorage and live CPU/GPU assets do not become smaller.
 The old `moly-deploy` viewer/R2 pipeline uses a different client-side `.glb.br`
 contract and is not used or modified by this direct-URL deployment path.
+
+
+### Reuse an existing immutable HTTP representation
+
+`prepare_resources.py` and `prepare_deployment.py` accept
+`--verified-representations INDEX.json`. The default still chooses fresh
+lossless representations. Use this explicit index when an immutable origin URL
+already holds an equivalent body with different compression or cache headers.
+The index has schema `moly-verified-http-representations/1` and a `files` array.
+Each row names `path`, `objectKey`, a relative local `body`, stored `sha256` and
+`bytes`, decoded `decodedSha256` and `decodedBytes`, and exact origin `headers`:
+`ContentLength`, `ContentType`, `ContentEncoding` (null means identity),
+`CacheControl`, and `Metadata` with `moly-sha256`, `moly-decoded-sha256`, and
+`moly-decoded-bytes`.
+
+Only content-addressed immutable resource URLs are eligible. Preparation checks
+the actual stored body, bounded lossless decoding, source identity, key, media
+type and headers. The audit lists reused and unused index entries. Resource
+upload validation repeats these checks against the index SHA-256 recorded in
+each reused row. Keep the index and bodies until upload finishes. This feature
+does not contact the origin or change its objects; upload conflict checks still
+require an exact match and reject a changed immutable representation.
